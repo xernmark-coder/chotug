@@ -1,0 +1,434 @@
+import React, { useMemo, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Area, AreaChart } from 'recharts';
+import { api, useAuth, inr, num, date, addDays, pctText } from '../lib/api';
+import {
+  AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, useApi, useToast,
+} from '../components/ui';
+
+/* ===========================================================================
+ * WHAT TO BUY — the answer to §2: "system khud bataye kya aur kitna kharidna
+ * hai". One screen, one decision per row, one button to turn it into work.
+ * ======================================================================== */
+export function BuyListPage() {
+  const nav = useNavigate();
+  const toast = useToast();
+  const { branchId, can } = useAuth();
+  const { data, loading, error, reload } = useApi<any>(
+    branchId ? `/planning/requirement-note?branchId=${branchId}` : null, [branchId]);
+
+  const [qtyOverride, setQtyOverride] = useState<Record<string, number>>({});
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [editing, setEditing] = useState<any>(null);
+  const [insightFor, setInsightFor] = useState<any>(null);
+  const [onlyNeeded, setOnlyNeeded] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const items = useMemo(() => {
+    const all = data?.items ?? [];
+    return onlyNeeded ? all.filter((i: any) => i.suggestedQty > 0) : all;
+  }, [data, onlyNeeded]);
+
+  const chosen = items.filter((i: any) => selected[i.productId]);
+
+  const finalQty = (i: any) => qtyOverride[i.productId] ?? i.suggestedQty;
+
+  const createRequirement = async () => {
+    if (!chosen.length) return;
+    const missing = chosen.find((i: any) =>
+      finalQty(i) !== i.suggestedQty && !reasons[i.productId]);
+    if (missing) {
+      toast(`Give a reason for changing the quantity of ${missing.name}`, 'err');
+      setEditing(missing);
+      return;
+    }
+    setSaving(true);
+    try {
+      const r = await api.post<any>('/planning/requirements', {
+        branchId,
+        requiredDate: addDays(1),
+        priority: chosen.some((i: any) => i.urgency === 'URGENT') ? 'URGENT' : 'NORMAL',
+        source: 'LOW_STOCK',
+        lines: chosen.map((i: any) => ({
+          productId: i.productId, uom: i.uom,
+          finalQty: finalQty(i), suggestedQty: i.suggestedQty,
+          suggestedBy: 'RULE', suggestionReason: i.reasons,
+          editReason: reasons[i.productId] ?? null,
+          currentStock: i.currentStock, availableStock: i.availableStock,
+          openPoQty: i.openPoQty, avgDailySale: i.avgDailySale,
+          leadTimeDays: i.leadTimeDays, minStock: i.minStock, maxStock: i.maxStock,
+          advanceOrderQty: i.advanceOrderQty,
+        })),
+      });
+      toast(`Requirement ${r.req_no} created with ${r.lineCount} product(s)`, 'ok');
+      nav(`/requirements/${r.id}`);
+    } catch (e: any) {
+      toast(e.message, 'err');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const cols: Col<any>[] = [
+    {
+      key: 'sel', head: '', width: 36,
+      render: (i) => (
+        <input type="checkbox" style={{ width: 18, height: 18 }}
+          checked={!!selected[i.productId]}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => setSelected((s) => ({ ...s, [i.productId]: e.target.checked }))} />
+      ),
+    },
+    {
+      key: 'p', head: 'Product',
+      render: (i) => (
+        <div>
+          <b>{i.name}</b>
+          {i.nameHi ? <span className="muted small"> · {i.nameHi}</span> : null}
+          <div className="small muted">{i.sku}</div>
+        </div>
+      ),
+    },
+    {
+      key: 'why', head: 'Why', width: 150,
+      render: (i) => (
+        <div className="row wrap" style={{ gap: 4 }}>
+          {i.triggers.length === 0 ? <span className="small muted">—</span> : null}
+          {i.triggers.map((t: string) => (
+            <Chip key={t} tone={t === 'LOW_STOCK' ? 'danger' : t === 'ADVANCE_ORDER' ? 'primary' : 'warn'}>
+              {t.replace(/_/g, ' ').toLowerCase()}
+            </Chip>
+          ))}
+        </div>
+      ),
+    },
+    { key: 'st', head: 'Stock', num: true, render: (i) => (
+      <div>{num(i.currentStock, 0)}
+        <div className="small muted">{i.openPoQty > 0 ? `+${num(i.openPoQty, 0)} on order` : 'nothing on order'}</div>
+      </div>
+    ) },
+    { key: 'sale', head: 'Sells/day', num: true, render: (i) => num(i.avgDailySale, 0) },
+    { key: 'cov', head: 'Cover', num: true, render: (i) => (
+      <Chip tone={i.daysOfCover < 1 ? 'danger' : i.daysOfCover < i.leadTimeDays ? 'warn' : 'neutral'}>
+        {i.daysOfCover >= 999 ? '—' : `${num(i.daysOfCover, 1)}d`}
+      </Chip>
+    ) },
+    { key: 'sug', head: 'Suggested', num: true, render: (i) => (
+      <b className="mono">{num(i.suggestedQty, 0)} <span className="small muted">{i.uom}</span></b>
+    ) },
+    {
+      key: 'qty', head: 'Order qty', num: true, width: 130,
+      render: (i) => (
+        <div className="row" style={{ justifyContent: 'flex-end', gap: 5 }}>
+          <input className="inline num" style={{ width: 78 }} type="number"
+            value={finalQty(i)}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              setQtyOverride((s) => ({ ...s, [i.productId]: v }));
+              setSelected((s) => ({ ...s, [i.productId]: v > 0 }));
+              if (v !== i.suggestedQty) setEditing(i);
+            }} />
+          {finalQty(i) !== i.suggestedQty ? (
+            <span title={reasons[i.productId] ?? 'Reason needed'}>
+              {reasons[i.productId] ? '📝' : '⚠️'}
+            </span>
+          ) : null}
+        </div>
+      ),
+    },
+    { key: 'rate', head: 'Last rate', num: true, render: (i) => inr(i.lastRate) },
+    {
+      key: 'ai', head: '', width: 60,
+      render: (i) => (
+        <button className="btn sm ghost" onClick={(e) => { e.stopPropagation(); setInsightFor(i); }}>
+          ✨
+        </button>
+      ),
+    },
+  ];
+
+  return (
+    <Layout
+      title="What to buy"
+      subtitle={data ? `${data.needsBuying} product(s) need ordering · calculated from stock, sales and open orders` : 'Calculating…'}
+      actions={
+        <div className="btn-row">
+          <button className="btn sm" onClick={reload}>Recalculate</button>
+          {can('purchase.requirement.create') ? (
+            <button className="btn primary" disabled={!chosen.length || saving} onClick={createRequirement}>
+              {saving ? 'Creating…' : `Create requirement (${chosen.length})`}
+            </button>
+          ) : null}
+        </div>
+      }
+    >
+      <ErrorBanner error={error} />
+      <div className="banner info mb">
+        <span>💡</span>
+        <div>
+          These quantities come from your own stock, the last 28 days of sales, open purchase
+          orders, lead time and expected wastage. Change any number you disagree with — the system
+          will ask why, and it learns from that.
+        </div>
+      </div>
+
+      <div className="search-bar">
+        <label className="check">
+          <input type="checkbox" checked={onlyNeeded} onChange={(e) => setOnlyNeeded(e.target.checked)} />
+          Only show products that need ordering
+        </label>
+        <span className="spacer" />
+        <button className="btn sm" onClick={() => {
+          const next: Record<string, boolean> = {};
+          items.forEach((i: any) => { if (i.suggestedQty > 0) next[i.productId] = true; });
+          setSelected(next);
+        }}>Select all suggested</button>
+      </div>
+
+      <div className="card">
+        <div className="card-body tight">
+          <DataTable
+            rows={items} cols={cols} loading={loading}
+            rowTone={(i) => (i.urgency === 'URGENT' ? 'crit' : i.urgency === 'HIGH' ? 'warn' : undefined)}
+            empty={<Empty icon="👍" title="Nothing needs ordering right now"
+              hint="Uncheck the filter above to see every product." />}
+          />
+        </div>
+      </div>
+
+      {editing ? (
+        <Modal title={`Why are you changing ${editing.name}?`} onClose={() => setEditing(null)}
+          footer={
+            <>
+              <button className="btn" onClick={() => {
+                setQtyOverride((s) => { const n = { ...s }; delete n[editing.productId]; return n; });
+                setEditing(null);
+              }}>Use suggested {num(editing.suggestedQty, 0)}</button>
+              <button className="btn primary" onClick={() => setEditing(null)}
+                disabled={!reasons[editing.productId]}>Save reason</button>
+            </>
+          }>
+          <p className="small muted">
+            Suggested <b>{num(editing.suggestedQty, 0)} {editing.uom}</b>, you entered{' '}
+            <b>{num(finalQty(editing), 0)} {editing.uom}</b>. A short reason keeps the audit trail
+            honest and improves future suggestions.
+          </p>
+          <Field label="Reason">
+            <select value={reasons[editing.productId] ?? ''}
+              onChange={(e) => setReasons((s) => ({ ...s, [editing.productId]: e.target.value }))}>
+              <option value="">Choose a reason…</option>
+              <option value="Festival / event demand expected">Festival or event demand expected</option>
+              <option value="Supplier has limited stock">Supplier has limited stock</option>
+              <option value="Price is unusually good today">Price is unusually good today</option>
+              <option value="Price is too high, buying less">Price is too high, buying less</option>
+              <option value="Storage space is limited">Storage space is limited</option>
+              <option value="Quality issues expected this week">Quality issues expected this week</option>
+              <option value="Known upcoming order">Known upcoming customer order</option>
+            </select>
+          </Field>
+          <ul className="reasons">
+            {editing.reasons.map((r: any) => (
+              <li key={r.code}><span>{r.label}</span><b>{r.value}</b></li>
+            ))}
+          </ul>
+        </Modal>
+      ) : null}
+
+      {insightFor ? <InsightModal item={insightFor} onClose={() => setInsightFor(null)} /> : null}
+    </Layout>
+  );
+}
+
+function InsightModal({ item, onClose }: { item: any; onClose: () => void }) {
+  const { branchId } = useAuth();
+  const { data, loading } = useApi<any>(
+    `/planning/insight/${item.productId}?branchId=${branchId}`, [item.productId]);
+
+  return (
+    <Modal title={`${item.name} — forecast and price`} onClose={onClose} wide
+      footer={<button className="btn" onClick={onClose}>Close</button>}>
+      {loading ? <Loading label="Asking the model…" /> : (
+        <div className="stack">
+          {data?.suggestion ? (
+            <AiBox title="Buy suggestion" confidence={data.suggestion.confidence}
+              usedFallback={data.suggestion.usedFallback}>
+              <div style={{ fontSize: 18, fontWeight: 700 }}>
+                {num(data.suggestion.suggestedQty, 0)} {item.uom}
+              </div>
+              {data.suggestion.narrative ? <p className="small">{data.suggestion.narrative}</p> : null}
+              {data.suggestion.risk ? (
+                <div className="banner warn small"><span>⚠</span><div>{data.suggestion.risk}</div></div>
+              ) : null}
+              <ul className="reasons">
+                {data.suggestion.reasons.map((r: any) => (
+                  <li key={r.code}><span>{r.label}</span><b>{r.value}</b></li>
+                ))}
+              </ul>
+            </AiBox>
+          ) : null}
+
+          {data?.forecast?.points?.length ? (
+            <div className="card">
+              <div className="card-head"><h3>Expected demand, next 7 days</h3></div>
+              <div className="card-body">
+                <ResponsiveContainer width="100%" height={180}>
+                  <AreaChart data={data.forecast.points}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
+                    <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={(d) => date(d).slice(0, 6)} />
+                    <YAxis tick={{ fontSize: 11 }} />
+                    <Tooltip labelFormatter={(l) => date(l)} />
+                    <Area dataKey="p90" stroke="none" fill="#C7D2FE" />
+                    <Area dataKey="p10" stroke="none" fill="#FFFFFF" />
+                    <Line dataKey="p50" stroke="#4338CA" strokeWidth={2} dot={false} />
+                  </AreaChart>
+                </ResponsiveContainer>
+                <div className="small muted">
+                  Model: {data.forecast.model} · average {num(data.forecast.avgDaily, 1)}/day
+                </div>
+              </div>
+            </div>
+          ) : (
+            <Empty icon="📉" title="Not enough sales history to forecast yet" />
+          )}
+
+          {data?.price?.trend && data.price.trend !== 'UNKNOWN' ? (
+            <div className="card">
+              <div className="card-head">
+                <h3>Mandi price</h3>
+                <Chip tone={data.price.trend === 'RISING' ? 'danger' : data.price.trend === 'FALLING' ? 'ok' : 'neutral'}>
+                  {data.price.trend} {pctText(data.price.changePct)}
+                </Chip>
+              </div>
+              <div className="card-body">
+                <ResponsiveContainer width="100%" height={140}>
+                  <LineChart data={data.price.points}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
+                    <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={(d) => date(d).slice(0, 6)} />
+                    <YAxis tick={{ fontSize: 11 }} />
+                    <Tooltip formatter={(v: any) => inr(v)} />
+                    <Line dataKey="price" stroke="#D97706" strokeWidth={2} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+                {data.price.recommendation ? (
+                  <div className="banner info small mt"><span>💡</span><div>{data.price.recommendation}</div></div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/* ======================================================= REQUIREMENTS ==== */
+export function RequirementListPage() {
+  const nav = useNavigate();
+  const [status, setStatus] = useState('');
+  const { data, loading, error } = useApi<any[]>(`/planning/requirements?status=${status}`, [status]);
+
+  return (
+    <Layout title="Requirements" subtitle="What each branch has asked to buy"
+      actions={<button className="btn primary" onClick={() => nav('/buy-list')}>New from buy list</button>}>
+      <ErrorBanner error={error} />
+      <div className="search-bar">
+        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="">All statuses</option>
+          {['DRAFT', 'SUBMITTED', 'APPROVED', 'CONVERTED', 'CLOSED', 'CANCELLED'].map((s) =>
+            <option key={s} value={s}>{s}</option>)}
+        </select>
+      </div>
+      <div className="card"><div className="card-body tight">
+        <DataTable
+          rows={data ?? []} loading={loading}
+          onRowClick={(r: any) => nav(`/requirements/${r.id}`)}
+          rowTone={(r: any) => (r.priority === 'URGENT' ? 'crit' : undefined)}
+          cols={[
+            { key: 'n', head: 'Number', render: (r: any) => <b className="mono">{r.req_no}</b> },
+            { key: 'd', head: 'Needed by', render: (r: any) => date(r.required_date) },
+            { key: 'b', head: 'Branch', render: (r: any) => r.branch_name },
+            { key: 'p', head: 'Priority', render: (r: any) => <Chip value={r.priority} /> },
+            { key: 'src', head: 'Source', render: (r: any) => <span className="small muted">{r.source.replace(/_/g, ' ')}</span> },
+            { key: 'l', head: 'Products', num: true, render: (r: any) => r.line_count },
+            { key: 'q', head: 'Total qty', num: true, render: (r: any) => num(r.total_qty, 0) },
+            { key: 's', head: 'Status', render: (r: any) => <Chip value={r.status} /> },
+            { key: 'u', head: 'Raised by', render: (r: any) => <span className="small">{r.created_by_name}</span> },
+          ]}
+          empty={<Empty icon="📝" title="No requirements yet"
+            hint="Start from the buy list — the system already knows what you are short of." />}
+        />
+      </div></div>
+    </Layout>
+  );
+}
+
+export function RequirementDetailPage() {
+  const { id } = useParams();
+  const nav = useNavigate();
+  const toast = useToast();
+  const { can } = useAuth();
+  const { data, loading, error, reload } = useApi<any>(`/planning/requirements/${id}`, [id]);
+  const [busy, setBusy] = useState(false);
+
+  if (loading) return <Layout title="Requirement"><Loading /></Layout>;
+  if (!data) return <Layout title="Requirement"><ErrorBanner error={error} /></Layout>;
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await api.post(`/planning/requirements/${id}/submit`);
+      toast('Requirement submitted for sourcing', 'ok');
+      reload();
+    } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(false); }
+  };
+
+  return (
+    <Layout title={`Requirement ${data.req_no}`}
+      subtitle={`${data.branch_name} · needed by ${date(data.required_date)}`}
+      actions={
+        <div className="btn-row">
+          <Chip value={data.status} />
+          {data.status === 'DRAFT' && can('purchase.requirement.submit') ? (
+            <button className="btn primary" disabled={busy} onClick={submit}>Submit</button>
+          ) : null}
+          {['APPROVED', 'SUBMITTED'].includes(data.status) && can('purchase.po.create') ? (
+            <button className="btn primary" onClick={() => nav(`/purchase-orders/new?requirementId=${id}`)}>
+              Compare sources &amp; order
+            </button>
+          ) : null}
+        </div>
+      }>
+      <ErrorBanner error={error} />
+      <div className="card">
+        <div className="card-head"><h2>Products requested</h2></div>
+        <div className="card-body tight">
+          <DataTable
+            rows={data.lines ?? []}
+            cols={[
+              { key: 'n', head: '#', width: 40, render: (l: any) => l.line_no },
+              { key: 'p', head: 'Product', render: (l: any) => (
+                <div><b>{l.product_name}</b><div className="small muted">{l.sku}</div></div>
+              ) },
+              { key: 'st', head: 'Stock then', num: true, render: (l: any) => num(l.current_stock, 0) },
+              { key: 'sug', head: 'Suggested', num: true, render: (l: any) => num(l.suggested_qty, 0) },
+              { key: 'f', head: 'Ordered', num: true, render: (l: any) => <b>{num(l.final_qty, 0)} {l.uom}</b> },
+              { key: 'e', head: 'Change reason', render: (l: any) =>
+                l.edit_reason ? <span className="small">{l.edit_reason}</span> : <span className="muted small">—</span> },
+              { key: 'c', head: 'Converted', num: true, render: (l: any) => num(l.converted_qty, 0) },
+              { key: 's', head: 'Status', render: (l: any) => <Chip value={l.line_status} /> },
+            ]}
+          />
+        </div>
+      </div>
+
+      {data.lines?.some((l: any) => l.duplicate_warning) ? (
+        <div className="banner warn mt">
+          <span>⚠</span>
+          <div>Some of these products already have an open requirement. Check before ordering twice.</div>
+        </div>
+      ) : null}
+    </Layout>
+  );
+}
