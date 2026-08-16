@@ -45,6 +45,12 @@ export const config = {
 
 export const pool = new pg.Pool({
   connectionString: config.databaseUrl,
+  /* A managed Postgres reached over the public internet — Render's external
+   * URL, used when running a migration from a laptop — refuses a plaintext
+   * connection. The internal URL inside the provider's own network does not
+   * need TLS and does not present a certificate you can verify, so this is
+   * opt-in per environment rather than always on. */
+  ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : undefined,
   max: Number(process.env.PG_POOL_MAX ?? 12),
   idleTimeoutMillis: 30_000,
   application_name: 'chotug-purchase-api',

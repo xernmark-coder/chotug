@@ -1,39 +1,93 @@
+# ============================================================================
+#  ChotuG ERP — Render blueprint
+#
+#  Three resources: a Postgres database, the Node API, and the built React app
+#  served as a static site. Keep every one of them in the SAME region, or the
+#  API talks to the database over the public internet instead of Render's
+#  private network.
+#
+#  The web build bakes VITE_API_URL into the JavaScript at BUILD time, so the
+#  static site must be re-deployed (not just restarted) whenever the API URL
+#  changes. Both cross-service URLs are `sync: false` because neither is known
+#  until the first deploy has created them.
+# ============================================================================
+
+databases:
+  - name: chotug-postgres
+    databaseName: chotug_erp
+    user: chotug
+    region: singapore
+    plan: free            # free databases are deleted after 30 days — move to
+                          # a paid plan before this carries anything real
+    ipAllowList: []       # private network only; add your IP to run psql
+
 services:
+  # ------------------------------------------------------------------ API --
   - type: web
     name: chotug-api
     runtime: node
-    plan: starter
-    buildCommand: cd server && npm install && npm run build
-    startCommand: cd server && npm start
-    
+    region: singapore
+    plan: starter         # preDeployCommand below needs a paid instance; on
+                          # the free plan, see DEPLOY.md for the alternative
+    rootDir: server
+
+    # --include=dev is not optional. Render sets NODE_ENV=production, and npm
+    # then omits devDependencies by default — which drops typescript, and the
+    # build dies with "tsc: not found".
+    buildCommand: npm ci --include=dev && npm run build
+
+    # Idempotent by design: every file in db/ re-applies safely, so this runs
+    # on each deploy and brings a fresh database all the way up on the first.
+    preDeployCommand: node dist/scripts/migrate.js
+
+    startCommand: npm start
+    healthCheckPath: /api/health
+
     envVars:
-      - key: NODE_ENV
-        value: production
+      - key: NODE_VERSION
+        value: "20"
       - key: DATABASE_URL
         fromDatabase:
           name: chotug-postgres
           property: connectionString
       - key: JWT_SECRET
-        sync: false
+        generateValue: true          # Render generates it; never reuse the dev value
       - key: WEB_ORIGIN
-        sync: false
+        sync: false                  # https://chotug-web.onrender.com — CORS depends on it
+      - key: ACCESS_TTL
+        value: 8h
+      - key: FINANCIAL_YEAR
+        value: "2026-27"
+
+      # --- AI ---------------------------------------------------------------
+      # "rules" needs no key and no network: forecasts, buy quantities and
+      # anomaly detection are computed from your own data. Switch the provider
+      # only once the two model ids below are set to models that provider
+      # actually serves — a Groq deployment pointed at an OpenRouter model id
+      # fails every call and silently falls back.
       - key: AI_PROVIDER
         value: rules
       - key: AI_API_KEY
         sync: false
       - key: AI_MODEL
-        value: meta-llama/llama-3.3-70b-instruct:free
+        sync: false
       - key: AI_VISION_MODEL
-        value: qwen/qwen2.5-vl-72b-instruct:free
+        sync: false
 
+  # ------------------------------------------------------------------ WEB --
   - type: web
     name: chotug-web
     runtime: static
-    plan: starter
-    buildCommand: cd web && npm install && npm run build
-    staticPublishPath: web/dist
-    
+    rootDir: web
+    buildCommand: npm ci --include=dev && npm run build
+    staticPublishPath: dist
+
+    envVars:
+      - key: VITE_API_URL
+        sync: false                  # https://chotug-api.onrender.com — no trailing slash
+
     routes:
+      # Single-page app: every unknown path is handled by the router, not 404.
       - type: rewrite
         source: /*
         destination: /index.html
