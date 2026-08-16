@@ -37,10 +37,3 @@ services:
       - type: rewrite
         source: /*
         destination: /index.html
-
-  - type: postgres
-    name: chotug-postgres
-    plan: starter
-    dbName: chotug_erp
-    user: chotug
-    version: "16"
