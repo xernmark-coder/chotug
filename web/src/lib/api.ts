@@ -3,6 +3,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 /* ---------------------------------------------------------------- API ---- */
 
 const TOKEN_KEY = 'chotug_token';
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:4000';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public detail?: any, public code?: string) {
@@ -12,7 +13,7 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem(TOKEN_KEY);
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(`${API_BASE}/api${path}`, {
     ...opts,
     headers: {
       'Content-Type': 'application/json',
