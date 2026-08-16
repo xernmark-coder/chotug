@@ -41,4 +41,3 @@ services:
   - type: pserv
     name: chotug-postgres
     plan: starter
-    ipAllowList: []
