@@ -38,6 +38,9 @@ services:
         source: /*
         destination: /index.html
 
-  - type: pserv
+  - type: postgres
     name: chotug-postgres
     plan: starter
+    dbName: chotug_erp
+    user: chotug
+    version: "16"
