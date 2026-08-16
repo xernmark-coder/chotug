@@ -1,0 +1,58 @@
+services:
+  - type: web
+    name: chotug-api
+    runtime: node
+    plan: starter
+    buildCommand: cd server && npm install && npm run build
+    startCommand: cd server && npm start
+    port: 4000
+    
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: chotug-postgres
+          property: connectionString
+      - key: JWT_SECRET
+        sync: false
+        value: ${JWT_SECRET}
+      - key: WEB_ORIGIN
+        value: ${FRONTEND_URL}
+      - key: AI_PROVIDER
+        value: ${AI_PROVIDER:-rules}
+      - key: AI_API_KEY
+        value: ${AI_API_KEY}
+      - key: AI_MODEL
+        value: ${AI_MODEL:-meta-llama/llama-3.3-70b-instruct:free}
+      - key: AI_VISION_MODEL
+        value: ${AI_VISION_MODEL:-qwen/qwen2.5-vl-72b-instruct:free}
+
+  - type: web
+    name: chotug-web
+    runtime: static
+    plan: starter
+    buildCommand: cd web && npm install && npm run build
+    staticPublishPath: ./web/dist
+    
+    envVars:
+      - key: VITE_API_URL
+        value: ${BACKEND_URL}
+
+  - type: pserv
+    name: chotug-postgres
+    plan: starter
+    ipAllowList: []
+    dbName: chotug_erp
+    user: chotug
+    initializers:
+      - source:
+          type: repo
+          repoName: ${REPO}
+          branch: ${BRANCH}
+          path: db/01_schema.sql
+      - source:
+          type: repo
+          repoName: ${REPO}
+          branch: ${BRANCH}
+          path: db/02_seed.sql
