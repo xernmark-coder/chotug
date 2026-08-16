@@ -75,10 +75,12 @@ receivingRouter.post('/gate-entries', requires('receiving.gate.create'), h(async
       const veh = v[0];
       if (veh) {
         if (veh.status === 'BLOCKED') throw ApiError.rule(`Vehicle ${veh.reg_no} is blocked from entry.`);
+        // `date` columns come back as 'YYYY-MM-DD' text (see db.ts), which
+        // compares correctly as a string against today's calendar day.
         const today = new Date().toISOString().slice(0, 10);
-        if (veh.fitness_expiry && veh.fitness_expiry.toISOString?.().slice(0, 10) < today) warnings.push('Fitness certificate expired');
-        if (veh.insurance_expiry && veh.insurance_expiry.toISOString?.().slice(0, 10) < today) warnings.push('Insurance expired');
-        if (veh.puc_expiry && veh.puc_expiry.toISOString?.().slice(0, 10) < today) warnings.push('PUC expired');
+        if (veh.fitness_expiry && veh.fitness_expiry < today) warnings.push('Fitness certificate expired');
+        if (veh.insurance_expiry && veh.insurance_expiry < today) warnings.push('Insurance expired');
+        if (veh.puc_expiry && veh.puc_expiry < today) warnings.push('PUC expired');
       }
     }
 
@@ -276,13 +278,23 @@ receivingRouter.post('/gate-entries/:id/weighments', requires('receiving.weighme
     const effGross = input.grossKg ?? (input.kind === 'TARE' ? Number(priorGross ?? 0) : 0);
     const effTare = input.tareKg ?? (input.kind === 'GROSS' ? Number(priorTare ?? 0) : 0);
 
-    const net = netWeight({
-      grossKg: effGross || null,
-      tareKg: effTare || null,
-      containerCount: input.containerCount ?? null,
-      containerTareKg: containerTare,
-      packingTareKg: input.packingTareKg ?? null,
-    });
+    /* A two-weighment cycle is not a measurement until BOTH readings exist.
+     * Treating a lone GROSS as one recorded net_kg = the entire loaded lorry:
+     * it made every first weighment look like a +472% CRITICAL variance, and
+     * the QC sampling plan — which reads net_kg — sized its sample against the
+     * truck rather than the produce. Leave net NULL until the cycle closes. */
+    const cycleComplete = input.method !== 'TWO_WEIGHMENT'
+      || (effGross > 0 && effTare > 0);
+
+    const net = cycleComplete
+      ? netWeight({
+        grossKg: effGross || null,
+        tareKg: effTare || null,
+        containerCount: input.containerCount ?? null,
+        containerTareKg: containerTare,
+        packingTareKg: input.packingTareKg ?? null,
+      })
+      : null;
 
     // Expected weight from the PO (§11) — variance is against a commitment.
     let expectedKg: number | null = null;
@@ -294,7 +306,10 @@ receivingRouter.post('/gate-entries/:id/weighments', requires('receiving.weighme
     }
 
     const tolerancePct = Number(await getSetting(tx, req.actor, 'purchase.weight_tolerance_pct', 2));
-    const v = weightVariance(expectedKg, net, tolerancePct);
+    // No net yet means nothing to compare: an incomplete cycle has no variance.
+    const v = net === null
+      ? { varianceKg: 0, variancePct: 0, band: 'GREEN' as const, breached: false }
+      : weightVariance(expectedKg, net, tolerancePct);
 
     /* §11 — ck_weigh_variance_approval: a breached tolerance on anything other
      * than the first gross reading cannot be stored unapproved. If the person
@@ -328,7 +343,7 @@ receivingRouter.post('/gate-entries/:id/weighments', requires('receiving.weighme
       [req.actor.companyId, g.branch_id, g.warehouse_id, g.id, weighmentNo, seq, input.kind, input.method,
        input.grossKg ?? null, input.tareKg ?? null, input.containerTypeId ?? null,
        input.containerCount ?? null, containerTare, input.packingTareKg ?? null,
-       net > 0 ? net : null, input.captureMode, input.scaleDeviceId ?? null,
+       net !== null && net > 0 ? net : null, input.captureMode, input.scaleDeviceId ?? null,
        // ck_weigh_manual_reason: a typed weight must not claim a device reading
        input.captureMode === 'MANUAL' ? null : (input.rawReading ?? null),
        expectedKg, v.varianceKg, v.variancePct, tolerancePct,
@@ -347,7 +362,7 @@ receivingRouter.post('/gate-entries/:id/weighments', requires('receiving.weighme
         severity: v.band === 'CRITICAL' ? 'CRITICAL' : 'HIGH',
         entityType: 'gate_entry', entityId: g.id,
         title: `Weight variance ${v.variancePct}% on ${g.gate_no}`,
-        message: `Expected ${expectedKg} kg, weighed ${net} kg (${v.band}).`,
+        message: `Expected ${expectedKg} kg, weighed ${net ?? 0} kg (${v.band}).`,
         meta: { expectedKg, net, band: v.band },
       });
       if (v.band === 'RED' || v.band === 'CRITICAL') {
@@ -371,7 +386,7 @@ receivingRouter.post('/gate-entries/:id/weighments', requires('receiving.weighme
         branchId: g.branch_id, warehouseId: g.warehouse_id,
         queueKey: 'QC_PENDING', docType: 'GATE_ENTRY', docId: g.id, docNo: g.gate_no,
         title: `Quality check ${g.gate_no}`,
-        subtitle: `${net} kg net from ${g.vehicle_reg_captured}`,
+        subtitle: `${net ?? 0} kg net from ${g.vehicle_reg_captured}`,
         severity: v.breached ? 'warn' : 'normal',
         requiredPermission: 'quality.inspection.create', slaMinutes: 60,
       });
@@ -404,9 +419,16 @@ receivingRouter.get('/gate-entries/:id/qc-plan/:productId', h(async (req) => {
             is_critical, is_mandatory, weight, requires_photo, ai_assisted, help_text
        FROM qc_parameters WHERE template_id = $1 ORDER BY seq`, [row.template_id]);
 
+  /* The LATEST completed net, not a SUM. Weighments are append-only, so a
+   * re-weigh adds a row rather than replacing one — summing them counts the
+   * same lorry twice and sizes the QC sample against a lot that never
+   * existed. The most recent closed cycle is the lot in front of the
+   * inspector. */
   const [lot] = await query(req.actor,
-    `SELECT COALESCE(SUM(w.net_kg),0) AS net_kg
-       FROM weighments w WHERE w.gate_entry_id = $1 AND w.net_kg IS NOT NULL`, [req.params.id]);
+    `SELECT COALESCE(w.net_kg, 0) AS net_kg
+       FROM weighments w
+      WHERE w.gate_entry_id = $1 AND w.net_kg IS NOT NULL
+      ORDER BY w.seq DESC LIMIT 1`, [req.params.id]);
 
   const [supRisk] = await query(req.actor,
     `SELECT COALESCE(sc.rejection_pct,0) AS rejection_pct,
@@ -1109,10 +1131,15 @@ receivingRouter.post('/putaway/:id/confirm', requires('receiving.putaway.confirm
       `UPDATE bins SET current_fill_kg = current_fill_kg + $2 WHERE id=$1`,
       [input.actualBinId, t.weight_kg ?? 0]);
 
-    await tx.query(
-      `UPDATE stock_ledger SET bin_id = $2
-        WHERE ref_line_id = $1 AND txn_type='GRN' AND bin_id IS NULL`,
-      [t.grn_line_id, input.actualBinId]);
+    /* The ledger is append-only — trg_ledger_no_update forbids every UPDATE,
+     * which is the point of it. This used to try to stamp bin_id onto the
+     * posted GRN row, so confirming a put-away raised
+     * "immutable_row: stock_ledger rows cannot be update once written" every
+     * single time and no put-away had ever completed.
+     *
+     * The ledger records a movement of quantity, not a shelf. Where the stock
+     * physically sits lives on putaway_tasks.actual_bin_id and in the bin's
+     * own fill, both written above, and nothing read ledger.bin_id at all. */
 
     await resolveTask(tx, req.actor, 'PUTAWAY_PENDING', 'PUTAWAY', t.id);
     await emit(tx, req.actor, 'putaway', t.id, 'putaway.done',

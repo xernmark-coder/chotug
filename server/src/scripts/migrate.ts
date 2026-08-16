@@ -31,6 +31,12 @@ async function main() {
   }
   await run('03_migration_fixes.sql');
   await run('02_seed.sql');
+  // Farming is additive and idempotent, so it re-applies safely every time.
+  await run('04_farming.sql');
+  await run('05_farming_seed.sql');
+  await run('06_stock_issue.sql');
+  await run('07_flow_fixes.sql');
+  await run('08_fleet_masters.sql');
   console.log('\nSchema and master data are in place.');
   console.log('Next: npm run seed   (sets demo passwords and generates demand history)');
   await pool.end();

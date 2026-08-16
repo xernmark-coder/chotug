@@ -355,6 +355,8 @@ insightsRouter.get('/reports/:key', requires('reports.purchase.view'), h(async (
         JOIN suppliers s ON s.id = o.supplier_id
        WHERE o.company_id=$1 AND o.status IN ('APPROVED','CONFIRMED','PART_RECEIVED')
          AND pl.line_status IN ('OPEN','PART_RECEIVED')
+         AND ($2::date IS NULL OR o.order_date >= $2::date)
+         AND ($3::date IS NULL OR o.order_date <= $3::date)
          AND ($4::uuid IS NULL OR o.branch_id = $4)
        ORDER BY (CURRENT_DATE - o.expected_date) DESC LIMIT 5000`,
 
@@ -363,6 +365,13 @@ insightsRouter.get('/reports/:key', requires('reports.purchase.view'), h(async (
              v.available_qty, v.effective_expiry, v.days_to_expiry, v.landed_rate, v.status
         FROM v_stock_position v
        WHERE v.company_id=$1
+         -- Stock is a position, not a period: the date range reads as
+         -- "what expires between these dates", which is the question a
+         -- warehouse actually asks of this report.
+         AND ($2::date IS NULL OR v.effective_expiry >= $2::date)
+         AND ($3::date IS NULL OR v.effective_expiry <= $3::date)
+         AND ($4::uuid IS NULL OR v.warehouse_id IN
+              (SELECT w.id FROM warehouses w WHERE w.branch_id = $4))
        ORDER BY v.days_to_expiry NULLS LAST, v.product_name LIMIT 5000`,
 
     'ai-acceptance': `
@@ -373,7 +382,11 @@ insightsRouter.get('/reports/:key', requires('reports.purchase.view'), h(async (
 
   const sql = REPORTS[req.params.key];
   if (!sql) throw ApiError.notFound(`Unknown report "${req.params.key}"`);
-  const rows = await query(req.actor, sql, p);
+  // Not every report takes a date range or a branch. Pass only as many
+  // parameters as the query actually references, so a report that ignores the
+  // filters cannot fail with "bind message supplies 4 parameters".
+  const maxParam = Math.max(0, ...[...sql.matchAll(/\$(\d+)/g)].map((m) => Number(m[1])));
+  const rows = await query(req.actor, sql, p.slice(0, maxParam));
   return { key: req.params.key, count: rows.length, rows };
 }));
 

@@ -396,11 +396,26 @@ function CompareModal({ line, suppliers, onClose, onPick }: {
         The cheapest rate is often not the cheapest purchase. This compares the true landed rate
         after commission, transport, expected rejection and the value of credit terms.
       </p>
+      {/* The rate is per unit but the charges are for the whole load — that is
+          how a mandi quotes, and leaving it unlabelled is how the wrong number
+          gets typed into the wrong box. */}
+      <div className="banner info mb">
+        <span>ℹ</span>
+        <div className="small">
+          <b>Rate is ₹ per {line.uom}.</b> Commission, transport and loading are
+          <b> ₹ for the whole load</b> of {num(line.qty, 0)} {line.uom} — not per {line.uom}.
+          The system divides them out for you.
+        </div>
+      </div>
       <div className="table-wrap mb">
         <table className="data">
           <thead><tr>
-            <th>Supplier</th><th className="num">Rate</th><th className="num">Commission</th>
-            <th className="num">Transport</th><th className="num">Loading</th><th className="num">Credit</th>
+            <th>Supplier</th>
+            <th className="num">Rate<div className="small muted">₹ / {line.uom}</div></th>
+            <th className="num">Commission<div className="small muted">₹ whole load</div></th>
+            <th className="num">Transport<div className="small muted">₹ whole load</div></th>
+            <th className="num">Loading<div className="small muted">₹ whole load</div></th>
+            <th className="num">Credit<div className="small muted">days</div></th>
           </tr></thead>
           <tbody>
             {quotes.map((q, i) => (
@@ -428,8 +443,12 @@ function CompareModal({ line, suppliers, onClose, onPick }: {
           <div className="table-wrap mt">
             <table className="data">
               <thead><tr>
-                <th>#</th><th>Supplier</th><th className="num">Quoted</th><th className="num">Landed</th>
-                <th className="num">Rejection</th><th className="num">On time</th><th></th>
+                <th>#</th><th>Supplier</th>
+                <th className="num">Quoted<div className="small muted">₹ / {line.uom}</div></th>
+                <th className="num">Landed<div className="small muted">₹ / {line.uom}</div></th>
+                <th className="num">Rejection<div className="small muted">%</div></th>
+                <th className="num">On time<div className="small muted">%</div></th>
+                <th></th>
               </tr></thead>
               <tbody>
                 {result.quotes.map((q: any) => (

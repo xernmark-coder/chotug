@@ -10,6 +10,8 @@ import { planningRouter } from './modules/planning.js';
 import { receivingRouter } from './modules/receiving.js';
 import { costingRouter } from './modules/costing.js';
 import { insightsRouter } from './modules/insights.js';
+import { farmingRouter } from './modules/farming.js';
+import { inventoryRouter } from './modules/inventory.js';
 
 const app = express();
 
@@ -35,6 +37,8 @@ app.use('/api/planning', planningRouter);
 app.use('/api/receiving', receivingRouter);
 app.use('/api/costing', costingRouter);
 app.use('/api/insights', insightsRouter);
+app.use('/api/farming', farmingRouter);
+app.use('/api/inventory', inventoryRouter);
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'No such endpoint' }));
 app.use(errorHandler);

@@ -578,3 +578,98 @@ Menu items you have no permission for are not rendered at all. A gate executive 
 | **Warehouse Executive** | My Work (GRN + put-away) | Post receipt → labels → put away by FEFO |
 | **Finance Executive** | My Work (invoices) | Capture invoice → 3-way match → payable, or hold and debit note |
 | **Owner** | Dashboard | Everything, plus the audit trail and AI governance |
+
+---
+
+# Farming
+
+Two audiences, deliberately different interfaces.
+
+**The field** — FARM TODAY, the plot QR screen, HARVEST. Big targets, three buttons, no forms,
+usable one-handed in sunlight. A worker is never shown a crop calendar, a cost, or a dropdown he
+cannot answer from where he is standing.
+
+**The desk** — Crops, Crop Planning, Farm Control. The same dense tables, chips and KPI tiles the
+purchase module uses, so a manager moving between the two is not relearning the product.
+
+Colour means the same thing everywhere: 🟢 fine · 🟡 look at this · 🔴 act now. (GREEN renders in the
+app's existing cyan "ok" token — the palette deliberately avoids green.)
+
+## Farm Today — `/farm`
+
+The field worker's entire application.
+
+| Element | What it does |
+|---|---|
+| Weather banner | The *decision*, not the data: "Rain expected — hold irrigation", "Heat risk at 39°C". Red banners also raise an alert for the manager. |
+| Progress bar | Today's jobs done / total, plus how many are overdue and how many the weather held. |
+| Task card | One job. **DONE** · **PROBLEM** · **SKIP**, and nothing else. Harvest cards also offer *Weigh & grade*; inspection cards offer *Crop check*. |
+| DONE on a job needing a quantity | Opens one field — how much was actually used. Date, staff, farm and plot are attached without asking. |
+| PROBLEM | Pick from eight plain-language reasons (Hindi alongside), optional photo. Writes the task status, a crop observation and a manager alert in one action. |
+| Plot cards | Per plot: crop, day number, the water answer (💧 Today / ⏸ Hold / Not due) and the harvest countdown. Click to open the crop. |
+| DAY CLOSE | One button. The system reads the day's tasks, harvest, expenses, problems and health and writes the report. |
+
+## Plot QR — `/farm/plot/:qr`
+
+What the QR stuck on a plot gate resolves to. Crop, sowing date, last watering, last spray, last
+fertiliser, next harvest, health, and today's job *on this plot only*. This is the screen that stops
+entries landing on the wrong crop.
+
+## Start a crop — `/farm/crops/new`
+
+Four answers: crop, plot, area, sowing date. The right-hand panel previews what will happen —
+harvest window, expected yield, expected cost, cost per kg, and a count of the irrigation,
+fertiliser, spray and inspection jobs about to be created. Nothing is written until you commit; then
+the whole calendar is created in one transaction. If this crop has finished on this farm before, the
+yield estimate is blended with what it actually gave, and the panel says so.
+
+## Crop file — `/farm/crops/:id`
+
+Four KPIs (health, harvest countdown, harvested vs expected, cost per kg) and four tabs:
+
+- **Calendar** — every job, its colour, what was actually used, who did it, and any weather
+  reschedule ("↻ Rain expected — irrigation held by the system").
+- **Photo diary** — a timeline that builds itself from sowing, crop checks and harvests.
+- **Harvests** — each pick with its grade split.
+- **Cost & profit** — where the money went by type, spend against estimate, and actual cost per kg.
+  Hidden server-side without `farming.cost.view`.
+
+While picking is still open, "harvested vs expected" reads as progress, not as a shortfall — a
+multi-pick crop one day into a two-week window is early, not short.
+
+## Harvest — `/farm/harvest`
+
+Scan/select the plot → weigh → grade → print. The readout shows net weight with the crate tare
+already subtracted from the crate master. Four grades only, each showing where it goes (Retail /
+B2B / Processing / Waste); they must add up to the net weight. Leave them all blank and the lot is
+grade A. Waste is booked as a loss automatically. The result is a crate label carrying farm, plot,
+crop, harvest number, date, crop age and net weight — none of which anyone typed.
+
+## Farm → Warehouse — `/farm/dispatch`
+
+**Send**: pick grades off ready harvests (waste never travels), choose the warehouse and vehicle.
+**Weigh & receive** (warehouse role): enter what actually arrived per grade. The banner shows farm
+sent / warehouse received / variance live. Beyond tolerance the server refuses to save without a
+written reason, then books the gap as a loss against the crop. On save it creates batches, labels,
+a `TRANSFER_IN` ledger row and stock balances — the produce is now ordinary stock.
+
+## Farm Control — `/farm/dashboard`
+
+The owner's screen: farm health as one colour, today's jobs done/total, harvest today, critical
+problems, the 7-day forecast chart, cost per kg measured over *finished* crops, live crops by plot,
+and problems reported from the field with who reported them.
+
+## Crop Planning — `/farm/planning`
+
+- **Next crop** — 60-day demand from sales history against expected farm production, with margin,
+  and rotation/season/water as explicit vetoes ("Not a kharif crop", "Should not follow TOMATO").
+- **Buy vs grow** — this farm's measured cost per kg against today's market rate, with a risk
+  premium on growing, and a verdict the owner can overrule.
+- **Harvest forecast** — today / tomorrow / next 3 / next 7 days, and by product.
+- **Staff** — computed from completion, punctuality, red issues, grade-A share and waste. Never
+  typed by a manager.
+
+## Farms & Plots — `/farm/setup`
+
+Filled in once. Farms with their water source, plots with auto-generated QR codes to print and
+stick on gates, and machines with a three-colour status and a service date.

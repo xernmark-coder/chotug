@@ -539,14 +539,29 @@ export const TRANSITIONS = {
   },
 } as const;
 
+/**
+ * Named so the HTTP layer can recognise it without this file importing from
+ * platform/ — the domain stays pure, but an illegal transition still reaches
+ * the user as the sentence written here rather than as a generic 500.
+ */
+export class TransitionError extends Error {
+  name = 'TransitionError';
+  constructor(message: string, public machine: string, public from: string, public to: string) {
+    super(message);
+  }
+}
+
 export function assertTransition(
   machine: keyof typeof TRANSITIONS, from: string, to: string,
 ): void {
   const allowed = (TRANSITIONS[machine] as Record<string, readonly string[]>)[from];
-  if (!allowed) throw new Error(`Unknown ${machine} status "${from}"`);
+  if (!allowed) {
+    throw new TransitionError(`Unknown ${machine} status "${from}"`, machine, from, to);
+  }
   if (!allowed.includes(to)) {
-    throw new Error(
+    throw new TransitionError(
       `A ${machine.toLowerCase()} in "${from}" cannot move to "${to}". Allowed: ${allowed.join(', ') || 'nothing — it is final'}.`,
+      machine, from, to,
     );
   }
 }

@@ -42,6 +42,13 @@ const STATUS_TONE: Record<string, string> = {
   URGENT: 'danger', HIGH: 'warn', NORMAL: 'neutral', LOW: 'neutral',
   MEDIUM: 'warn', OPEN: 'warn', ACK: 'primary', RESOLVED: 'ok',
   CONVERTED: 'primary', DONE: 'ok', EXCEPTION: 'danger', EXPECTED: 'primary',
+  // Farming. GREEN already maps to the cyan "ok" token above; YELLOW joins it
+  // here so the module's 🟢/🟡/🔴 vocabulary needs no second palette.
+  YELLOW: 'warn', PLANNED: 'primary', GROWING: 'primary', HARVESTING: 'warn',
+  PROBLEM: 'danger', SKIPPED: 'neutral', FAILED: 'danger', READY: 'ok',
+  DISPATCHED: 'primary', PART_DISPATCHED: 'warn',
+  IDLE: 'neutral', CROPPED: 'primary', RESTING: 'neutral',
+  AVAILABLE: 'ok', IN_USE: 'primary', MAINTENANCE_DUE: 'warn', BREAKDOWN: 'danger',
 };
 
 export function Chip({ value, tone, children }: { value?: string | null; tone?: string; children?: React.ReactNode }) {
@@ -189,6 +196,7 @@ export function Layout({ children, title, subtitle, actions, touch }: {
   const nav = useNavigate();
   const [queueCount, setQueueCount] = useState(0);
   const [alertCount, setAlertCount] = useState(0);
+  const [farmTasks, setFarmTasks] = useState(0);
 
   useEffect(() => {
     const load = async () => {
@@ -199,6 +207,9 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         ]);
         setQueueCount(q.length);
         setAlertCount(a.length);
+        // The farm queue carries a count of jobs due, not a count of rows.
+        setFarmTasks(q.filter((t) => t.queue_key === 'FARM_TASK')
+          .reduce((n, t) => n + Number(t.payload?.due ?? 1), 0));
       } catch { /* the badge is not worth an error toast */ }
     };
     void load();
@@ -225,6 +236,21 @@ export function Layout({ children, title, subtitle, actions, touch }: {
       ],
     },
     {
+      label: 'Farm',
+      items: [
+        // FARM TODAY first and deliberately: for a field worker this one line
+        // is the entire product.
+        { to: '/farm', label: 'Farm Today', icon: '🌤️', perms: ['farming.task.complete'], badge: farmTasks },
+        { to: '/farm/dashboard', label: 'Farm Control', icon: '🏡', perms: ['farming.report.view'] },
+        { to: '/farm/crops', label: 'Crops', icon: '🌾', perms: ['farming.crop.start', 'farming.report.view'] },
+        { to: '/farm/harvest', label: 'Harvest', icon: '🧺', perms: ['farming.harvest.record'] },
+        { to: '/farm/dispatch', label: 'Farm → Warehouse', icon: '🚜', perms: ['farming.dispatch.create', 'farming.dispatch.receive'] },
+        { to: '/farm/expenses', label: 'Farm Expenses', icon: '🧾', perms: ['farming.expense.create', 'farming.cost.view'] },
+        { to: '/farm/planning', label: 'Crop Planning', icon: '🧭', perms: ['farming.report.view'] },
+        { to: '/farm/setup', label: 'Farms & Plots', icon: '📍', perms: ['farming.farm.manage', 'farming.report.view'] },
+      ],
+    },
+    {
       label: 'Receive',
       items: [
         { to: '/arrivals', label: 'Expected Arrivals', icon: '🚛', perms: ['receiving.gate.create'] },
@@ -232,6 +258,7 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         { to: '/grns', label: 'Goods Receipts', icon: '📥', perms: ['receiving.grn.create', 'receiving.grn.submit'] },
         { to: '/putaway', label: 'Put-away', icon: '🏷️', perms: ['receiving.putaway.confirm'] },
         { to: '/stock', label: 'Stock & Batches', icon: '🧺' },
+        { to: '/fleet', label: 'Vehicles & Drivers', icon: '🚚', perms: ['master.vehicle.manage', 'receiving.gate.create'] },
       ],
     },
     {

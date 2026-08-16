@@ -10,7 +10,8 @@ export async function nextDocNo(
   branchId: string,
   docType:
     | 'REQ' | 'RFQ' | 'IND' | 'PO' | 'GATE' | 'WGT' | 'QC' | 'GRN'
-    | 'BATCH' | 'LABEL' | 'INV' | 'DN' | 'CN' | 'PUT',
+    | 'BATCH' | 'LABEL' | 'INV' | 'DN' | 'CN' | 'PUT'
+    | 'CROP' | 'HARV' | 'FDN' | 'ISS',
 ): Promise<string> {
   const { rows } = await tx.query('SELECT next_doc_no($1,$2,$3,$4) AS no', [
     actor.companyId, branchId, docType, config.fy,
@@ -46,7 +47,8 @@ export async function emit(
 export type QueueKey =
   | 'REQUIREMENT_REVIEW' | 'AI_SUGGESTION' | 'APPROVAL' | 'EXPECTED_ARRIVAL'
   | 'WEIGH_PENDING' | 'QC_PENDING' | 'GRN_PENDING' | 'PUTAWAY_PENDING'
-  | 'INVOICE_MATCH' | 'FINANCE_EXCEPTION' | 'ALERT';
+  | 'INVOICE_MATCH' | 'FINANCE_EXCEPTION' | 'ALERT'
+  | 'FARM_TASK' | 'FARM_HARVEST' | 'FARM_RECEIVE';
 
 export async function pushTask(
   tx: Tx,
@@ -111,14 +113,21 @@ export async function raiseAlert(
   },
 ) {
   const dedupe = `${a.alertType}:${a.entityType ?? ''}:${a.entityId ?? ''}`;
+  /* The guard used to be "not raised in the last 60 minutes", but the index
+   * behind it — uq_alerts_dedupe — is unique on (company_id, dedupe_hash)
+   * WHERE status='OPEN' with no time limit at all. An alert still open after an
+   * hour therefore passed the guard and then hit the index, and the whole
+   * request 409'd with a raw constraint name. Let the database arbitrate: one
+   * open alert per subject, and a re-raise refreshes it instead of failing. */
   await tx.query(
     `INSERT INTO alerts (company_id, branch_id, alert_type, severity, entity_type, entity_id,
                          title, message, dedupe_hash, meta)
-     SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10
-      WHERE NOT EXISTS (
-        SELECT 1 FROM alerts
-         WHERE company_id = $1 AND dedupe_hash = $9 AND status = 'OPEN'
-           AND created_at > now() - interval '60 minutes')`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     ON CONFLICT (company_id, dedupe_hash) WHERE status = 'OPEN' AND dedupe_hash IS NOT NULL
+     DO UPDATE SET severity = EXCLUDED.severity,
+                   title    = EXCLUDED.title,
+                   message  = EXCLUDED.message,
+                   meta     = EXCLUDED.meta`,
     [
       actor.companyId, a.branchId ?? null, a.alertType, a.severity,
       a.entityType ?? null, a.entityId ?? null, a.title, a.message, dedupe,
@@ -154,6 +163,73 @@ const FACT_BY_TRIGGER: Record<string, keyof ApprovalFacts> = {
   BACKDATE: 'backdate',
 };
 
+const inr = (n: number) => `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+
+/**
+ * Turns a trigger code into the sentence a human would say. "RATE_VARIANCE" is
+ * a fact about the database; "rate is 12% above the last purchase" is a fact
+ * about the business, and it is the second one that tells someone what to do.
+ */
+export function explainTrigger(code: string, observed: unknown, threshold: number | null): string {
+  const n = Number(observed);
+  switch (code) {
+    // The amount is already in the subject line, so repeating it here just
+    // makes the sentence longer. Say what was breached, not what it was.
+    case 'VALUE':
+      return threshold ? `over the ${inr(threshold)} approval limit` : `by value`;
+    case 'RATE_VARIANCE':
+      return `rate is ${Math.round(n * 10) / 10}% away from the last purchase`;
+    case 'QTY_VARIANCE':
+      return `quantity is ${Math.round(n * 10) / 10}% off what was ordered`;
+    case 'WEIGHT_VARIANCE':
+      return `weight is ${Math.round(n * 10) / 10}% off the expected load`;
+    case 'LANDING_COST':
+      return `landed cost jumped ${Math.round(n * 10) / 10}%`;
+    case 'NEW_SUPPLIER': return 'first order with this supplier';
+    case 'URGENT':       return 'marked urgent';
+    case 'BACKDATE':     return 'posted with an earlier date';
+    default:             return code.replace(/_/g, ' ').toLowerCase();
+  }
+}
+
+/**
+ * §9 — can this person sign this off themselves?
+ *
+ * Approval exists to put a *second, more senior* pair of eyes on a document.
+ * When the person who raised it already holds the authority the rule is asking
+ * for, there is no second pair of eyes to find — the document simply sits in a
+ * queue that only they can clear, which is how work stops rather than how
+ * control happens.
+ *
+ * So: within your own level AND your own value limit, it approves on submit and
+ * the audit trail records that you approved it yourself. Above either of them,
+ * maker–checker still applies and somebody else must look.
+ */
+export function withinOwnAuthority(
+  actor: Actor, requiredLevel: number, value: number | null | undefined, docType: string,
+): boolean {
+  if (actor.permissions.has('admin.override')) return true;
+  if (actor.limits.maxApprovalLevel < requiredLevel) return false;
+
+  // Which ceiling applies depends on the document. An invoice mismatch has its
+  // own limit in role_limits; checking it against the PO limit would quietly
+  // let finance wave through a mismatch far larger than they are trusted with.
+  const ceiling =
+    docType === 'INVOICE' ? actor.limits.maxInvoiceMismatchValue
+    : docType === 'PO' || docType === 'REQUIREMENT' ? actor.limits.maxPoValue
+    : null;   // no money ceiling defined for this document — level alone decides
+
+  if (value != null && ceiling != null && value > ceiling) return false;
+  return true;
+}
+
+const DOC_LABEL: Record<string, string> = {
+  PO: 'purchase order', REQUIREMENT: 'requirement', GRN: 'goods receipt',
+  INVOICE: 'invoice', RATE_REVISION: 'rate revision', GATE_EXCEPTION: 'gate exception',
+  WEIGHT_VARIANCE: 'weight variance', QC_OVERRIDE: 'quality override',
+  GRN_REVERSAL: 'receipt reversal', SUPPLIER_STATUS: 'supplier status change',
+};
+
 export async function requestApprovals(
   tx: Tx,
   actor: Actor,
@@ -161,11 +237,23 @@ export async function requestApprovals(
     docType: 'REQUIREMENT' | 'PO' | 'GRN' | 'INVOICE' | 'RATE_REVISION'
       | 'GATE_EXCEPTION' | 'WEIGHT_VARIANCE' | 'QC_OVERRIDE' | 'GRN_REVERSAL' | 'SUPPLIER_STATUS';
     docId: string;
+    /** Who and how much, in words — "₹1,24,500 for Sahyadri Wholesale". */
+    subject?: string;
     docNo: string | null;
     branchId: string;
   },
   facts: ApprovalFacts,
-): Promise<{ level: number; triggers: string[] }> {
+): Promise<{
+  /** 0 means nothing to wait for — either no rule fired, or the submitter
+   *  already held the authority the rule was asking for. */
+  level: number;
+  triggers: string[];
+  /** The same triggers, said in words, for the screen and the audit note. */
+  reasons: string[];
+  selfApproved: boolean;
+  /** Set when selfApproved: the level this would have needed from anyone else. */
+  wouldHaveNeededLevel?: number;
+}> {
   const { rows: rules } = await tx.query(
     `SELECT * FROM approval_rules
       WHERE company_id = $1 AND is_active
@@ -197,11 +285,22 @@ export async function requestApprovals(
     }
   }
 
-  if (matched.length === 0) return { level: 0, triggers: [] };
+  if (matched.length === 0) return { level: 0, triggers: [], reasons: [], selfApproved: false };
 
   const level = Math.max(...matched.map((m) => m.level));
   const top = matched.filter((m) => m.level === level);
   const triggers = [...new Set(matched.map((m) => m.trigger))];
+  // Only the rules at the highest level are actually binding — a ₹7L order
+  // trips both the ₹1L and the ₹5L threshold, and saying so twice is noise.
+  const reasons = [...new Set(
+    top.map((m) => explainTrigger(m.trigger, m.detail.observed, m.detail.threshold)))];
+
+  // Rules fired, but this person already outranks every one of them — so there
+  // is nobody more senior to route to. Approve it and say why in the audit,
+  // rather than parking it in a queue only they can clear.
+  if (withinOwnAuthority(actor, level, facts.value, doc.docType)) {
+    return { level: 0, triggers, reasons, selfApproved: true, wouldHaveNeededLevel: level };
+  }
 
   const { rows } = await tx.query(
     `INSERT INTO approvals (company_id, branch_id, doc_type, doc_id, doc_no, level,
@@ -221,8 +320,11 @@ export async function requestApprovals(
     docType: doc.docType,
     docId: doc.docId,
     docNo: doc.docNo,
-    title: `${doc.docType} ${doc.docNo ?? ''} needs level ${level} approval`,
-    subtitle: triggers.join(', '),
+    // Say the action, the thing, and the reason — in that order, in words.
+    // "PO PO/2026-27/12 needs level 2 approval / RATE_VARIANCE" told the reader
+    // nothing they could act on.
+    title: `Approve ${DOC_LABEL[doc.docType] ?? doc.docType.toLowerCase()} ${doc.docNo ?? ''}`.trim(),
+    subtitle: [doc.subject, reasons.join(' · ')].filter(Boolean).join(' — ') || undefined,
     severity: level >= 3 ? 'critical' : 'warn',
     requiredPermission:
       doc.docType === 'PO' ? 'purchase.po.approve'
@@ -233,7 +335,7 @@ export async function requestApprovals(
     payload: { approvalId: rows[0].id, triggers },
   });
 
-  return { level, triggers };
+  return { level, triggers, reasons, selfApproved: false };
 }
 
 /* ===========================================================================

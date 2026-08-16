@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, useAuth, inr, num, date, dateTime, pctText } from '../lib/api';
+import { api, useAuth, idempotencyKey, inr, num, date, dateTime, pctText } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, useApi, useToast,
 } from '../components/ui';
@@ -419,12 +419,16 @@ export function PutawayPage() {
 
 /* ==================================================== STOCK & TRACE ===== */
 export function StockPage() {
-  const { warehouseId } = useAuth();
+  const { warehouseId, can } = useAuth();
   const [code, setCode] = useState('');
   const [trace, setTrace] = useState<any>(null);
+  const [issuing, setIssuing] = useState<any>(null);
+  const [tab, setTab] = useState<'stock' | 'out'>('stock');
   const toast = useToast();
-  const { data, loading, error } = useApi<any[]>(
+  const { data, loading, error, reload } = useApi<any[]>(
     `/insights/stock?warehouseId=${warehouseId ?? ''}`, [warehouseId]);
+  const { data: issues, reload: reloadIssues } = useApi<any[]>(
+    `/inventory/issues?warehouseId=${warehouseId ?? ''}`, [warehouseId]);
 
   const lookup = async () => {
     if (!code) return;
@@ -434,8 +438,17 @@ export function StockPage() {
   };
 
   return (
-    <Layout title="Stock &amp; batches" subtitle="What is in the warehouse, and where it came from">
+    <Layout title="Stock &amp; batches" subtitle="What is in the warehouse, where it came from, and where it went">
       <ErrorBanner error={error} />
+      <div className="tabs">
+        <button className={`tab ${tab === 'stock' ? 'active' : ''}`} onClick={() => setTab('stock')}>
+          On hand
+        </button>
+        <button className={`tab ${tab === 'out' ? 'active' : ''}`} onClick={() => setTab('out')}>
+          Issued out{issues?.length ? ` (${issues.length})` : ''}
+        </button>
+      </div>
+      {tab === 'out' ? <IssuedOutTable rows={issues ?? []} /> : <>
       <div className="search-bar">
         <input placeholder="Scan or type a label code to trace…" value={code}
           onChange={(e) => setCode(e.target.value)}
@@ -466,10 +479,18 @@ export function StockPage() {
             ) },
             { key: 'r', head: 'Landed rate', num: true, render: (s: any) => inr(s.landed_rate) },
             { key: 's', head: 'Status', render: (s: any) => <Chip value={s.status} /> },
+            ...(can('inventory.stock.issue') ? [{
+              key: 'x', head: '', width: 92,
+              render: (s: any) => (
+                <button className="btn sm" onClick={(e) => { e.stopPropagation(); setIssuing(s); }}>
+                  Issue →
+                </button>),
+            }] : []),
           ]}
           empty={<Empty icon="🧺" title="No stock on hand" />}
         />
       </div></div>
+      </>}
 
       {trace ? (
         <Modal title={`Label ${trace.code}`} onClose={() => setTrace(null)}
@@ -489,6 +510,186 @@ export function StockPage() {
           </dl>
         </Modal>
       ) : null}
+
+      {issuing ? (
+        <IssueStockModal row={issuing} onClose={() => setIssuing(null)}
+          onDone={() => { setIssuing(null); reload(); reloadIssues(); }} />
+      ) : null}
     </Layout>
+  );
+}
+
+/* ===========================================================================
+ * WHERE STOCK WENT.
+ *
+ * The counterpart to the goods-receipt list. Until this existed the warehouse
+ * could only ever see what arrived, never what left — so the balance was the
+ * only evidence a crate had gone, and it carried no reason and no name.
+ * ======================================================================== */
+function IssuedOutTable({ rows }: { rows: any[] }) {
+  return (
+    <div className="card"><div className="card-body tight">
+      <DataTable rows={rows} cols={[
+        { key: 'n', head: 'Issue', render: (r: any) => (
+          <div><b className="mono">{r.issue_no}</b>
+            <div className="small muted">{date(r.issue_date)}</div></div>) },
+        { key: 'r', head: 'Why', render: (r: any) => (
+          <Chip tone={r.reason === 'SALE' ? 'ok'
+            : ['WASTAGE', 'ADJUSTMENT'].includes(r.reason) ? 'danger' : 'primary'}>
+            {r.reason.replace(/_/g, ' ').toLowerCase()}
+          </Chip>) },
+        { key: 'w', head: 'What', render: (r: any) => (
+          <div className="small">
+            {(r.lines ?? []).map((l: any, i: number) => (
+              <div key={i}>{l.productName} · {num(l.qty, 1)} {l.uom}
+                <span className="muted"> ({l.batchNo})</span></div>))}
+          </div>) },
+        { key: 'p', head: 'To / why', render: (r: any) => (
+          <div>{r.party_name ?? '—'}
+            {r.reference_no ? <div className="small muted">{r.reference_no}</div> : null}
+            {r.note ? <div className="small muted">{r.note}</div> : null}</div>) },
+        { key: 'q', head: 'Qty', num: true, render: (r: any) => num(r.total_qty, 1) },
+        { key: 'v', head: 'Value', num: true, render: (r: any) => inr(r.total_value, 0) },
+        { key: 'b', head: 'By', render: (r: any) => (
+          <span className="small muted">{r.posted_by_name}</span>) },
+        { key: 's', head: '', render: (r: any) =>
+          r.status === 'CANCELLED' ? <Chip tone="neutral">cancelled</Chip> : null },
+      ]} rowTone={(r: any) => (r.status !== 'CANCELLED'
+        && ['WASTAGE', 'ADJUSTMENT'].includes(r.reason) ? 'warn' : undefined)}
+        empty={<Empty icon="📤" title="Nothing has left the warehouse yet"
+          hint="Sales, transfers, wastage and consumption all appear here." />} />
+    </div></div>
+  );
+}
+
+const ISSUE_REASONS = [
+  { v: 'SALE',         label: 'Sale — sold to a customer',                       needsNote: false },
+  { v: 'TRANSFER_OUT', label: 'Transfer — sent to another branch or warehouse',  needsNote: true },
+  { v: 'CONSUMPTION',  label: 'Consumed — used internally, staff, samples',      needsNote: true },
+  { v: 'RETURN',       label: 'Returned to the supplier',                        needsNote: true },
+  { v: 'WASTAGE',      label: 'Wastage — spoiled or thrown away',                needsNote: true, writeOff: true },
+  { v: 'ADJUSTMENT',   label: 'Adjustment — correcting a count',                 needsNote: true, writeOff: true },
+];
+
+/**
+ * Issuing is receiving in reverse, so it asks the same three questions a
+ * receipt asks — what, how much, and why — and guesses none of them.
+ */
+function IssueStockModal({ row, onClose, onDone }: {
+  row: any; onClose: () => void; onDone: () => void;
+}) {
+  const toast = useToast();
+  const { can } = useAuth();
+  const [reason, setReason] = useState('SALE');
+  const [qty, setQty] = useState('');
+  const [rate, setRate] = useState('');
+  const [party, setParty] = useState('');
+  const [ref, setRef] = useState('');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [key] = useState(() => idempotencyKey('issue'));
+
+  const def = ISSUE_REASONS.find((r) => r.v === reason)!;
+  const uom = row.base_uom ?? 'KG';
+  const available = Number(row.available_qty ?? row.qty);
+  const n = Number(qty) || 0;
+  const cost = Number(row.landed_rate ?? 0);
+  const over = n > available + 0.001;
+  const canWriteOff = can('inventory.stock.writeoff');
+
+  // A sale has a margin; everything else is simply value leaving.
+  const value = reason === 'SALE' ? n * (Number(rate) || 0) : n * cost;
+  const margin = reason === 'SALE' ? value - n * cost : null;
+
+  return (
+    <Modal title={`Issue ${row.product_name} out of stock`} onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary"
+          disabled={busy || !n || over || (def.needsNote && !note.trim())
+            || (!!def.writeOff && !canWriteOff)}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              const r = await api.post<any>('/inventory/issues', {
+                idempotencyKey: key,
+                warehouseId: row.warehouse_id,
+                reason,
+                partyName: party || undefined,
+                referenceNo: ref || undefined,
+                note: note || undefined,
+                lines: [{ batchId: row.batch_id, qty: n, rate: rate ? Number(rate) : null }],
+              });
+              toast(`${r.issue_no} posted — ${num(r.totalQty, 1)} ${uom} out of stock`, 'ok');
+              onDone();
+            } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(false); }
+          }}>Post issue</button>
+      </>}>
+
+      <dl className="kv mb">
+        <dt>Batch</dt><dd className="mono">{row.batch_no}</dd>
+        <dt>Available</dt><dd>{num(available, 2)} {uom}</dd>
+        <dt>Expires</dt><dd>{date(row.effective_expiry ?? row.expiry_date)}</dd>
+        <dt>Cost carried</dt><dd>{inr(cost)} per {uom}</dd>
+      </dl>
+
+      <Field label="Why is it leaving?">
+        <select value={reason} onChange={(e) => setReason(e.target.value)}>
+          {ISSUE_REASONS.map((r) => (
+            <option key={r.v} value={r.v} disabled={!!r.writeOff && !canWriteOff}>
+              {r.label}{r.writeOff && !canWriteOff ? ' — needs a manager' : ''}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <div className="grid c2">
+        <Field label={`Quantity (${uom})`}
+          error={over ? `Only ${num(available, 2)} ${uom} available` : undefined}>
+          <input type="number" step="0.01" value={qty} autoFocus
+            onChange={(e) => setQty(e.target.value)} />
+        </Field>
+        {reason === 'SALE' ? (
+          <Field label={`Selling rate (₹ per ${uom})`} hint={`It cost you ${inr(cost)}`}>
+            <input type="number" step="0.01" value={rate} onChange={(e) => setRate(e.target.value)} />
+          </Field>
+        ) : (
+          <Field label="Value leaving" hint="Valued at what it cost you">
+            <input readOnly value={inr(value)} />
+          </Field>
+        )}
+      </div>
+
+      {reason === 'SALE' ? (
+        <div className="grid c2">
+          <Field label="Sold to"><input value={party} placeholder="Customer or shop"
+            onChange={(e) => setParty(e.target.value)} /></Field>
+          <Field label="Their reference"><input value={ref} placeholder="SO / challan no."
+            onChange={(e) => setRef(e.target.value)} /></Field>
+        </div>
+      ) : null}
+
+      <Field label={def.needsNote ? 'Reason (required)' : 'Note (optional)'}
+        hint={def.needsNote
+          ? 'Stock that disappears without a written reason is exactly what this system exists to prevent.'
+          : undefined}>
+        <input value={note} onChange={(e) => setNote(e.target.value)} />
+      </Field>
+
+      {n > 0 && !over ? (
+        <div className={`banner ${margin != null && margin < 0 ? 'warn' : 'info'}`}>
+          <span>{margin != null && margin < 0 ? '⚠' : 'ℹ'}</span>
+          <div className="small">
+            <b>{num(n, 2)} {uom}</b> leaves, {num(available - n, 2)} {uom} stays.
+            {margin != null ? (
+              margin < 0
+                ? <> Selling at {inr(Number(rate) || 0)} against a cost of {inr(cost)} —
+                    a loss of <b>{inr(Math.abs(margin), 0)}</b> on this issue.</>
+                : <> Revenue {inr(value, 0)}, cost {inr(n * cost, 0)}, margin <b>{inr(margin, 0)}</b>.</>
+            ) : <> Value written out of stock: <b>{inr(value, 0)}</b>.</>}
+          </div>
+        </div>
+      ) : null}
+    </Modal>
   );
 }

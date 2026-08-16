@@ -354,3 +354,88 @@ label.check input { width: auto; }
 
 .progress { height: 6px; background: var(--border); border-radius: 999px; overflow: hidden; }
 .progress > i { display: block; height: 100%; background: var(--primary); border-radius: 999px; }
+
+/* ===========================================================================
+   FARMING
+   The field screens are used on a phone, in sunlight, by someone wearing
+   gloves. Everything below is bigger, higher-contrast and fewer-tap than the
+   desk screens above — but it borrows the same tokens, so the two halves of
+   the product still look like one product.
+
+   Note on colour: the farming spec speaks in 🟢/🟡/🔴. GREEN maps onto the
+   app's existing cyan "ok" token rather than introducing a new green, because
+   the palette deliberately avoids green and one visual language beats two.
+   ======================================================================== */
+
+.light {
+  display: inline-block; width: 10px; height: 10px; border-radius: 999px;
+  flex: 0 0 auto; box-shadow: 0 0 0 3px var(--surface);
+}
+.light.GREEN { background: var(--ok); }
+.light.YELLOW, .light.AMBER { background: var(--accent); }
+.light.RED, .light.CRITICAL { background: var(--danger); }
+
+/* --- FARM TODAY task list ----------------------------------------------- */
+.task-card {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding: 14px 15px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); margin-bottom: 10px; border-left-width: 4px;
+}
+.task-card.GREEN  { border-left-color: var(--ok); }
+.task-card.YELLOW { border-left-color: var(--accent); background: var(--accent-soft); }
+.task-card.RED    { border-left-color: var(--danger); background: var(--danger-soft); }
+.task-card .ic { font-size: 22px; line-height: 1.1; }
+.task-card .body { flex: 1; min-width: 0; }
+.task-card .body b { font-size: 15.5px; }
+.task-card .acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.task-card .acts .btn { min-height: 42px; padding: 9px 18px; font-size: 14.5px; font-weight: 600; }
+
+/* --- plot strip ---------------------------------------------------------- */
+.plot-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); }
+.plot-card {
+  border: 1px solid var(--border); border-top-width: 4px; border-radius: var(--radius);
+  background: var(--surface); padding: 13px 14px; cursor: pointer;
+}
+.plot-card:hover { box-shadow: var(--shadow-md); }
+.plot-card.GREEN  { border-top-color: var(--ok); }
+.plot-card.YELLOW { border-top-color: var(--accent); }
+.plot-card.RED    { border-top-color: var(--danger); }
+.plot-card .code { font-size: 19px; font-weight: 700; letter-spacing: -0.02em; }
+.plot-card .crop { font-size: 13.5px; color: var(--text-2); font-weight: 600; }
+.plot-card dl { margin: 9px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 12.5px; }
+.plot-card dt { color: var(--muted); }
+.plot-card dd { margin: 0; text-align: right; font-weight: 550; }
+
+/* --- grading, weighing --------------------------------------------------- */
+.grade-row {
+  display: grid; grid-template-columns: 120px 1fr 110px 1fr; gap: 10px;
+  align-items: center; padding: 9px 0; border-bottom: 1px solid var(--border);
+}
+.grade-row:last-child { border-bottom: none; }
+.scale-readout {
+  font-size: 42px; font-weight: 700; letter-spacing: -0.03em; text-align: center;
+  font-variant-numeric: tabular-nums; padding: 14px; background: var(--surface-2);
+  border: 1px solid var(--border-strong); border-radius: var(--radius); margin-bottom: 12px;
+}
+.scale-readout small { display: block; font-size: 12.5px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+
+/* --- crop timeline / photo diary ----------------------------------------- */
+.timeline { list-style: none; margin: 0; padding: 0 0 0 22px; border-left: 2px solid var(--border); }
+.timeline li { position: relative; padding: 0 0 18px 14px; }
+.timeline li::before {
+  content: ''; position: absolute; left: -21px; top: 5px; width: 8px; height: 8px;
+  border-radius: 999px; background: var(--border-strong); box-shadow: 0 0 0 3px var(--bg);
+}
+.timeline li.GREEN::before  { background: var(--ok); }
+.timeline li.YELLOW::before { background: var(--accent); }
+.timeline li.RED::before    { background: var(--danger); }
+.timeline .day { font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.timeline img { margin-top: 8px; max-width: 200px; border-radius: var(--radius-sm); border: 1px solid var(--border); display: block; }
+
+/* --- the QR plot screen, which is a phone screen -------------------------- */
+.plot-scan { max-width: 480px; margin: 0 auto; }
+.plot-scan .hero {
+  border-radius: var(--radius); padding: 18px; color: #fff; background: var(--primary); margin-bottom: 14px;
+}
+.plot-scan .hero .code { font-size: 30px; font-weight: 700; letter-spacing: -0.03em; }
+.plot-scan .hero .crop { opacity: .9; font-size: 15px; }

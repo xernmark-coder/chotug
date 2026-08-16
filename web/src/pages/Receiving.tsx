@@ -4,6 +4,7 @@ import { api, useAuth, inr, num, date, dateTime, ago, idempotencyKey, today } fr
 import {
   AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, Steps, useApi, useToast,
 } from '../components/ui';
+import { DriverModal, VehicleModal } from './Fleet';
 
 /* ================================================= EXPECTED ARRIVALS ===== */
 export function ArrivalsPage() {
@@ -115,8 +116,13 @@ export function GateEntryPage() {
 
   const { data: arrivals } = useApi<any[]>('/planning/expected-arrivals');
   const { data: suppliers } = useApi<any[]>('/masters/suppliers');
-  const { data: vehicles } = useApi<any[]>('/masters/vehicles');
-  const { data: drivers } = useApi<any[]>('/masters/drivers');
+  const { data: vehicles, reload: reloadVehicles } = useApi<any[]>('/masters/vehicles');
+  const { data: drivers, reload: reloadDrivers } = useApi<any[]>('/masters/drivers');
+  /* A truck nobody has seen before is the normal case at a mandi gate, so the
+   * master record is created from here rather than sending the gate clerk to
+   * another screen while the vehicle waits. */
+  const [addingVehicle, setAddingVehicle] = useState<any>(null);
+  const [addingDriver, setAddingDriver] = useState<any>(null);
 
   const [form, setForm] = useState<any>({
     poId: poId ?? '', supplierId: '', sourceType: 'MANDI',
@@ -269,11 +275,31 @@ export function GateEntryPage() {
                   }}>
                     <option value="">Not in our list</option>
                     {(vehicles ?? []).map((v) => (
-                      <option key={v.id} value={v.id}>{v.reg_no} — {v.vehicle_type}</option>
+                      // A blocked vehicle is refused by the server, so offering
+                      // it here would only produce a dead end at the gate.
+                      <option key={v.id} value={v.id} disabled={v.status === 'BLOCKED'}>
+                        {v.reg_no} — {v.vehicle_type}{v.status === 'BLOCKED' ? ' (blocked)' : ''}
+                      </option>
                     ))}
                   </select>
                 </Field>
               </div>
+
+              {/* Unknown registration and the rights to fix that — offer it. */}
+              {form.vehicleRegCaptured && !form.vehicleId && can('master.vehicle.manage') ? (
+                <div className="banner info mb">
+                  <span>➕</span>
+                  <div style={{ flex: 1 }}>
+                    <b>{form.vehicleRegCaptured} is not on our list.</b>{' '}
+                    You can receive it as it is. Add it and its fitness, insurance and
+                    PUC dates get checked on every future arrival.
+                  </div>
+                  <button className="btn sm" type="button"
+                    onClick={() => setAddingVehicle({ reg_no: form.vehicleRegCaptured })}>
+                    Add to list
+                  </button>
+                </div>
+              ) : null}
 
               {vehicle?.compliance_expired ? (
                 <div className="banner warn mb">
@@ -302,6 +328,20 @@ export function GateEntryPage() {
                   <input value={form.driverName} onChange={(e) => setForm({ ...form, driverName: e.target.value })} />
                 </Field>
               </div>
+
+              {form.driverName && !form.driverId && can('master.vehicle.manage') ? (
+                <div className="banner info">
+                  <span>➕</span>
+                  <div style={{ flex: 1 }}>
+                    <b>{form.driverName} is not on our list.</b>{' '}
+                    Add him once and the gate can pick the name next time.
+                  </div>
+                  <button className="btn sm" type="button"
+                    onClick={() => setAddingDriver({ full_name: form.driverName, phone: form.driverPhone })}>
+                    Add to list
+                  </button>
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -368,6 +408,30 @@ export function GateEntryPage() {
           </div>
         </div>
       </div>
+
+      {addingVehicle ? (
+        <VehicleModal vehicle={addingVehicle} onClose={() => setAddingVehicle(null)}
+          onSaved={(msg, saved) => {
+            setAddingVehicle(null);
+            // Link the arrival being recorded to the record just created, so
+            // this entry is already a checked vehicle rather than the next one.
+            setForm((s: any) => ({ ...s, vehicleId: saved.id, vehicleRegCaptured: saved.reg_no }));
+            reloadVehicles();
+            toast(msg, 'ok');
+          }} />
+      ) : null}
+
+      {addingDriver ? (
+        <DriverModal driver={addingDriver} onClose={() => setAddingDriver(null)}
+          onSaved={(msg, saved) => {
+            setAddingDriver(null);
+            setForm((s: any) => ({
+              ...s, driverId: saved.id, driverName: saved.full_name, driverPhone: saved.phone ?? '',
+            }));
+            reloadDrivers();
+            toast(msg, 'ok');
+          }} />
+      ) : null}
     </Layout>
   );
 }

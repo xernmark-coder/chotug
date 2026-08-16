@@ -157,20 +157,318 @@ mastersRouter.get('/warehouses', h(async (req) =>
       WHERE w.company_id = $1 AND w.is_active ORDER BY w.code`,
     [req.actor.companyId])));
 
+/* ===========================================================================
+ * FLEET — vehicles and drivers.
+ *
+ * These two lists feed the gate-entry dropdowns, so they are read by everyone
+ * and written by whoever holds master.vehicle.manage (gate and warehouse).
+ *
+ * Nothing here ever deletes a row: gate entries and their receipts point at
+ * these records for years. "Remove" sets is_active = false, which takes the
+ * row out of the dropdowns and leaves history intact (see 08_fleet_masters).
+ * ======================================================================== */
+
+/** ?includeRetired=1 is the management view: retired and blocked rows too. */
+const managing = (req: any) => req.query.includeRetired === '1' || req.query.includeRetired === 'true';
+
+const dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 2026-03-31').nullable().optional();
+
+/** The same shape the vehicle_reg_t domain enforces, checked before the DB
+ *  rejects it, so the gate sees a sentence instead of a constraint name. */
+const REG_OK = /^([A-Z]{2}[0-9]{1,2}[A-Z]{0,3}[0-9]{4}|[0-9]{2}BH[0-9]{4}[A-Z]{1,2})$/;
+const regNo = z.string()
+  .transform((s) => s.toUpperCase().replace(/[\s-]/g, ''))
+  .refine((s) => REG_OK.test(s), 'Enter a number like MH12AB1234 or 22BH1234AB');
+
+const vehicleFields = z.object({
+  regNo,
+  vehicleType: z.enum(['TRUCK', 'TEMPO', 'PICKUP', 'TRACTOR', 'REEFER', 'CONTAINER', 'TWO_WHEELER']).default('TRUCK'),
+  makeModel: z.string().max(80).nullable().optional(),
+  capacityKg: z.number().nonnegative().nullable().optional(),
+  isReefer: z.boolean().default(false),
+  reeferMinTempC: z.number().nullable().optional(),
+  tareReferenceKg: z.number().nonnegative().nullable().optional(),
+  fitnessExpiry: dateStr,
+  insuranceExpiry: dateStr,
+  pucExpiry: dateStr,
+  permitExpiry: dateStr,
+  transporterName: z.string().max(120).nullable().optional(),
+  ownerSupplierId: z.string().uuid().nullable().optional(),
+  status: z.enum(['ACTIVE', 'WATCH', 'BLOCKED']).default('ACTIVE'),
+  statusReason: z.string().max(300).nullable().optional(),
+});
+
+/** Blocking a truck stops it at the gate, so it needs a reason on the record. */
+function assertBlockReason(input: { status: string; statusReason?: string | null }) {
+  if (input.status !== 'ACTIVE' && !input.statusReason) {
+    throw ApiError.rule(`Say why this vehicle is marked ${input.status}. The gate will show it.`);
+  }
+}
+
+const vehicleCols = `id, reg_no, vehicle_type, make_model, capacity_kg, is_reefer,
+            reefer_min_temp_c, tare_reference_kg, fitness_expiry, insurance_expiry,
+            puc_expiry, permit_expiry, status, status_reason, transporter_name,
+            owner_supplier_id, is_active, retired_at, retired_reason, trips_90d,
+            (fitness_expiry < CURRENT_DATE OR insurance_expiry < CURRENT_DATE
+             OR puc_expiry < CURRENT_DATE) AS compliance_expired`;
+
 mastersRouter.get('/vehicles', h(async (req) =>
   query(req.actor,
-    `SELECT id, reg_no, vehicle_type, capacity_kg, is_reefer, tare_reference_kg,
-            fitness_expiry, insurance_expiry, puc_expiry, status, transporter_name,
-            (fitness_expiry < CURRENT_DATE OR insurance_expiry < CURRENT_DATE
-             OR puc_expiry < CURRENT_DATE) AS compliance_expired
-       FROM vehicles WHERE company_id = $1 ORDER BY reg_no`,
-    [req.actor.companyId])));
+    `SELECT ${vehicleCols}
+       FROM vehicles
+      WHERE company_id = $1 AND ($2::boolean OR is_active)
+      ORDER BY is_active DESC, reg_no`,
+    [req.actor.companyId, managing(req)])));
 
+mastersRouter.post('/vehicles', requires('master.vehicle.manage'), h(async (req) => {
+  const input = body(vehicleFields, req.body);
+  assertBlockReason(input);
+
+  return withTx(req.actor, async (tx) => {
+    /* One registration, one row, forever (uq: company_id, reg_no). A truck
+     * that was retired and has come back is brought onto the roster again
+     * rather than refused — its old receipts stay attached to the same row. */
+    const { rows: prior } = await tx.query(
+      `SELECT id, is_active FROM vehicles WHERE company_id=$1 AND reg_no=$2`,
+      [req.actor.companyId, input.regNo]);
+
+    if (prior[0]?.is_active) {
+      throw ApiError.conflict(`Vehicle ${input.regNo} is already on the list.`);
+    }
+
+    const values = [
+      req.actor.companyId, input.regNo, input.vehicleType, input.makeModel ?? null,
+      input.capacityKg ?? null, input.isReefer, input.reeferMinTempC ?? null,
+      input.tareReferenceKg ?? null, input.fitnessExpiry ?? null, input.insuranceExpiry ?? null,
+      input.pucExpiry ?? null, input.permitExpiry ?? null, input.status, input.statusReason ?? null,
+      input.transporterName ?? null, input.ownerSupplierId ?? null, req.actor.userId,
+    ];
+
+    if (prior[0]) {
+      const { rows } = await tx.query(
+        `UPDATE vehicles
+            SET vehicle_type=$3, make_model=$4, capacity_kg=$5, is_reefer=$6,
+                reefer_min_temp_c=$7, tare_reference_kg=$8, fitness_expiry=$9,
+                insurance_expiry=$10, puc_expiry=$11, permit_expiry=$12,
+                status=$13, status_reason=$14, transporter_name=$15, owner_supplier_id=$16,
+                is_active=true, retired_at=NULL, retired_by=NULL, retired_reason=NULL,
+                updated_by=$17
+          WHERE company_id=$1 AND reg_no=$2
+          RETURNING ${vehicleCols}`, values);
+      return { ...rows[0], restored: true };
+    }
+
+    const { rows } = await tx.query(
+      `INSERT INTO vehicles (company_id, reg_no, vehicle_type, make_model, capacity_kg, is_reefer,
+              reefer_min_temp_c, tare_reference_kg, fitness_expiry, insurance_expiry, puc_expiry,
+              permit_expiry, status, status_reason, transporter_name, owner_supplier_id,
+              created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$17)
+       RETURNING ${vehicleCols}`, values);
+    return rows[0];
+  });
+}));
+
+mastersRouter.put('/vehicles/:id', requires('master.vehicle.manage'), h(async (req) => {
+  const input = body(vehicleFields, req.body);
+  assertBlockReason(input);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows: clash } = await tx.query(
+      `SELECT 1 FROM vehicles WHERE company_id=$1 AND reg_no=$2 AND id <> $3`,
+      [req.actor.companyId, input.regNo, req.params.id]);
+    if (clash.length) throw ApiError.conflict(`Another vehicle is already recorded as ${input.regNo}.`);
+
+    const { rows } = await tx.query(
+      `UPDATE vehicles
+          SET reg_no=$3, vehicle_type=$4, make_model=$5, capacity_kg=$6, is_reefer=$7,
+              reefer_min_temp_c=$8, tare_reference_kg=$9, fitness_expiry=$10,
+              insurance_expiry=$11, puc_expiry=$12, permit_expiry=$13,
+              status=$14, status_reason=$15, transporter_name=$16, owner_supplier_id=$17,
+              updated_by=$18
+        WHERE id=$1 AND company_id=$2
+        RETURNING ${vehicleCols}`,
+      [req.params.id, req.actor.companyId, input.regNo, input.vehicleType, input.makeModel ?? null,
+       input.capacityKg ?? null, input.isReefer, input.reeferMinTempC ?? null,
+       input.tareReferenceKg ?? null, input.fitnessExpiry ?? null, input.insuranceExpiry ?? null,
+       input.pucExpiry ?? null, input.permitExpiry ?? null, input.status, input.statusReason ?? null,
+       input.transporterName ?? null, input.ownerSupplierId ?? null, req.actor.userId]);
+    if (!rows[0]) throw ApiError.notFound('Vehicle not found');
+    return rows[0];
+  });
+}));
+
+/** Off the roster. The row and every receipt that names it stay exactly as they are. */
+mastersRouter.post('/vehicles/:id/retire', requires('master.vehicle.manage'), h(async (req) => {
+  const input = body(z.object({ reason: z.string().max(300).optional() }), req.body ?? {});
+
+  return withTx(req.actor, async (tx) => {
+    // A truck standing in the yard mid-chain must not vanish from the screen
+    // the gate staff are working on.
+    const { rows: open } = await tx.query(
+      `SELECT gate_no FROM gate_entries
+        WHERE vehicle_id=$1 AND company_id=$2
+          AND status NOT IN ('COMPLETED','REJECTED_AT_GATE','CANCELLED')
+        LIMIT 1`, [req.params.id, req.actor.companyId]);
+    if (open.length) {
+      throw ApiError.rule(
+        `This vehicle is still inside the yard on ${open[0].gate_no}. ` +
+        'Finish or reject that gate entry first.');
+    }
+
+    const { rows } = await tx.query(
+      `UPDATE vehicles
+          SET is_active=false, retired_at=now(), retired_by=$3, retired_reason=$4, updated_by=$3
+        WHERE id=$1 AND company_id=$2 AND is_active
+        RETURNING ${vehicleCols}`,
+      [req.params.id, req.actor.companyId, req.actor.userId, input.reason ?? null]);
+    if (!rows[0]) throw ApiError.notFound('Vehicle not found, or already removed');
+    return rows[0];
+  });
+}));
+
+mastersRouter.post('/vehicles/:id/restore', requires('master.vehicle.manage'), h(async (req) =>
+  withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE vehicles
+          SET is_active=true, retired_at=NULL, retired_by=NULL, retired_reason=NULL, updated_by=$3
+        WHERE id=$1 AND company_id=$2
+        RETURNING ${vehicleCols}`,
+      [req.params.id, req.actor.companyId, req.actor.userId]);
+    if (!rows[0]) throw ApiError.notFound('Vehicle not found');
+    return rows[0];
+  })));
+
+/* ---------------------------------------------------------------- drivers */
+
+const driverFields = z.object({
+  fullName: z.string().min(2, 'Enter the driver’s name').max(120),
+  phone: z.string().max(20).nullable().optional(),
+  dlNumber: z.string().max(30).nullable().optional(),
+  dlExpiry: dateStr,
+  status: z.enum(['ACTIVE', 'WATCH', 'BLOCKED']).default('ACTIVE'),
+  /** DPDP §: a driver's licence and phone are personal data. */
+  consentObtained: z.boolean().default(false),
+});
+
+const driverCols = `id, full_name, phone, dl_number, dl_expiry, status, is_active,
+            retired_at, retired_reason, consent_obtained_at,
+            (dl_expiry < CURRENT_DATE) AS licence_expired`;
+
+/* The default list is the roster the gate picks from — active, not blocked.
+ * The management screen asks for everything with ?includeRetired=1. */
 mastersRouter.get('/drivers', h(async (req) =>
   query(req.actor,
-    `SELECT id, full_name, phone, dl_number, dl_expiry, status
-       FROM drivers WHERE company_id = $1 AND status <> 'BLOCKED' ORDER BY full_name`,
-    [req.actor.companyId])));
+    `SELECT ${driverCols}
+       FROM drivers
+      WHERE company_id = $1
+        AND ($2::boolean OR (is_active AND status <> 'BLOCKED'))
+      ORDER BY is_active DESC, full_name`,
+    [req.actor.companyId, managing(req)])));
+
+mastersRouter.post('/drivers', requires('master.vehicle.manage'), h(async (req) => {
+  const input = body(driverFields, req.body);
+
+  return withTx(req.actor, async (tx) => {
+    /* dl_number is unique per company where it is given. A driver who left and
+     * came back is restored on the same row so his history follows him. */
+    if (input.dlNumber) {
+      const { rows: prior } = await tx.query(
+        `SELECT id, is_active, full_name FROM drivers WHERE company_id=$1 AND dl_number=$2`,
+        [req.actor.companyId, input.dlNumber]);
+      if (prior[0]?.is_active) {
+        throw ApiError.conflict(`${prior[0].full_name} is already on the list with this licence number.`);
+      }
+      if (prior[0]) {
+        const { rows } = await tx.query(
+          `UPDATE drivers
+              SET full_name=$3, phone=$4, dl_expiry=$5, status=$6,
+                  consent_obtained_at = CASE WHEN $7 THEN now() ELSE consent_obtained_at END,
+                  is_active=true, retired_at=NULL, retired_by=NULL, retired_reason=NULL,
+                  updated_by=$8
+            WHERE company_id=$1 AND dl_number=$2
+            RETURNING ${driverCols}`,
+          [req.actor.companyId, input.dlNumber, input.fullName, input.phone ?? null,
+           input.dlExpiry ?? null, input.status, input.consentObtained, req.actor.userId]);
+        return { ...rows[0], restored: true };
+      }
+    }
+
+    const { rows } = await tx.query(
+      `INSERT INTO drivers (company_id, full_name, phone, dl_number, dl_expiry, status,
+                            consent_obtained_at, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $7 THEN now() ELSE NULL END, $8,$8)
+       RETURNING ${driverCols}`,
+      [req.actor.companyId, input.fullName, input.phone ?? null, input.dlNumber ?? null,
+       input.dlExpiry ?? null, input.status, input.consentObtained, req.actor.userId]);
+    return rows[0];
+  });
+}));
+
+mastersRouter.put('/drivers/:id', requires('master.vehicle.manage'), h(async (req) => {
+  const input = body(driverFields, req.body);
+
+  return withTx(req.actor, async (tx) => {
+    if (input.dlNumber) {
+      const { rows: clash } = await tx.query(
+        `SELECT 1 FROM drivers WHERE company_id=$1 AND dl_number=$2 AND id <> $3`,
+        [req.actor.companyId, input.dlNumber, req.params.id]);
+      if (clash.length) throw ApiError.conflict('Another driver already has this licence number.');
+    }
+
+    const { rows } = await tx.query(
+      `UPDATE drivers
+          SET full_name=$3, phone=$4, dl_number=$5, dl_expiry=$6, status=$7,
+              consent_obtained_at = CASE WHEN $8 THEN COALESCE(consent_obtained_at, now())
+                                         ELSE consent_obtained_at END,
+              updated_by=$9
+        WHERE id=$1 AND company_id=$2
+        RETURNING ${driverCols}`,
+      [req.params.id, req.actor.companyId, input.fullName, input.phone ?? null,
+       input.dlNumber ?? null, input.dlExpiry ?? null, input.status,
+       input.consentObtained, req.actor.userId]);
+    if (!rows[0]) throw ApiError.notFound('Driver not found');
+    return rows[0];
+  });
+}));
+
+mastersRouter.post('/drivers/:id/retire', requires('master.vehicle.manage'), h(async (req) => {
+  const input = body(z.object({ reason: z.string().max(300).optional() }), req.body ?? {});
+
+  return withTx(req.actor, async (tx) => {
+    const { rows: open } = await tx.query(
+      `SELECT gate_no FROM gate_entries
+        WHERE driver_id=$1 AND company_id=$2
+          AND status NOT IN ('COMPLETED','REJECTED_AT_GATE','CANCELLED')
+        LIMIT 1`, [req.params.id, req.actor.companyId]);
+    if (open.length) {
+      throw ApiError.rule(
+        `This driver is still inside the yard on ${open[0].gate_no}. ` +
+        'Finish or reject that gate entry first.');
+    }
+
+    const { rows } = await tx.query(
+      `UPDATE drivers
+          SET is_active=false, retired_at=now(), retired_by=$3, retired_reason=$4, updated_by=$3
+        WHERE id=$1 AND company_id=$2 AND is_active
+        RETURNING ${driverCols}`,
+      [req.params.id, req.actor.companyId, req.actor.userId, input.reason ?? null]);
+    if (!rows[0]) throw ApiError.notFound('Driver not found, or already removed');
+    return rows[0];
+  });
+}));
+
+mastersRouter.post('/drivers/:id/restore', requires('master.vehicle.manage'), h(async (req) =>
+  withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE drivers
+          SET is_active=true, retired_at=NULL, retired_by=NULL, retired_reason=NULL, updated_by=$3
+        WHERE id=$1 AND company_id=$2
+        RETURNING ${driverCols}`,
+      [req.params.id, req.actor.companyId, req.actor.userId]);
+    if (!rows[0]) throw ApiError.notFound('Driver not found');
+    return rows[0];
+  })));
 
 mastersRouter.get('/container-types', h(async (req) =>
   query(req.actor,

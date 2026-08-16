@@ -14,6 +14,10 @@ import { buySuggestion, forecastDemand, priceSignal } from '../ai/features.js';
 export const planningRouter = Router();
 planningRouter.use(authenticate);
 
+/** Money the way an approver reads it, for messages and queue subtitles. */
+const inrText = (n: number) =>
+  `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+
 /* ===========================================================================
  * §2 / §5 — "System khud bataye ki kya aur kitna kharidna hai."
  *
@@ -324,16 +328,76 @@ planningRouter.post('/requirements/:id/submit', requires('purchase.requirement.s
       `UPDATE requirements SET status='SUBMITTED', submitted_at=now(), submitted_by=$2, updated_by=$2
         WHERE id=$1`, [r.id, req.actor.userId]);
 
-    await pushTask(tx, req.actor, {
-      branchId: r.branch_id, queueKey: 'REQUIREMENT_REVIEW',
-      docType: 'REQUIREMENT', docId: r.id, docNo: r.req_no,
-      title: `Requirement ${r.req_no} ready to source`,
-      subtitle: `Needed by ${r.required_date}`,
-      severity: r.priority === 'URGENT' ? 'critical' : 'normal',
-      requiredPermission: 'purchase.quote.compare', slaMinutes: 240,
-    });
-    await emit(tx, req.actor, 'requirement', r.id, 'requirement.submitted', { reqNo: r.req_no });
-    return { ok: true, status: 'SUBMITTED' };
+    /* A requirement used to stop here forever: no approval was ever raised, so
+     * it never reached APPROVED — and the PO step only marks a requirement
+     * CONVERTED `WHERE status='APPROVED'`, so that never fired either. Run it
+     * through the same authority check as a PO. */
+    /* A requirement carries no rate — it says what is needed, not what it will
+     * cost. To weigh it against a value threshold we price each line at the
+     * best evidence available, newest first: the last agreed PO rate, then the
+     * last landed cost, then today's market price. A line we cannot price
+     * contributes nothing rather than blocking the submit. */
+    const { rows: est } = await tx.query(
+      `SELECT count(*)::int AS lines,
+              COALESCE(SUM(rl.final_qty * COALESCE(
+                (SELECT pl.rate FROM po_lines pl
+                   JOIN purchase_orders o ON o.id = pl.po_id
+                  WHERE pl.product_id = rl.product_id AND o.company_id = $2
+                    AND o.status IN ('APPROVED','CONFIRMED','PART_RECEIVED','RECEIVED','CLOSED')
+                  ORDER BY o.order_date DESC LIMIT 1),
+                (SELECT b.landed_rate FROM batches b
+                  WHERE b.product_id = rl.product_id AND b.landed_rate IS NOT NULL
+                  ORDER BY b.received_date DESC LIMIT 1),
+                (SELECT mp.modal_price FROM market_prices mp
+                  WHERE mp.product_id = rl.product_id
+                  ORDER BY mp.price_date DESC LIMIT 1),
+                0)), 0) AS value
+         FROM requirement_lines rl WHERE rl.requirement_id = $1`,
+      [r.id, req.actor.companyId]);
+    const value = Number(est[0].value);
+
+    const { level, triggers, reasons, selfApproved, wouldHaveNeededLevel } =
+      await requestApprovals(tx, req.actor,
+        {
+          docType: 'REQUIREMENT', docId: r.id, docNo: r.req_no, branchId: r.branch_id,
+          subject: `${est[0].lines} item(s), about ${inrText(value)}`,
+        },
+        { value, urgent: r.priority === 'URGENT' });
+
+    if (level === 0) {
+      await tx.query(
+        `UPDATE requirements
+            SET status='APPROVED', approved_at=now(), approved_by=$2,
+                self_approved=true, self_approved_reason=$3, updated_by=$2
+          WHERE id=$1`,
+        [r.id, req.actor.userId, selfApproved
+          ? `Approved on own authority; rules fired: ${reasons.join('; ')}`
+          : 'No approval rule applied — within every configured threshold.']);
+      // Approved means sourceable, so the next person's job goes on the queue.
+      await pushTask(tx, req.actor, {
+        branchId: r.branch_id, queueKey: 'REQUIREMENT_REVIEW',
+        docType: 'REQUIREMENT', docId: r.id, docNo: r.req_no,
+        title: `Source ${est[0].lines} item(s) for ${r.req_no}`,
+        subtitle: `About ${inrText(value)} · needed by ${r.required_date}`,
+        severity: r.priority === 'URGENT' ? 'critical' : 'normal',
+        requiredPermission: 'purchase.quote.compare', slaMinutes: 240,
+      });
+      await emit(tx, req.actor, 'requirement', r.id, 'requirement.approved',
+        { reqNo: r.req_no, auto: true, selfApproved, value });
+      return {
+        ok: true, status: 'APPROVED', approvalLevel: 0, selfApproved,
+        message: selfApproved
+          ? `Approved on your own authority — ready to source.`
+          : 'Within the normal limits — approved and ready to source.',
+      };
+    }
+
+    await emit(tx, req.actor, 'requirement', r.id, 'requirement.submitted',
+      { reqNo: r.req_no, level, triggers, reasons });
+    return {
+      ok: true, status: 'SUBMITTED', approvalLevel: level, triggers, reasons,
+      message: `Sent for level ${level} approval — ${reasons.join('; ')}.`,
+    };
   })));
 
 /* ===========================================================================
@@ -641,31 +705,66 @@ planningRouter.post('/purchase-orders/:id/submit', requires('purchase.po.submit'
       `UPDATE purchase_orders SET status='SUBMITTED', submitted_at=now(), submitted_by=$2, updated_by=$2
         WHERE id=$1`, [po.id, req.actor.userId]);
 
-    const { level, triggers } = await requestApprovals(tx, req.actor,
-      { docType: 'PO', docId: po.id, docNo: po.po_no, branchId: po.branch_id },
-      {
-        value: Number(po.grand_total),
-        rateVariancePct: round(maxRateVariance, 3),
-        newSupplier: Number(po.prior_orders) === 0,
-        urgent: po.is_urgent,
-      });
+    // §9 — requestApprovals now settles the maker-checker question itself: it
+    // returns level 0 when the submitter already outranks every rule that
+    // fired, so an Owner (and a manager inside their own limit) is not left
+    // waiting on a queue that only they can clear.
+    const { rows: sup } = await tx.query(
+      `SELECT COALESCE(trade_name, legal_name) AS name FROM suppliers WHERE id=$1`,
+      [po.supplier_id]);
+    const { level, triggers, reasons, selfApproved, wouldHaveNeededLevel } =
+      await requestApprovals(tx, req.actor,
+        {
+          docType: 'PO', docId: po.id, docNo: po.po_no, branchId: po.branch_id,
+          subject: `${inrText(Number(po.grand_total))} for ${sup[0]?.name ?? 'supplier'}`,
+        },
+        {
+          value: Number(po.grand_total),
+          rateVariancePct: round(maxRateVariance, 3),
+          newSupplier: Number(po.prior_orders) === 0,
+          urgent: po.is_urgent,
+        });
 
-    // No rule fired: within everyone's authority, so it self-approves and the
-    // audit trail records exactly that (§9 — auto-approve is still a decision).
     if (level === 0) {
+      /* Every level-0 path approves the order in the submitter's own name, so
+       * approved_by = submitted_by and ck_po_maker_checker applies to all of
+       * them — including "no rule fired at all", which had been violating the
+       * constraint since the beginning and made a small PO impossible to
+       * submit. The constraint permits it when the row says so and gives a
+       * reason, so record which of the three cases this was. */
+      const selfReason = !selfApproved
+        ? 'No approval rule applied — the order is within every configured threshold.'
+        : req.actor.permissions.has('admin.override')
+        ? `Owner authority; rules fired: ${reasons.join('; ')}`
+        : `Level ${req.actor.limits.maxApprovalLevel} authority covers the level `
+          + `${wouldHaveNeededLevel} required; rules fired: ${reasons.join('; ')}`;
+
       await tx.query(
-        `UPDATE purchase_orders SET status='APPROVED', approved_at=now(), updated_by=$2 WHERE id=$1`,
-        [po.id, req.actor.userId]);
-      await emit(tx, req.actor, 'purchase_order', po.id, 'po.approved',
-        { poNo: po.po_no, auto: true });
-      return { status: 'APPROVED', approvalLevel: 0, triggers: [],
-        message: 'Within your authority — approved automatically.' };
+        `UPDATE purchase_orders
+            SET status='APPROVED', approved_at=now(), approved_by=$2,
+                self_approved=true, self_approved_reason=$3, updated_by=$2
+          WHERE id=$1`,
+        [po.id, req.actor.userId, selfReason]);
+      await emit(tx, req.actor, 'purchase_order', po.id, 'po.approved', {
+        poNo: po.po_no, auto: true, selfApproved,
+        wouldHaveNeededLevel: wouldHaveNeededLevel ?? 0, reasons,
+      });
+      return {
+        status: 'APPROVED', approvalLevel: 0, triggers, reasons, selfApproved,
+        message: !selfApproved
+          ? 'Within the normal limits — approved automatically.'
+          : req.actor.permissions.has('admin.override')
+          ? `Approved on your own authority as Owner (${reasons.join('; ')}).`
+          : `Approved on your own authority — this needed level ${wouldHaveNeededLevel} `
+            + `and you hold level ${req.actor.limits.maxApprovalLevel} (${reasons.join('; ')}).`,
+      };
     }
 
     await emit(tx, req.actor, 'purchase_order', po.id, 'po.submitted',
-      { poNo: po.po_no, level, triggers });
-    return { status: 'SUBMITTED', approvalLevel: level, triggers,
-      message: `Sent for level ${level} approval (${triggers.join(', ')}).` };
+      { poNo: po.po_no, level, triggers, reasons });
+    return { status: 'SUBMITTED', approvalLevel: level, triggers, reasons, selfApproved: false,
+      message: `This is above your authority, so it has gone for level ${level} approval — `
+        + `${reasons.join('; ')}.` };
   })));
 
 /* ===========================================================================

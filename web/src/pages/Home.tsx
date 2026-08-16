@@ -84,6 +84,9 @@ const QUEUE_ROUTE: Record<string, (t: any) => string> = {
   AI_SUGGESTION: () => `/buy-list`,
   ALERT: () => `/alerts`,
   FINANCE_EXCEPTION: () => `/invoices`,
+  FARM_TASK: (t) => `/farm?farmId=${t.doc_id}`,
+  FARM_HARVEST: () => `/farm/dispatch`,
+  FARM_RECEIVE: () => `/farm/dispatch`,
 };
 
 const QUEUE_LABEL: Record<string, string> = {
@@ -91,7 +94,13 @@ const QUEUE_LABEL: Record<string, string> = {
   WEIGH_PENDING: 'Weighment', QC_PENDING: 'Quality check', GRN_PENDING: 'Goods receipt',
   PUTAWAY_PENDING: 'Put-away', INVOICE_MATCH: 'Invoice', AI_SUGGESTION: 'Suggestion',
   ALERT: 'Alert', FINANCE_EXCEPTION: 'Finance',
+  FARM_TASK: 'Farm work', FARM_HARVEST: 'Harvest', FARM_RECEIVE: 'Farm delivery',
 };
+
+/* The queue text is written once, on the server, in requestApprovals() and
+ * pushTask() — the same sentence that goes into the audit trail. This page
+ * used to rewrite it here, which meant two places to keep honest and a
+ * lower-cased supplier name. It renders what it is given. */
 
 export function WorkQueuePage() {
   const nav = useNavigate();

@@ -17,7 +17,15 @@ passes any gate.
 | POST | `/masters/suppliers` | master.supplier.manage |
 | GET | `/masters/warehouses` | — |
 | GET | `/masters/vehicles` | — |
+| POST | `/masters/vehicles` | master.vehicle.manage |
+| PUT | `/masters/vehicles/:id` | master.vehicle.manage |
+| POST | `/masters/vehicles/:id/retire` | master.vehicle.manage |
+| POST | `/masters/vehicles/:id/restore` | master.vehicle.manage |
 | GET | `/masters/drivers` | — |
+| POST | `/masters/drivers` | master.vehicle.manage |
+| PUT | `/masters/drivers/:id` | master.vehicle.manage |
+| POST | `/masters/drivers/:id/retire` | master.vehicle.manage |
+| POST | `/masters/drivers/:id/restore` | master.vehicle.manage |
 | GET | `/masters/container-types` | — |
 | GET | `/masters/charge-types` | — |
 | GET | `/masters/bins` | — |
@@ -137,6 +145,32 @@ passes any gate.
 Returns each quote ranked by **landed** rate with the supplier's own rejection and on-time history
 folded in, plus a recommendation in plain words.
 
+### `POST /api/masters/vehicles` — and the fleet lists generally
+```json
+{
+  "regNo": "MH12AB1234", "vehicleType": "TRUCK", "transporterName": "Shivneri Transport",
+  "capacityKg": 9000, "tareReferenceKg": 4200,
+  "fitnessExpiry": "2027-03-31", "insuranceExpiry": "2027-01-15", "pucExpiry": "2026-11-30",
+  "status": "ACTIVE"
+}
+```
+`regNo` is normalised (upper-cased, spaces and dashes dropped) and must match the `vehicle_reg_t`
+format before it reaches the database. A registration already on the list is a `409`; one that was
+retired earlier is **restored on its original row**, so its old gate entries stay attached to it.
+Anything other than `status: "ACTIVE"` needs a `statusReason` — a `BLOCKED` truck is turned away at
+the gate and the person turning it away has to be able to say why.
+
+`POST /api/masters/drivers` is the same shape with `fullName`, `phone`, `dlNumber`, `dlExpiry`,
+`status` and `consentObtained` (DPDP: a licence number is personal data).
+
+`GET` on either list returns the **active roster** — what the gate dropdowns show. Pass
+`?includeRetired=1` for the management view, which also returns removed and blocked rows.
+
+`POST .../:id/retire` takes the row off the roster; it never deletes. Gate entries, weighments and
+receipts keep pointing at it, and `POST .../:id/restore` puts it back. Retiring is refused while the
+vehicle or driver is on a gate entry that has not reached `COMPLETED`, `REJECTED_AT_GATE` or
+`CANCELLED` — the truck is physically in the yard.
+
 ### `POST /api/receiving/gate-entries/:id/weighments`
 ```json
 {
@@ -196,3 +230,155 @@ configured threshold.
 | 404 | `not_found` | — |
 | 409 | `conflict` / `already_posted` / `duplicate` | Concurrent or repeated action |
 | 422 | `rule_violation` / `immutable` | A business rule from the specification was violated |
+
+
+## farming
+
+The farming module's rule: the caller sends **ground reality** (crop, area, actual weight, a
+problem, an expense). Everything else on the response — dates, calendar, crop age, harvest window,
+stock, cost, colour — is derived server-side and never accepted as input.
+
+### Setup — asked once
+
+| Method | Path | Permission |
+|---|---|---|
+| GET | `/farming/farms` | — |
+| POST | `/farming/farms` | farming.farm.manage |
+| GET | `/farming/farms/:id` | — |
+| POST | `/farming/farms/:id/plots` | farming.farm.manage |
+| POST | `/farming/farms/:id/refresh` | — |
+| GET | `/farming/crops` | — |
+| GET | `/farming/machines` | — |
+| POST | `/farming/machines/:id/status` | farming.farm.manage · farming.task.complete |
+| GET | `/farming/scan/:qr` | — |
+
+`GET /farming/scan/:qr` is what the QR on a plot gate resolves to: it returns that plot's crop,
+today's jobs, last watering / spray / fertiliser and the harvest countdown.
+
+### Crop cycle
+
+| Method | Path | Permission |
+|---|---|---|
+| POST | `/farming/crop-cycles/preview` | — |
+| POST | `/farming/crop-cycles` | farming.crop.start |
+| GET | `/farming/crop-cycles` | — |
+| GET | `/farming/crop-cycles/:id` | — |
+| POST | `/farming/crop-cycles/:id/close` | farming.crop.close |
+
+`preview` returns the harvest date, duration, expected yield, expected cost and the full task
+calendar **without saving anything** — so nobody commits a crop without seeing what follows.
+`POST /crop-cycles` takes only `{farmId, plotId, cropId, areaAcre, sowingDate}` and writes the
+entire calendar (typically 30–60 tasks) in the same transaction.
+
+### Daily work
+
+| Method | Path | Permission |
+|---|---|---|
+| GET | `/farming/today` | — |
+| POST | `/farming/tasks` | farming.task.complete |
+| POST | `/farming/tasks/:id/action` | farming.task.complete |
+| POST | `/farming/observations` | farming.task.complete |
+| POST | `/farming/weather` | — |
+| POST | `/farming/day-close` | farming.task.complete |
+
+`GET /farming/today` runs the **daily pass** before responding (see ARCHITECTURE.md): it colours
+every live crop, holds irrigation when rain is due, wakes the harvest reminder and refreshes the
+shared work queue. It is idempotent, so a farm laptop that was off for three days catches up on
+the next open rather than waiting for a scheduler.
+
+`POST /tasks/:id/action` takes `{action: DONE|PROBLEM|SKIP}`. `PROBLEM` requires a `problemCode`
+and additionally writes a crop observation and alerts the manager. `DONE` on an irrigation task
+schedules the next one automatically.
+
+### Harvest → warehouse → stock
+
+| Method | Path | Permission |
+|---|---|---|
+| POST | `/farming/harvests` | farming.harvest.record |
+| GET | `/farming/harvests` | — |
+| POST | `/farming/dispatches` | farming.dispatch.create |
+| GET | `/farming/dispatches` | — |
+| POST | `/farming/dispatches/:id/receive` | farming.dispatch.receive |
+| GET | `/farming/traceability/:batchId` | — |
+
+`POST /dispatches/:id/receive` is the farming module's GRN: one transaction, an
+`idempotencyKey`, and `batches → stock_ledger (TRANSFER_IN) → stock_balances`. A weight gap larger
+than `farming.dispatch_variance_crit_pct` is **refused** without a written reason, then recorded as
+a loss against the crop. `uq_ledger_grn_line` means a retried receive collides at the database
+rather than doubling stock.
+
+### Money and insight
+
+| Method | Path | Permission |
+|---|---|---|
+| POST | `/farming/expenses` | farming.expense.create |
+| GET | `/farming/expenses` | farming.cost.view · farming.expense.create |
+| POST | `/farming/losses` | farming.loss.record |
+| GET | `/farming/dashboard` | — |
+| GET | `/farming/harvest-forecast` | — |
+| GET | `/farming/supply-plan` | — |
+| GET | `/farming/planning` | farming.report.view |
+| GET | `/farming/staff-performance` | farming.report.view |
+
+Cost, profit and expense rows are stripped **server-side** for callers without
+`farming.cost.view` / `data.cost.view`, never hidden in the UI.
+
+`GET /farming/supply-plan?productId=&demandKg=` is the join into purchasing: it answers "the
+warehouse needs 500 kg — how much is the farm about to deliver, and how much must be bought?"
+
+
+## inventory — the way stock leaves
+
+Until this existed the only `OUT` movement in the API was a GRN reversal, so stock could enter and
+never leave. A stock issue is the mirror of a goods receipt and obeys the same rules: one
+transaction, an idempotency key, and the append-only ledger as the record.
+
+| Method | Path | Permission |
+|---|---|---|
+| GET | `/inventory/issuable` | — |
+| POST | `/inventory/issues` | inventory.stock.issue |
+| GET | `/inventory/issues` | — |
+| POST | `/inventory/issues/:id/cancel` | inventory.stock.cancel |
+
+`GET /issuable` lists every batch with stock on hand, **oldest-expiring first** — FEFO is not a
+nicety on perishables, and the right batch should be the first one on screen.
+
+`POST /issues` takes `{idempotencyKey, warehouseId, reason, lines[{batchId, qty, rate?}]}`.
+`reason` is one of `SALE · TRANSFER_OUT · WASTAGE · RETURN · CONSUMPTION · ADJUSTMENT` and maps
+1:1 onto `stock_ledger.txn_type`, so the document and the ledger speak the same vocabulary.
+
+Two guards that are deliberate rather than incidental:
+
+- **Anything that is not a sale needs a written reason.** Stock that disappears without one is
+  what this system exists to prevent.
+- **`WASTAGE` and `ADJUSTMENT` need `inventory.stock.writeoff`**, a separate permission from an
+  ordinary sale — they destroy value with nothing coming back, and they raise a `STOCK_WRITE_OFF`
+  alert on posting.
+
+Leaving `rate` blank values the line at the batch's own landed cost, so a write-off is valued
+honestly and a farm-grown crate carries what it cost to *grow*. The response returns `totalCost`
+beside `totalValue`, and `marginValue` on a sale — which is how selling below cost becomes visible
+at the moment it happens rather than in a month-end report.
+
+Cancelling writes a compensating `IN` row rather than deleting anything, the same way a GRN is
+reversed instead of edited.
+
+
+## Approval — within your own authority
+
+`requestApprovals()` now settles maker–checker itself. It returns `level: 0` when the submitter
+already holds the level (and the money limit) that every triggered rule asks for, because in that
+case there is nobody more senior to route to — the document would land in a queue only that same
+person could clear.
+
+- **Owner** — approves everything on submit.
+- **A manager inside their own limit** — approves on submit; above it, still goes up.
+- **Anyone else** — unchanged.
+
+Which money limit applies depends on the document: `max_po_value` for a PO or requirement,
+`max_invoice_mismatch_value` for an invoice. Checking an invoice against the PO limit would have
+quietly let finance wave through a mismatch far larger than they are trusted with.
+
+Self-approval is **recorded, not hidden**: `purchase_orders.self_approved` and
+`self_approved_reason` are set, and `ck_po_maker_checker` was relaxed from "never" to "only when
+the row says so and gives a reason".

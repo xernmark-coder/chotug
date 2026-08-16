@@ -13,6 +13,13 @@ dotenv.config();
 pg.types.setTypeParser(1700, (v) => (v === null ? null : Number(v))); // numeric
 pg.types.setTypeParser(20, (v) => (v === null ? null : Number(v)));   // int8
 
+/* A `date` is a calendar day, not an instant. Parsed into a JS Date it becomes
+ * local midnight, and `.toISOString()` on that in IST (UTC+5:30) yields the
+ * PREVIOUS day — which silently shifts sowing dates, harvest windows and
+ * expiry comparisons by one. Hand back the 'YYYY-MM-DD' text and compare it as
+ * text, which is exactly what a calendar day supports and nothing more. */
+pg.types.setTypeParser(1082, (v) => v);                               // date
+
 export const config = {
   port: Number(process.env.PORT ?? 4000),
   databaseUrl:

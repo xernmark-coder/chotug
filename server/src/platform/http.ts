@@ -68,6 +68,18 @@ export function errorHandler(
       .json({ error: err.message, code: err.code, detail: err.detail });
   }
 
+  /* An illegal state transition already carries the exact sentence the user
+   * needs — "A po in SUBMITTED cannot move to CONFIRMED. Allowed: APPROVED,
+   * DRAFT, CANCELLED." Until this was here it fell through to the generic
+   * 500 and that sentence was thrown away on every state machine in the app. */
+  if (err?.name === 'TransitionError') {
+    return res.status(422).json({
+      error: err.message,
+      code: 'invalid_transition',
+      detail: { machine: err.machine, from: err.from, to: err.to },
+    });
+  }
+
   const pgCode: string | undefined = err?.code;
   const constraint: string | undefined = err?.constraint;
 

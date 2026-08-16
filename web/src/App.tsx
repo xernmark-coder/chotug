@@ -7,10 +7,16 @@ import { BuyListPage, RequirementDetailPage, RequirementListPage } from './pages
 import { ApprovalsPage, PoCreatePage, PoDetailPage, PoListPage } from './pages/Purchase';
 import { ArrivalsPage, GateDetailPage, GateEntryPage, GatePipelinePage } from './pages/Receiving';
 import { GrnDetailPage, GrnListPage, PutawayPage, StockPage } from './pages/Grn';
+import { FleetPage } from './pages/Fleet';
 import {
   AiCentrePage, AlertsPage, InvoiceCreatePage, InvoiceDetailPage, InvoiceListPage,
   PaymentsPage, ProfilePage, ReportsPage, SettingsPage, SuppliersPage,
 } from './pages/Finance';
+import {
+  CropDetailPage, CropListPage, CropStartPage, DispatchPage, FarmDashboardPage,
+  FarmExpensePage, FarmPlanningPage, FarmSetupPage, FarmTodayPage, HarvestPage,
+  PlotScanPage,
+} from './pages/Farming';
 
 export default function App() {
   const { me, loading } = useAuth();
@@ -45,6 +51,7 @@ export default function App() {
       <Route path="/gate" element={<GatePipelinePage />} />
       <Route path="/gate/new" element={<GateEntryPage />} />
       <Route path="/gate/:id" element={<GateDetailPage />} />
+      <Route path="/fleet" element={<FleetPage />} />
 
       <Route path="/grns" element={<GrnListPage />} />
       <Route path="/grns/:id" element={<GrnDetailPage />} />
@@ -56,6 +63,20 @@ export default function App() {
       <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
       <Route path="/payments" element={<PaymentsPage />} />
       <Route path="/suppliers" element={<SuppliersPage />} />
+
+      {/* Farming. /farm is the field worker's whole application. */}
+      <Route path="/farm" element={<FarmTodayPage />} />
+      <Route path="/farm/dashboard" element={<FarmDashboardPage />} />
+      <Route path="/farm/crops" element={<CropListPage />} />
+      <Route path="/farm/crops/new" element={<CropStartPage />} />
+      <Route path="/farm/crops/:id" element={<CropDetailPage />} />
+      <Route path="/farm/harvest" element={<HarvestPage />} />
+      <Route path="/farm/dispatch" element={<DispatchPage />} />
+      <Route path="/farm/expenses" element={<FarmExpensePage />} />
+      <Route path="/farm/planning" element={<FarmPlanningPage />} />
+      <Route path="/farm/setup" element={<FarmSetupPage />} />
+      {/* What the QR on a plot gate resolves to. */}
+      <Route path="/farm/plot/:qr" element={<PlotScanPage />} />
 
       <Route path="/reports" element={<ReportsPage />} />
       <Route path="/ai" element={<AiCentrePage />} />

@@ -1,12 +1,18 @@
-# ChotuG ERP — Purchase & Receiving Module
+# ChotuG ERP — Purchase, Receiving & Farming
 
-A production-shaped implementation of the ChotuG Purchase Module: React + Express + PostgreSQL,
-built directly on the supplied 96-table schema, with free-model AI for forecasting, buy
+A production-shaped implementation of the ChotuG Purchase and Farming modules: React + Express +
+PostgreSQL, built directly on the supplied 96-table schema, with free-model AI for forecasting, buy
 suggestions, price signals and photo-assisted quality checks.
 
-**The one idea behind the whole thing:** every kilogram that enters the business must be
+**The one idea behind purchasing:** every kilogram that enters the business must be
 evidence-backed — a gate entry, a weighment, a quality check and a goods receipt — and what the
 produce *costs* is its landed cost, never the rate on the bill.
+
+**The one idea behind farming:** the person standing in the field reports *ground reality* — crop,
+area, actual weight, a problem, a bill — and the system does everything else. Dates, the task
+calendar, crop age, harvest windows, stock, cost per kg, profit, colour ratings, staff performance
+and the next crop are all derived. A farm-grown crate becomes the same first-class batch a bought
+crate does, so purchasing and farming share one stock ledger and one traceability trail.
 
 ---
 
@@ -50,8 +56,10 @@ docker compose exec api npm run seed
 | `manager@chotug.in` | Purchase Manager | Approvals, supplier scores |
 | `gate@chotug.in` | Gate Executive | Arrivals, gate entry, weighment |
 | `qc@chotug.in` | QC Executive | Quality checks |
-| `wh@chotug.in` | Warehouse Executive | Goods receipts, put-away, stock |
+| `wh@chotug.in` | Warehouse Executive | Goods receipts, put-away, stock, farm deliveries |
 | `finance@chotug.in` | Finance Executive | Invoices, 3-way match, payment status |
+| `farm@chotug.in` | Farm Manager | Crops, harvest, farm cost, crop planning |
+| `field@chotug.in` | Farm Staff | **FARM TODAY only** — done / problem / skip |
 
 Sign in as each one — the navigation genuinely changes, because permissions are checked on the
 server and the menu is built from what came back.
@@ -84,6 +92,43 @@ server and the menu is built from what came back.
    and how far it moved from the last purchase.
 10. **`finance@chotug.in`** → *Capture invoice* for that supplier, then **Run 3-way match**.
     Deliberately bill more than was received and watch the debit note auto-draft.
+
+---
+
+## Try the farming flow in five minutes
+
+The seed leaves three crops growing on ChotuG Farm-01 at different ages, a finished potato crop
+from last season, and a hot-weather forecast.
+
+1. **`field@chotug.in`** → this is a field worker, so the app opens on **FARM TODAY** and there is
+   almost nothing else in the menu. Note the heat alert at the top: the system read the weather and
+   decided, so nobody opens a second app. Each job has exactly three buttons.
+2. Press **DONE** on an irrigation job. Now open *Crops* → that plot → *Calendar*: the next
+   irrigation has already been scheduled. Nobody set a date.
+3. Press **PROBLEM** on any job, pick *Pest*, add a photo. It becomes a task status, a crop-health
+   observation and a manager alert in one action — and the crop turns 🔴 on every screen.
+4. **`farm@chotug.in`** → *Farms & Plots* → open the QR link on Plot-A (`PLOT-FARM01-A`). This is
+   what a worker's phone shows after scanning the gate: that plot's crop, today's job, last
+   watering, last spray, next harvest. Wrong-plot entries mostly stop happening once this exists.
+5. *Crops* → **Start a crop** on the free Plot-D. Choose a crop and an area and watch the right-hand
+   panel fill in: harvest date, expected yield, expected cost, and how many irrigation, fertiliser,
+   spray and inspection jobs are about to be created. Nothing is saved until you commit. Start it —
+   a 30–60 job calendar is written in one transaction.
+6. *Harvest* → pick Plot-C, enter a gross weight and a crate type. Watch the tare subtract itself.
+   Split the weight across the four grades (they must add up to the net — try making them not).
+   Record it: you get a crate label carrying farm, plot, crop age and harvest number.
+7. *Farm → Warehouse* → **Send to warehouse**. Waste never travels; only sellable grades appear.
+8. **`wh@chotug.in`** → *Farm → Warehouse* → **Weigh & receive**. Type a weight 8% short and try to
+   save: the server refuses without a reason. Give one, and in a single transaction it creates
+   batches, labels, a `TRANSFER_IN` ledger row and stock balances, and books the missing kilos as a
+   loss against the crop. Retry the same request — the idempotency key returns the first result
+   instead of doubling your stock.
+9. Same user → *Stock & Batches*. The farm produce is there, alongside purchased stock, valued at
+   what it cost to **grow**. It needed no new screen.
+10. **`owner@chotug.in`** → *Farm Control*. Farm health in one colour, today's job count, the 7-day
+    harvest forecast the warehouse can plan against, and cost per kg measured from finished crops.
+    Then *Crop Planning* → **Buy vs grow**: the potato crop that finished last season cost ₹5.75/kg
+    to grow against a ₹18 market — so it says keep growing, and shows its working.
 
 ---
 
@@ -138,22 +183,35 @@ AI_VISION_MODEL=llama3.2-vision:11b
 chotug-erp/
 ├── db/
 │   ├── 01_schema.sql          the supplied schema, unmodified
-│   └── 02_seed.sql            company, branches, warehouse, bins, products, suppliers,
-│                              QC templates, charge types, approval and alert rules
+│   ├── 02_seed.sql            company, branches, warehouse, bins, products, suppliers,
+│   │                          QC templates, charge types, approval and alert rules
+│   ├── 03_migration_fixes.sql repairs for databases built before the audit-trigger fix
+│   ├── 04_farming.sql         farming schema — additive and idempotent, adds no
+│   │                          breaking change to any existing table
+│   ├── 05_farming_seed.sql    crop master (the agronomy), demo farm, plots, machines
+│   ├── 06_stock_issue.sql     stock issues (the way stock leaves) + approve-within-
+│   │                          your-own-authority
+│   ├── 07_flow_fixes.sql      dead ends found by driving order → receive → store as
+│   │                          each role rather than by reading the code
+│   └── 08_fleet_masters.sql   vehicles and drivers you can add and remove; removal
+│                              retires the row, it never deletes it
 ├── server/
 │   └── src/
 │       ├── db.ts              pool, tenancy GUCs, withTx
-│       ├── domain/index.ts    every formula, pure and testable
+│       ├── domain/index.ts    every purchase formula, pure and testable
+│       ├── domain/farming.ts   every farming formula — calendar, irrigation, colour,
+│       │                       cost/kg, buy-vs-grow, staff score, next crop
 │       ├── platform/          auth & RBAC, numbering, outbox, work queue, alerts, approvals
 │       ├── ai/                provider gateway + the six AI features
-│       ├── modules/           masters · planning · receiving · costing · insights
+│       ├── modules/           masters · planning · receiving · costing · insights ·
+│       │                       farming · inventory
 │       └── scripts/           migrate, seed
 ├── web/
 │   └── src/
 │       ├── styles.css         design tokens (indigo / amber / cyan — no green)
 │       ├── lib/api.ts         fetch client, auth context, formatting
 │       ├── components/ui.tsx  layout, table, chips, KPI, modal, toast, AI box
-│       └── pages/             Home · Planning · Purchase · Receiving · Grn · Finance
+│       └── pages/             Home · Planning · Purchase · Receiving · Grn · Finance · Farming
 └── docs/
     ├── UI_GUIDE.md            ← every page, every button, what each one does
     ├── ARCHITECTURE.md        why it is built this way
@@ -180,7 +238,19 @@ consistent across thousands of inline utility classes. The whole stylesheet is 1
 
 ## What is complete and what is not
 
-**Complete and working end to end:** authentication and RBAC with role limits; the requirement
+**Complete and working end to end (farming):** farm and plot setup with per-plot QR codes; the crop
+master that makes the calendar automatic; one-minute crop start with a full preview and an
+auto-generated 30–60 job calendar; FARM TODAY with done/problem/skip and no forms; weather-driven
+irrigation holds, spray avoidance and heat/frost alerts; automatic next-due dates; three-colour
+crop health with manager alerts; the photo crop diary; harvest-ready countdown; harvest with crate
+tare, four grades and printable labels; farm→warehouse dispatch with the two-sided weight check
+and forced variance reasons; produce entering the existing stock ledger as ordinary batches; farm
+expenses in three fields; automatic cost per kg; expected-vs-actual yield; loss recording with
+system-valued quantities; computed staff performance; machine status; day close; the 7-day harvest
+forecast; demand-based crop planning; buy-vs-grow; next-crop suggestions; seed-to-sale
+traceability; and the owner dashboard.
+
+**Complete and working end to end (purchase):** authentication and RBAC with role limits; the requirement
 note with statistical planning; requirements; source comparison on landed cost; purchase orders
 with the approval engine, maker–checker and revisions; gate entry with locking and exception
 handling; append-only weighment with tare and variance bands; template-driven QC with weighted
@@ -189,6 +259,15 @@ stock ledger, balances and put-away tasks; landed cost allocation with abnormal-
 invoice capture, 3-way match and auto-drafted debit notes; payment status (read-only); supplier
 scoring; the work queue; alerts; seven reports with CSV export; and all six AI features with
 statistical fallbacks.
+
+**Farming, scaffolded rather than finished:** the smart-scale integration records `capture_mode`
+and accepts a scale-written weight, but no serial/TCP driver is written; crop photos are stored as
+data URIs on the row rather than in object storage, which is fine for a diary and wrong for
+volume; `farm_staff_scores` exists as a table but performance is computed on demand rather than
+snapshotted per period; revenue per crop is entered when a crop is closed rather than flowing back
+automatically from sales, because this repository has no sales module to flow from; and the daily
+pass runs when someone opens FARM TODAY rather than on a scheduler (deliberate — see
+ARCHITECTURE.md — but a cron calling `POST /farming/farms/:id/refresh` is the production shape).
 
 **Scaffolded, needs work before production:** OCR for invoice capture (the form is manual);
 weighbridge serial/TCP integration (capture mode is recorded, the driver is not written); label

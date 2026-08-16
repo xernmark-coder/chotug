@@ -269,13 +269,48 @@ costingRouter.post('/invoices', requires('finance.invoice.create'), h(async (req
        dup[0]?.id ?? null, dup[0] ? 0.9 : null, req.actor.userId]);
     const inv = rows[0];
 
+    /* §17 — pair each line to the receipt it is billing.
+     *
+     * The 3-way match reads invoice_lines.matched_grn_line_id, and nothing was
+     * setting it: the capture screen never asked, so every invoice matched
+     * against nothing, reported "Invoice line has no matching goods receipt"
+     * and went to HOLD. The match could not return MATCH for any invoice.
+     *
+     * So when the caller has not paired a line explicitly, pair it by product
+     * against this supplier's posted receipts — narrowed to the invoice's own
+     * PO when it names one, newest first, skipping receipt lines another
+     * invoice has already claimed. An explicit pairing always wins, and a line
+     * we cannot pair stays NULL so the match still reports it honestly. */
+    const claimed = new Set<string>();
     for (const [i, l] of input.lines.entries()) {
+      let grnLineId: string | null = l.matchedGrnLineId ?? null;
+
+      if (!grnLineId && l.productId) {
+        const { rows: cand } = await tx.query(
+          `SELECT gl.id
+             FROM grn_lines gl
+             JOIN grns g ON g.id = gl.grn_id
+            WHERE g.company_id = $1 AND g.status = 'POSTED'
+              AND g.supplier_id = $2
+              AND gl.product_id = $3
+              AND ($4::uuid IS NULL OR g.po_id = $4)
+              AND NOT (gl.id = ANY($5::uuid[]))
+              AND NOT EXISTS (SELECT 1 FROM invoice_lines x
+                               WHERE x.matched_grn_line_id = gl.id)
+            ORDER BY g.posting_date DESC, gl.line_no
+            LIMIT 1`,
+          [req.actor.companyId, input.supplierId, l.productId, input.poId ?? null,
+           [...claimed]]);
+        grnLineId = cand[0]?.id ?? null;
+      }
+      if (grnLineId) claimed.add(grnLineId);
+
       await tx.query(
         `INSERT INTO invoice_lines (company_id, invoice_id, line_no, raw_description, product_id,
               matched_grn_line_id, matched_po_line_id, qty, uom, rate, tax_rate, tax_amount, amount)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
         [req.actor.companyId, inv.id, i + 1, l.rawDescription ?? null, l.productId ?? null,
-         l.matchedGrnLineId ?? null, l.matchedPoLineId ?? null, l.qty, l.uom ?? null,
+         grnLineId, l.matchedPoLineId ?? null, l.qty, l.uom ?? null,
          l.rate, l.taxRate, l.taxAmount, l.amount]);
     }
 
