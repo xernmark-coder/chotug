@@ -4,9 +4,7 @@ services:
     runtime: node
     plan: starter
     buildCommand: cd server && npm install && npm run build
-    startCommand: npm start
-    workingDir: server
-    port: 4000
+    startCommand: cd server && npm start
     
     envVars:
       - key: NODE_ENV
@@ -44,5 +42,3 @@ services:
     name: chotug-postgres
     plan: starter
     ipAllowList: []
-    dbName: chotug_erp
-    user: chotug
