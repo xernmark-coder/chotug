@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { query, withTx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
-import { authenticate, requires } from '../platform/auth.js';
+import { authenticate, staffOnly, requires } from '../platform/auth.js';
 import {
   emit, getSetting, nextDocNo, pushTask, raiseAlert, requestApprovals, resolveTask,
 } from '../platform/services.js';
@@ -14,6 +14,8 @@ import { qcPhotoAssist } from '../ai/features.js';
 
 export const receivingRouter = Router();
 receivingRouter.use(authenticate);
+// Outside supplier logins never reach staff data — see staffOnly().
+receivingRouter.use(staffOnly);
 
 /* ===========================================================================
  * §10 — GATE ENTRY. The truck is at the gate. This is the first record and

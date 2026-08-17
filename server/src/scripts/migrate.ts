@@ -70,6 +70,9 @@ async function main() {
     await run('08_fleet_masters.sql');
     await run('09_user_invites.sql');
     await run('10_po_confirm_queue.sql');
+    await run('12_packing.sql');
+    await run('13_supplier_portal.sql');
+    // Last, so the FORCE that 04 and 06 re-apply is lifted again.
     await run('11_rls_managed_host.sql');
     console.log('\nSchema and master data are in place.');
     console.log('Next: npm run seed   (sets demo passwords and generates demand history)');

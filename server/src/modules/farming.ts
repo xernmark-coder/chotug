@@ -22,7 +22,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { query, withTx, type Tx, type Actor } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
-import { authenticate, requires } from '../platform/auth.js';
+import { authenticate, staffOnly, requires } from '../platform/auth.js';
 import { emit, getSetting, nextDocNo, pushTask, raiseAlert, resolveTask } from '../platform/services.js';
 import { money, qty, round } from '../domain/index.js';
 import {
@@ -34,6 +34,8 @@ import {
 
 export const farmingRouter = Router();
 farmingRouter.use(authenticate);
+// Outside supplier logins never reach staff data — see staffOnly().
+farmingRouter.use(staffOnly);
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 

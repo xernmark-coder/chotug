@@ -610,3 +610,66 @@ label.check input { width: auto; }
 }
 .plot-scan .hero .code { font-size: 30px; font-weight: 700; letter-spacing: -0.03em; }
 .plot-scan .hero .crop { opacity: .9; font-size: 15px; }
+
+/* --- pack labels -------------------------------------------------------- */
+.label-sheet {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+}
+.pack-label {
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  padding: 9px 10px; background: #fff; color: #000;
+  break-inside: avoid; page-break-inside: avoid;
+}
+.pack-label .pl-head { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+.pack-label .pl-head span { color: #555; font-size: 11px; }
+.pack-label .pl-meta {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 12.5px; margin: 3px 0 6px; color: #333;
+}
+.pack-label .pl-meta b { font-size: 15px; color: #000; }
+.pack-label .pl-foot {
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: #555; margin-top: 3px;
+}
+
+/* Printing a label sheet should put labels on the paper and nothing else —
+   not the sidebar, not the modal chrome, not the page background. */
+@media print {
+  body { background: #fff; }
+  .sidebar, .topbar, .toast-wrap, .modal-head, .modal-foot, .no-print { display: none !important; }
+  .modal-back { position: static; padding: 0; background: none; display: block; }
+  .modal { max-width: none; max-height: none; box-shadow: none; border-radius: 0; }
+  .modal-body { overflow: visible; padding: 0; }
+  .label-sheet { grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .pack-label { border: 1px solid #000; }
+}
+
+/* --- public scan page --------------------------------------------------- */
+.scan-page {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(160deg, #312E81 0%, #4338CA 60%, #6366F1 100%);
+  padding: 20px;
+}
+.scan-card {
+  width: 100%; max-width: 420px; background: var(--surface);
+  border-radius: 14px; padding: 26px 24px; box-shadow: var(--shadow-lg);
+}
+.scan-brand {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .12em;
+  color: var(--primary); font-weight: 700; margin-bottom: 10px;
+}
+.scan-hero {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  margin: 14px 0; padding: 14px; border-radius: var(--radius);
+  background: var(--surface-2); border: 1px solid var(--border);
+}
+.scan-hero .lbl {
+  display: block; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--muted); font-weight: 600;
+}
+.scan-hero b { font-size: 21px; letter-spacing: -0.02em; }
+.pack-label .pl-scan {
+  font-size: 9px; color: #777; text-align: center; margin-top: 2px;
+  letter-spacing: .02em;
+}

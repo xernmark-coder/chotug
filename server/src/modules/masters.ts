@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { config, pool, query, withTx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
-import { authenticate, loadActor, requires, signToken, verifyPassword, hashPassword } from '../platform/auth.js';
+import { authenticate, staffOnly, loadActor, requires, signToken, verifyPassword, hashPassword } from '../platform/auth.js';
 import { encryptSecret, inviteEmail, loadSmtp, sendMail, sendTestMail } from '../platform/mailer.js';
 
 export const authRouter = Router();
@@ -181,6 +181,8 @@ authRouter.post('/invite/:token/accept', h(async (req) => {
 
 export const mastersRouter = Router();
 mastersRouter.use(authenticate);
+// Outside supplier logins never reach staff data — see staffOnly().
+mastersRouter.use(staffOnly);
 
 mastersRouter.get('/products', h(async (req) => {
   const search = String(req.query.search ?? '').trim();
@@ -661,12 +663,15 @@ mastersRouter.get('/users', requires('admin.rbac.manage'), h(async (req) =>
                      FILTER (WHERE r.name IS NOT NULL), '{}') AS roles,
             (SELECT i.expires_at FROM user_invites i
               WHERE i.user_id = u.id AND i.accepted_at IS NULL
-              ORDER BY i.created_at DESC LIMIT 1) AS invite_expires_at
+              ORDER BY i.created_at DESC LIMIT 1) AS invite_expires_at,
+            u.supplier_id,
+            sup.trade_name AS supplier_name
        FROM users u
        LEFT JOIN user_role_assignments ura ON ura.user_id = u.id
        LEFT JOIN roles r ON r.id = ura.role_id
+       LEFT JOIN suppliers sup ON sup.id = u.supplier_id
       WHERE u.company_id = $1
-      GROUP BY u.id
+      GROUP BY u.id, sup.trade_name
       ORDER BY u.full_name`,
     [req.actor.companyId])));
 
@@ -675,6 +680,10 @@ mastersRouter.post('/users/invite', requires('admin.rbac.manage'), h(async (req)
     fullName: z.string().trim().min(2, 'Enter their full name'),
     email: z.string().trim().email('Enter a valid email address'),
     roleId: z.string().uuid('Choose a role'),
+    // Set only for an OUTSIDE contact at a supplier. Everything the supplier
+    // portal shows is scoped by this column, so it is the whole of their
+    // access — which is why it is set once, here, and never by them.
+    supplierId: z.string().uuid().nullable().optional(),
   }), req.body);
 
   const email = input.email.toLowerCase();
@@ -690,15 +699,33 @@ mastersRouter.post('/users/invite', requires('admin.rbac.manage'), h(async (req)
   }
 
   const role = await pool.query(
-    'SELECT id FROM roles WHERE id = $1 AND company_id = $2',
+    'SELECT id, code FROM roles WHERE id = $1 AND company_id = $2',
     [input.roleId, req.actor.companyId]);
   if (!role.rowCount) throw ApiError.badRequest('That role does not exist.');
 
+  /* The supplier link and the SUPPLIER role travel together. A supplier login
+   * with no supplier sees nothing and is confusing; an inside role carrying a
+   * supplier link would quietly scope a colleague to one vendor. Refuse both. */
+  const isSupplierRole = role.rows[0].code === 'SUPPLIER';
+  if (isSupplierRole && !input.supplierId) {
+    throw ApiError.badRequest('Choose which supplier this person belongs to.');
+  }
+  if (!isSupplierRole && input.supplierId) {
+    throw ApiError.badRequest('Only the Supplier role can be linked to a supplier.');
+  }
+  if (input.supplierId) {
+    const sup = await pool.query(
+      'SELECT id FROM suppliers WHERE id = $1 AND company_id = $2',
+      [input.supplierId, req.actor.companyId]);
+    if (!sup.rowCount) throw ApiError.badRequest('That supplier does not exist.');
+  }
+
   const userId = await withTx(req.actor, async (tx) => {
     const { rows } = await tx.query(
-      `INSERT INTO users (company_id, full_name, email, status, default_branch_id, created_by)
-       VALUES ($1, $2, $3, 'INVITED', $4, $5) RETURNING id`,
-      [req.actor.companyId, input.fullName, email, req.actor.branchId, req.actor.userId]);
+      `INSERT INTO users (company_id, full_name, email, status, default_branch_id, supplier_id, created_by)
+       VALUES ($1, $2, $3, 'INVITED', $4, $5, $6) RETURNING id`,
+      [req.actor.companyId, input.fullName, email, req.actor.branchId,
+       input.supplierId ?? null, req.actor.userId]);
     await tx.query(
       `INSERT INTO user_role_assignments (company_id, user_id, role_id, created_by)
        VALUES ($1, $2, $3, $4)`,

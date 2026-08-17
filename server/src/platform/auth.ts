@@ -29,7 +29,7 @@ export async function hashPassword(plain: string) {
 export async function loadActor(userId: string): Promise<Actor | null> {
   const { rows } = await pool.query(
     `
-    SELECT u.id, u.company_id, u.default_branch_id, u.status,
+    SELECT u.id, u.company_id, u.default_branch_id, u.status, u.supplier_id,
            COALESCE(array_agg(DISTINCT r.code)   FILTER (WHERE r.code IS NOT NULL), '{}') AS role_codes,
            COALESCE(array_agg(DISTINCT rp.permission_code)
                     FILTER (WHERE rp.permission_code IS NOT NULL), '{}')                  AS perms,
@@ -57,6 +57,7 @@ export async function loadActor(userId: string): Promise<Actor | null> {
     userId: r.id,
     companyId: r.company_id,
     branchId: r.default_branch_id,
+    supplierId: r.supplier_id ?? null,
     permissions: new Set<string>(r.perms),
     roleCodes: r.role_codes,
     limits: {
@@ -110,6 +111,29 @@ export function requires(...codes: string[]) {
     }
     next();
   };
+}
+
+/**
+ * Staff-only gate.
+ *
+ * Every router in this product was written when "authenticated" and "one of
+ * us" were the same thing, so a great many read endpoints carry no requires()
+ * at all — the dashboard, the stock list, the purchase order list. The moment
+ * an OUTSIDE user could sign in, all of those became readable by a supplier.
+ *
+ * Rather than retrofit a permission onto each one and hope none was missed,
+ * outside users are refused at the door of every staff router. It fails
+ * closed: a new endpoint added tomorrow is protected without anyone
+ * remembering to protect it.
+ */
+export function staffOnly(req: Request, _res: Response, next: NextFunction) {
+  const actor = (req as Ctx).actor;
+  if (!actor) return next(ApiError.unauthorized());
+  if (actor.supplierId) {
+    return next(ApiError.forbidden(
+      'This is a supplier login. It can only see your own orders, deliveries and invoices.'));
+  }
+  next();
 }
 
 export function can(actor: Actor, code: string) {

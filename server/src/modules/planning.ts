@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { query, withTx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
-import { authenticate, requires } from '../platform/auth.js';
+import { authenticate, staffOnly, requires } from '../platform/auth.js';
 import {
   emit, getSetting, nextDocNo, pushTask, raiseAlert, requestApprovals, resolveTask,
 } from '../platform/services.js';
@@ -13,6 +13,8 @@ import { buySuggestion, forecastDemand, priceSignal } from '../ai/features.js';
 
 export const planningRouter = Router();
 planningRouter.use(authenticate);
+// Outside supplier logins never reach staff data — see staffOnly().
+planningRouter.use(staffOnly);
 
 /** Money the way an approver reads it, for messages and queue subtitles. */
 const inrText = (n: number) =>

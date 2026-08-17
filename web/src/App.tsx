@@ -11,6 +11,9 @@ import { FleetPage } from './pages/Fleet';
 import { AcceptInvitePage, PeoplePage } from './pages/People';
 import { QuickOrderPage } from './pages/QuickOrder';
 import { SalesPage } from './pages/Sales';
+import { PackingPage } from './pages/Packing';
+import { ScanLandingPage, ScanResultPage } from './pages/Scan';
+import { SupplierPortalPage } from './pages/SupplierPortal';
 import {
   AiCentrePage, AlertsPage, InvoiceCreatePage, InvoiceDetailPage, InvoiceListPage,
   PaymentsPage, ProfilePage, ReportsPage, SettingsPage, SuppliersPage,
@@ -31,7 +34,25 @@ export default function App() {
         <Route path="/login" element={<LoginPage />} />
         {/* Signed out by definition — an invited person has no account yet. */}
         <Route path="/accept-invite" element={<AcceptInvitePage />} />
+        {/* Public by design — a shopkeeper scanning a pack has no account. */}
+        <Route path="/p" element={<ScanLandingPage />} />
+        <Route path="/p/:code" element={<ScanResultPage />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    );
+  }
+
+  /* An outside contact at a supplier gets their own application, not our
+   * sidebar with most of it hidden. Anything they ask for that is not theirs
+   * lands back on their own home. */
+  if (me.roles.includes('SUPPLIER')) {
+    return (
+      <Routes>
+        <Route path="/" element={<SupplierPortalPage />} />
+        <Route path="/p" element={<ScanLandingPage />} />
+        <Route path="/p/:code" element={<ScanResultPage />} />
+        <Route path="/profile" element={<ProfilePage />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     );
   }
@@ -63,6 +84,7 @@ export default function App() {
       <Route path="/grns/:id" element={<GrnDetailPage />} />
       <Route path="/putaway" element={<PutawayPage />} />
       <Route path="/stock" element={<StockPage />} />
+      <Route path="/packing" element={<PackingPage />} />
       <Route path="/sales" element={<SalesPage />} />
 
       <Route path="/invoices" element={<InvoiceListPage />} />
@@ -93,6 +115,8 @@ export default function App() {
       {/* Reachable while signed in too, so an admin testing the link, or
           someone already logged in on that browser, still lands correctly. */}
       <Route path="/accept-invite" element={<AcceptInvitePage />} />
+      <Route path="/p" element={<ScanLandingPage />} />
+      <Route path="/p/:code" element={<ScanResultPage />} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

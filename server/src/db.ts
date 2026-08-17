@@ -64,6 +64,8 @@ export type Actor = {
   userId: string;
   companyId: string;
   branchId: string | null;
+  /** Set for an OUTSIDE contact at a supplier; null for our own staff. */
+  supplierId: string | null;
   permissions: Set<string>;
   roleCodes: string[];
   limits: {

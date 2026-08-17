@@ -12,6 +12,8 @@ import { costingRouter } from './modules/costing.js';
 import { insightsRouter } from './modules/insights.js';
 import { farmingRouter } from './modules/farming.js';
 import { inventoryRouter } from './modules/inventory.js';
+import { publicRouter } from './modules/public.js';
+import { supplierRouter } from './modules/supplier.js';
 
 const app = express();
 
@@ -31,6 +33,8 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
+// Unauthenticated by design — a shopkeeper scanning a label has no account.
+app.use('/api/public', publicRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/masters', mastersRouter);
 app.use('/api/planning', planningRouter);
@@ -39,6 +43,7 @@ app.use('/api/costing', costingRouter);
 app.use('/api/insights', insightsRouter);
 app.use('/api/farming', farmingRouter);
 app.use('/api/inventory', inventoryRouter);
+app.use('/api/supplier', supplierRouter);
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'No such endpoint' }));
 app.use(errorHandler);

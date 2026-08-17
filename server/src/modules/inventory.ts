@@ -17,15 +17,18 @@
  * ======================================================================== */
 
 import { Router } from 'express';
+import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { query, withTx } from '../db.js';
+import { query, withTx, type Actor, type Tx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
-import { authenticate, requires } from '../platform/auth.js';
+import { authenticate, staffOnly, requires } from '../platform/auth.js';
 import { emit, nextDocNo, raiseAlert } from '../platform/services.js';
 import { money, qty as roundQty, round } from '../domain/index.js';
 
 export const inventoryRouter = Router();
 inventoryRouter.use(authenticate);
+// Outside supplier logins never reach staff data — see staffOnly().
+inventoryRouter.use(staffOnly);
 
 /** Reasons that remove value without earning any — these need the higher gate. */
 const WRITE_OFF_REASONS = new Set(['WASTAGE', 'ADJUSTMENT']);
@@ -70,29 +73,31 @@ inventoryRouter.get('/issuable', h(async (req) =>
 /* ---------------------------------------------------------------------------
  * THE issue posting. Everything below happens in one transaction.
  * ------------------------------------------------------------------------ */
-inventoryRouter.post('/issues', requires('inventory.stock.issue'), h(async (req) => {
-  const input = body(z.object({
-    idempotencyKey: z.string().min(8, 'Missing idempotency key'),
-    warehouseId: z.string().uuid(),
-    issueDate: z.string().optional(),
-    reason: z.enum(['SALE', 'TRANSFER_OUT', 'WASTAGE', 'RETURN', 'CONSUMPTION', 'ADJUSTMENT']),
-    partyName: z.string().optional(),
-    referenceNo: z.string().optional(),
-    note: z.string().optional(),
-    lines: z.array(z.object({
-      batchId: z.string().uuid(),
-      qty: z.number().positive('Enter how much is leaving'),
-      // The selling rate for a sale. Left blank for anything else, where the
-      // batch's own landed cost is the honest value of what left.
-      rate: z.number().nonnegative().nullable().optional(),
-    })).min(1, 'Nothing to issue'),
-  }), req.body);
+const IssueIn = z.object({
+  idempotencyKey: z.string().min(8, 'Missing idempotency key'),
+  warehouseId: z.string().uuid(),
+  issueDate: z.string().optional(),
+  reason: z.enum(['SALE', 'TRANSFER_OUT', 'WASTAGE', 'RETURN', 'CONSUMPTION', 'ADJUSTMENT']),
+  partyName: z.string().optional(),
+  referenceNo: z.string().optional(),
+  note: z.string().optional(),
+  lines: z.array(z.object({
+    batchId: z.string().uuid(),
+    qty: z.number().positive('Enter how much is leaving'),
+    // The selling rate for a sale. Left blank for anything else, where the
+    // batch's own landed cost is the honest value of what left.
+    rate: z.number().nonnegative().nullable().optional(),
+  })).min(1, 'Nothing to issue'),
+});
+export type IssueInput = z.infer<typeof IssueIn>;
 
+/** Gates that are about the REQUEST rather than the posting. */
+function assertIssueAllowed(actor: Actor, input: IssueInput) {
   // Anything that is not a sale destroys value with nothing coming back, so it
   // needs both a written reason and the higher permission.
   if (WRITE_OFF_REASONS.has(input.reason)) {
-    if (!req.actor.permissions.has('inventory.stock.writeoff')
-        && !req.actor.permissions.has('admin.override')) {
+    if (!actor.permissions.has('inventory.stock.writeoff')
+        && !actor.permissions.has('admin.override')) {
       throw ApiError.forbidden(
         'Writing stock off as wastage or an adjustment needs a manager. You can still record a sale, transfer, return or consumption.');
     }
@@ -101,171 +106,187 @@ inventoryRouter.post('/issues', requires('inventory.stock.issue'), h(async (req)
     throw ApiError.rule(
       `Stock leaving as ${input.reason.replace(/_/g, ' ').toLowerCase()} needs a written reason.`);
   }
+}
 
-  return withTx(req.actor, async (tx) => {
-    /* --- idempotency: the same retry guarantee a GRN posting has ---------- */
-    const { rows: idem } = await tx.query(
-      `INSERT INTO idempotency_keys (key, company_id, user_id, endpoint, request_hash, state)
-       VALUES ($1,$2,$3,'POST /inventory/issues',$4,'IN_PROGRESS')
-       ON CONFLICT (key) DO NOTHING RETURNING key`,
-      [input.idempotencyKey, req.actor.companyId, req.actor.userId,
-       Buffer.from(JSON.stringify(input.lines)).toString('base64').slice(0, 64)]);
-    if (idem.length === 0) {
-      const { rows: prev } = await tx.query(
-        `SELECT response_body FROM idempotency_keys WHERE key=$1`, [input.idempotencyKey]);
-      if (prev[0]?.response_body) return prev[0].response_body;
-      throw ApiError.conflict('This issue is already being posted. Please wait a moment.');
+/**
+ * THE stock-out posting — extracted from its route so that anything else which
+ * moves stock (selling a packed crate, for one) commits the movement and its
+ * own bookkeeping in the SAME transaction. Two endpoints writing their own
+ * ledger rows is how a stock system starts disagreeing with itself; one
+ * function that everybody calls is how it does not.
+ *
+ * Caller supplies the transaction, so the pack sale can lock the pack, post
+ * the issue and mark the pack sold atomically.
+ */
+export async function postIssue(tx: Tx, actor: Actor, input: IssueInput) {
+  /* --- idempotency: the same retry guarantee a GRN posting has ---------- */
+  const { rows: idem } = await tx.query(
+    `INSERT INTO idempotency_keys (key, company_id, user_id, endpoint, request_hash, state)
+     VALUES ($1,$2,$3,'POST /inventory/issues',$4,'IN_PROGRESS')
+     ON CONFLICT (key) DO NOTHING RETURNING key`,
+    [input.idempotencyKey, actor.companyId, actor.userId,
+     Buffer.from(JSON.stringify(input.lines)).toString('base64').slice(0, 64)]);
+  if (idem.length === 0) {
+    const { rows: prev } = await tx.query(
+      `SELECT response_body FROM idempotency_keys WHERE key=$1`, [input.idempotencyKey]);
+    if (prev[0]?.response_body) return prev[0].response_body;
+    throw ApiError.conflict('This issue is already being posted. Please wait a moment.');
+  }
+
+  const { rows: wh } = await tx.query(
+    `SELECT id, branch_id, name FROM warehouses WHERE id=$1 AND company_id=$2`,
+    [input.warehouseId, actor.companyId]);
+  const warehouse = wh[0];
+  if (!warehouse) throw ApiError.notFound('Warehouse not found');
+
+  const issueNo = await nextDocNo(tx, actor, warehouse.branch_id, 'ISS');
+  const { rows: hdr } = await tx.query(
+    `INSERT INTO stock_issues (company_id, branch_id, warehouse_id, issue_no, issue_date,
+            reason, party_name, reference_no, note, status, idempotency_key,
+            posted_by, created_by, updated_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'POSTED',$10,$11,$11,$11) RETURNING *`,
+    [actor.companyId, warehouse.branch_id, warehouse.id, issueNo,
+     input.issueDate ?? new Date().toISOString().slice(0, 10), input.reason,
+     input.partyName ?? null, input.referenceNo ?? null, input.note ?? null,
+     input.idempotencyKey, actor.userId]);
+  const issue = hdr[0];
+
+  let totalQty = 0, totalWeight = 0, totalValue = 0, totalCost = 0;
+  const posted: any[] = [];
+
+  for (const [i, l] of input.lines.entries()) {
+    // FOR UPDATE on the balance is what makes two people selling the last
+    // crate at the same time impossible rather than merely unlikely.
+    const { rows: sbRows } = await tx.query(
+      `SELECT sb.qty, sb.reserved_qty, sb.weight_kg, sb.product_id,
+              b.batch_no, b.landed_rate, b.landed_rate_per_kg, b.status AS batch_status,
+              b.remaining_qty, b.remaining_weight_kg,
+              p.name AS product_name, p.base_uom
+         FROM stock_balances sb
+         JOIN batches b  ON b.id = sb.batch_id
+         JOIN products p ON p.id = sb.product_id
+        WHERE sb.batch_id = $1 AND sb.warehouse_id = $2 AND sb.company_id = $3
+        FOR UPDATE OF sb`,
+      [l.batchId, warehouse.id, actor.companyId]);
+    const sb = sbRows[0];
+    if (!sb) throw ApiError.notFound(`That batch is not in ${warehouse.name}.`);
+    if (sb.batch_status !== 'ACTIVE') {
+      throw ApiError.rule(`Batch ${sb.batch_no} is ${sb.batch_status.toLowerCase()} and cannot be issued.`);
     }
 
-    const { rows: wh } = await tx.query(
-      `SELECT id, branch_id, name FROM warehouses WHERE id=$1 AND company_id=$2`,
-      [input.warehouseId, req.actor.companyId]);
-    const warehouse = wh[0];
-    if (!warehouse) throw ApiError.notFound('Warehouse not found');
-
-    const issueNo = await nextDocNo(tx, req.actor, warehouse.branch_id, 'ISS');
-    const { rows: hdr } = await tx.query(
-      `INSERT INTO stock_issues (company_id, branch_id, warehouse_id, issue_no, issue_date,
-              reason, party_name, reference_no, note, status, idempotency_key,
-              posted_by, created_by, updated_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'POSTED',$10,$11,$11,$11) RETURNING *`,
-      [req.actor.companyId, warehouse.branch_id, warehouse.id, issueNo,
-       input.issueDate ?? new Date().toISOString().slice(0, 10), input.reason,
-       input.partyName ?? null, input.referenceNo ?? null, input.note ?? null,
-       input.idempotencyKey, req.actor.userId]);
-    const issue = hdr[0];
-
-    let totalQty = 0, totalWeight = 0, totalValue = 0, totalCost = 0;
-    const posted: any[] = [];
-
-    for (const [i, l] of input.lines.entries()) {
-      // FOR UPDATE on the balance is what makes two people selling the last
-      // crate at the same time impossible rather than merely unlikely.
-      const { rows: sbRows } = await tx.query(
-        `SELECT sb.qty, sb.reserved_qty, sb.weight_kg, sb.product_id,
-                b.batch_no, b.landed_rate, b.landed_rate_per_kg, b.status AS batch_status,
-                b.remaining_qty, b.remaining_weight_kg,
-                p.name AS product_name, p.base_uom
-           FROM stock_balances sb
-           JOIN batches b  ON b.id = sb.batch_id
-           JOIN products p ON p.id = sb.product_id
-          WHERE sb.batch_id = $1 AND sb.warehouse_id = $2 AND sb.company_id = $3
-          FOR UPDATE OF sb`,
-        [l.batchId, warehouse.id, req.actor.companyId]);
-      const sb = sbRows[0];
-      if (!sb) throw ApiError.notFound(`That batch is not in ${warehouse.name}.`);
-      if (sb.batch_status !== 'ACTIVE') {
-        throw ApiError.rule(`Batch ${sb.batch_no} is ${sb.batch_status.toLowerCase()} and cannot be issued.`);
-      }
-
-      const available = round(Number(sb.qty) - Number(sb.reserved_qty), 3);
-      if (l.qty > available + 0.001) {
-        throw ApiError.rule(
-          `Only ${available} ${sb.base_uom} of batch ${sb.batch_no} is available, not ${l.qty}.`);
-      }
-
-      // Weight comes off in the same proportion as quantity, so a part-issued
-      // batch keeps a weight that still matches what is physically on the rack.
-      const weightOut = Number(sb.qty) > 0 && sb.weight_kg != null
-        ? round(Number(sb.weight_kg) * (l.qty / Number(sb.qty)), 3)
-        : null;
-
-      const costPerUnit = Number(sb.landed_rate ?? 0);
-      const rate = l.rate ?? costPerUnit;      // no sale price → value it at cost
-      const lineValue = money(l.qty * rate);
-      const lineCost = money(l.qty * costPerUnit);
-
-      const { rows: lineRows } = await tx.query(
-        `INSERT INTO stock_issue_lines (company_id, issue_id, line_no, product_id, batch_id,
-                qty, weight_kg, uom, rate, value, landed_rate_per_kg)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
-        [req.actor.companyId, issue.id, i + 1, sb.product_id, l.batchId,
-         l.qty, weightOut, sb.base_uom, rate, lineValue, sb.landed_rate_per_kg]);
-      const issueLineId = lineRows[0].id;
-
-      /* --- the ledger. Append-only, OUT, once. ---------------------------
-       * ref_line_id was the batch id, and stock_ledger carries
-       * UNIQUE (ref_type, ref_line_id, txn_type) — so a batch could be sold
-       * exactly once, ever, and the second sale died on a constraint whose
-       * error message talks about goods receipts. Selling half a crate today
-       * and half tomorrow is the normal case for produce. The issue LINE id is
-       * the honest key: one ledger row per line, unique for all time. */
-      await tx.query(
-        `INSERT INTO stock_ledger (company_id, branch_id, warehouse_id, product_id, batch_id,
-                direction, qty, weight_kg, uom, rate, value, txn_type, ref_type, ref_id,
-                ref_line_id, posted_at, posted_by)
-         VALUES ($1,$2,$3,$4,$5,'OUT',$6,$7,$8,$9,$10,$11,'stock_issue',$12,$13,now(),$14)`,
-        [req.actor.companyId, warehouse.branch_id, warehouse.id, sb.product_id, l.batchId,
-         l.qty, weightOut, sb.base_uom, rate, lineValue, input.reason, issue.id,
-         issueLineId, req.actor.userId]);
-
-      await tx.query(
-        `UPDATE stock_balances
-            SET qty = qty - $3,
-                weight_kg = GREATEST(weight_kg - COALESCE($4, 0), 0),
-                updated_at = now()
-          WHERE batch_id = $1 AND warehouse_id = $2`,
-        [l.batchId, warehouse.id, l.qty, weightOut]);
-
-      // The batch is the physical thing; keep it in step with the balance and
-      // retire it when nothing is left, so FEFO stops offering an empty crate.
-      await tx.query(
-        `UPDATE batches
-            SET remaining_qty = GREATEST(remaining_qty - $2, 0),
-                remaining_weight_kg = GREATEST(COALESCE(remaining_weight_kg, 0) - COALESCE($3, 0), 0),
-                status = CASE WHEN remaining_qty - $2 <= 0.001 THEN 'CONSUMED' ELSE status END,
-                updated_by = $4
-          WHERE id = $1`,
-        [l.batchId, l.qty, weightOut, req.actor.userId]);
-
-      totalQty = roundQty(totalQty + l.qty);
-      totalWeight = round(totalWeight + (weightOut ?? 0), 3);
-      totalValue = money(totalValue + lineValue);
-      totalCost = money(totalCost + lineCost);
-
-      posted.push({
-        batchId: l.batchId, batchNo: sb.batch_no, product: sb.product_name,
-        qty: l.qty, uom: sb.base_uom, weightKg: weightOut,
-        rate, value: lineValue, cost: lineCost,
-        remaining: round(available - l.qty, 3),
-      });
+    const available = round(Number(sb.qty) - Number(sb.reserved_qty), 3);
+    if (l.qty > available + 0.001) {
+      throw ApiError.rule(
+        `Only ${available} ${sb.base_uom} of batch ${sb.batch_no} is available, not ${l.qty}.`);
     }
+
+    // Weight comes off in the same proportion as quantity, so a part-issued
+    // batch keeps a weight that still matches what is physically on the rack.
+    const weightOut = Number(sb.qty) > 0 && sb.weight_kg != null
+      ? round(Number(sb.weight_kg) * (l.qty / Number(sb.qty)), 3)
+      : null;
+
+    const costPerUnit = Number(sb.landed_rate ?? 0);
+    const rate = l.rate ?? costPerUnit;      // no sale price → value it at cost
+    const lineValue = money(l.qty * rate);
+    const lineCost = money(l.qty * costPerUnit);
+
+    const { rows: lineRows } = await tx.query(
+      `INSERT INTO stock_issue_lines (company_id, issue_id, line_no, product_id, batch_id,
+              qty, weight_kg, uom, rate, value, landed_rate_per_kg)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+      [actor.companyId, issue.id, i + 1, sb.product_id, l.batchId,
+       l.qty, weightOut, sb.base_uom, rate, lineValue, sb.landed_rate_per_kg]);
+    const issueLineId = lineRows[0].id;
+
+    /* --- the ledger. Append-only, OUT, once. ---------------------------
+     * ref_line_id was the batch id, and stock_ledger carries
+     * UNIQUE (ref_type, ref_line_id, txn_type) — so a batch could be sold
+     * exactly once, ever, and the second sale died on a constraint whose
+     * error message talks about goods receipts. Selling half a crate today
+     * and half tomorrow is the normal case for produce. The issue LINE id is
+     * the honest key: one ledger row per line, unique for all time. */
+    await tx.query(
+      `INSERT INTO stock_ledger (company_id, branch_id, warehouse_id, product_id, batch_id,
+              direction, qty, weight_kg, uom, rate, value, txn_type, ref_type, ref_id,
+              ref_line_id, posted_at, posted_by)
+       VALUES ($1,$2,$3,$4,$5,'OUT',$6,$7,$8,$9,$10,$11,'stock_issue',$12,$13,now(),$14)`,
+      [actor.companyId, warehouse.branch_id, warehouse.id, sb.product_id, l.batchId,
+       l.qty, weightOut, sb.base_uom, rate, lineValue, input.reason, issue.id,
+       issueLineId, actor.userId]);
 
     await tx.query(
-      `UPDATE stock_issues SET total_qty=$2, total_weight_kg=$3, total_value=$4 WHERE id=$1`,
-      [issue.id, totalQty, totalWeight, totalValue]);
+      `UPDATE stock_balances
+          SET qty = qty - $3,
+              weight_kg = GREATEST(weight_kg - COALESCE($4, 0), 0),
+              updated_at = now()
+        WHERE batch_id = $1 AND warehouse_id = $2`,
+      [l.batchId, warehouse.id, l.qty, weightOut]);
 
-    // A write-off is money gone. It should be visible without anyone opening a
-    // report to look for it.
-    if (WRITE_OFF_REASONS.has(input.reason)) {
-      await raiseAlert(tx, req.actor, {
-        branchId: warehouse.branch_id, alertType: 'STOCK_WRITE_OFF',
-        severity: totalCost > 10000 ? 'HIGH' : 'MEDIUM',
-        entityType: 'stock_issue', entityId: issue.id,
-        title: `${issueNo}: ${totalQty} units written off (${money(totalCost)})`,
-        message: input.note ?? 'No reason given.',
-        meta: { reason: input.reason, totalQty, totalCost },
-      });
-    }
+    // The batch is the physical thing; keep it in step with the balance and
+    // retire it when nothing is left, so FEFO stops offering an empty crate.
+    await tx.query(
+      `UPDATE batches
+          SET remaining_qty = GREATEST(remaining_qty - $2, 0),
+              remaining_weight_kg = GREATEST(COALESCE(remaining_weight_kg, 0) - COALESCE($3, 0), 0),
+              status = CASE WHEN remaining_qty - $2 <= 0.001 THEN 'CONSUMED' ELSE status END,
+              updated_by = $4
+        WHERE id = $1`,
+      [l.batchId, l.qty, weightOut, actor.userId]);
 
-    await emit(tx, req.actor, 'stock_issue', issue.id, 'stock.issued', {
-      issueNo, reason: input.reason, warehouseId: warehouse.id,
-      totalQty, totalValue, totalCost, lines: posted.length,
+    totalQty = roundQty(totalQty + l.qty);
+    totalWeight = round(totalWeight + (weightOut ?? 0), 3);
+    totalValue = money(totalValue + lineValue);
+    totalCost = money(totalCost + lineCost);
+
+    posted.push({
+      batchId: l.batchId, batchNo: sb.batch_no, product: sb.product_name,
+      qty: l.qty, uom: sb.base_uom, weightKg: weightOut,
+      rate, value: lineValue, cost: lineCost,
+      remaining: round(available - l.qty, 3),
     });
+  }
 
-    const response = {
-      ...issue,
-      totalQty, totalWeightKg: totalWeight, totalValue, totalCost,
-      // For a sale this is the margin; for anything else it is the loss.
-      marginValue: input.reason === 'SALE' ? money(totalValue - totalCost) : null,
-      lines: posted,
-    };
-    await tx.query(
-      `UPDATE idempotency_keys SET state='COMPLETED', response_body=$2, status_code=200,
-              completed_at=now() WHERE key=$1`,
-      [input.idempotencyKey, JSON.stringify(response)]);
-    return response;
+  await tx.query(
+    `UPDATE stock_issues SET total_qty=$2, total_weight_kg=$3, total_value=$4 WHERE id=$1`,
+    [issue.id, totalQty, totalWeight, totalValue]);
+
+  // A write-off is money gone. It should be visible without anyone opening a
+  // report to look for it.
+  if (WRITE_OFF_REASONS.has(input.reason)) {
+    await raiseAlert(tx, actor, {
+      branchId: warehouse.branch_id, alertType: 'STOCK_WRITE_OFF',
+      severity: totalCost > 10000 ? 'HIGH' : 'MEDIUM',
+      entityType: 'stock_issue', entityId: issue.id,
+      title: `${issueNo}: ${totalQty} units written off (${money(totalCost)})`,
+      message: input.note ?? 'No reason given.',
+      meta: { reason: input.reason, totalQty, totalCost },
+    });
+  }
+
+  await emit(tx, actor, 'stock_issue', issue.id, 'stock.issued', {
+    issueNo, reason: input.reason, warehouseId: warehouse.id,
+    totalQty, totalValue, totalCost, lines: posted.length,
   });
+
+  const response = {
+    ...issue,
+    totalQty, totalWeightKg: totalWeight, totalValue, totalCost,
+    // For a sale this is the margin; for anything else it is the loss.
+    marginValue: input.reason === 'SALE' ? money(totalValue - totalCost) : null,
+    lines: posted,
+  };
+  await tx.query(
+    `UPDATE idempotency_keys SET state='COMPLETED', response_body=$2, status_code=200,
+            completed_at=now() WHERE key=$1`,
+    [input.idempotencyKey, JSON.stringify(response)]);
+  return response;
+}
+
+inventoryRouter.post('/issues', requires('inventory.stock.issue'), h(async (req) => {
+  const input = body(IssueIn, req.body);
+  assertIssueAllowed(req.actor, input);
+  return withTx(req.actor, (tx) => postIssue(tx, req.actor, input));
 }));
 
 inventoryRouter.get('/issues', h(async (req) =>
@@ -558,4 +579,314 @@ inventoryRouter.get('/sell-suggestions', h(async (req) => {
         .reduce((a, s) => a + s.valueAtRisk, 0), 2),
     },
   };
+}));
+
+/* ===========================================================================
+   PACKING — loose stock becomes labelled, priced, sellable packs
+
+   A pack does not move stock. The kilos stay on the batch until the pack is
+   sold, and that sale goes through POST /inventory/issues like every other
+   outward movement. Packing records how the stock has been made up, what each
+   pack costs the buyer, and the code printed on it.
+   ======================================================================== */
+
+/** Short, unambiguous, unique for all time. No 0/O or 1/I — these get read off
+ *  a smudged label under a warehouse light and typed in by hand when the
+ *  scanner fails. */
+const CODE_ALPHABET = '23456789ACDEFGHJKLMNPQRTUVWXY';
+function packCode() {
+  const n = randomBytes(8);
+  let out = 'PK';
+  for (let i = 0; i < 8; i++) out += CODE_ALPHABET[n[i] % CODE_ALPHABET.length];
+  return out;
+}
+
+/** What can still be packed: on-hand batches with how much is already packed. */
+inventoryRouter.get('/packable', h(async (req) =>
+  query(req.actor,
+    `SELECT b.id AS batch_id, b.batch_no, b.grade, p.id AS product_id,
+            p.name AS product_name, p.sku, p.base_uom,
+            sb.warehouse_id, w.name AS warehouse_name,
+            (sb.qty - sb.reserved_qty) AS available_qty,
+            b.landed_rate, b.landed_rate_per_kg,
+            COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date,
+            (COALESCE(b.predicted_expiry_date, b.expiry_date) - CURRENT_DATE) AS days_left,
+            COALESCE((SELECT SUM(pk.qty) FROM packs pk
+                       WHERE pk.batch_id = b.id AND pk.status = 'IN_STOCK'), 0) AS packed_qty
+       FROM stock_balances sb
+       JOIN batches b    ON b.id = sb.batch_id
+       JOIN products p   ON p.id = sb.product_id
+       JOIN warehouses w ON w.id = sb.warehouse_id
+      WHERE sb.company_id = $1
+        AND sb.qty - sb.reserved_qty > 0
+        AND b.status = 'ACTIVE'
+        AND ($2::uuid IS NULL OR sb.warehouse_id = $2)
+      ORDER BY COALESCE(b.predicted_expiry_date, b.expiry_date) NULLS LAST, p.name`,
+    [req.actor.companyId, req.query.warehouseId ?? null])));
+
+/**
+ * Pack a batch into groups. Each group is "N packs of this size at this price"
+ * — the 5 kg premium crates and the 2 kg retail bags off one lot of banana.
+ */
+inventoryRouter.post('/pack-runs', requires('inventory.stock.issue'), h(async (req) => {
+  const input = body(z.object({
+    batchId: z.string().uuid(),
+    warehouseId: z.string().uuid(),
+    packedOn: z.string().optional(),
+    note: z.string().optional(),
+    groups: z.array(z.object({
+      label: z.string().trim().optional(),
+      count: z.coerce.number().int().min(1, 'At least one pack').max(500, 'Split this into smaller runs'),
+      qtyPerPack: z.coerce.number().positive('How much goes in each pack?'),
+      price: z.coerce.number().nonnegative('What does one pack sell for?'),
+    })).min(1, 'Add at least one group of packs'),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows: sbRows } = await tx.query(
+      `SELECT sb.qty, sb.reserved_qty, sb.product_id, b.batch_no, b.grade,
+              b.landed_rate, b.status AS batch_status, p.name AS product_name, p.base_uom,
+              w.branch_id
+         FROM stock_balances sb
+         JOIN batches b    ON b.id = sb.batch_id
+         JOIN products p   ON p.id = sb.product_id
+         JOIN warehouses w ON w.id = sb.warehouse_id
+        WHERE sb.batch_id = $1 AND sb.warehouse_id = $2 AND sb.company_id = $3
+        FOR UPDATE OF sb`,
+      [input.batchId, input.warehouseId, req.actor.companyId]);
+    const sb = sbRows[0];
+    if (!sb) throw ApiError.notFound('That batch is not in this warehouse');
+    if (sb.batch_status !== 'ACTIVE') throw ApiError.rule('That batch is not active.');
+
+    const wanted = input.groups.reduce((a, g) => a + g.count * g.qtyPerPack, 0);
+    const { rows: already } = await tx.query(
+      `SELECT COALESCE(SUM(qty), 0) AS q FROM packs
+        WHERE batch_id = $1 AND status = 'IN_STOCK'`, [input.batchId]);
+    const available = Number(sb.qty) - Number(sb.reserved_qty);
+    const free = available - Number(already[0].q);
+
+    /* Packing more than exists is how a shop ends up with a barcode for a
+     * crate nobody can find. The stock is not moved here, so nothing else
+     * would catch it until the sale failed. */
+    if (wanted > free + 0.001) {
+      throw ApiError.rule(
+        `That is ${roundQty(wanted)} ${sb.base_uom} of packs from ${roundQty(free)} ${sb.base_uom} still unpacked on this batch.`,
+        { available: free, wanted });
+    }
+
+    const runNo = await nextDocNo(tx, req.actor, sb.branch_id, 'PCK');
+    const { rows: runRows } = await tx.query(
+      `INSERT INTO pack_runs (company_id, branch_id, warehouse_id, batch_id, product_id,
+              run_no, packed_on, pack_count, total_qty, note, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [req.actor.companyId, sb.branch_id, input.warehouseId, input.batchId, sb.product_id,
+       runNo, input.packedOn ?? new Date().toISOString().slice(0, 10),
+       input.groups.reduce((a, g) => a + g.count, 0), money(wanted),
+       input.note ?? null, req.actor.userId]);
+    const run = runRows[0];
+
+    const made: any[] = [];
+    let packNo = 0;
+    for (const g of input.groups) {
+      for (let i = 0; i < g.count; i++) {
+        packNo += 1;
+        const { rows } = await tx.query(
+          `INSERT INTO packs (company_id, run_id, batch_id, product_id, warehouse_id,
+                  code, pack_no, group_label, qty, uom, price, grade, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           RETURNING id, code, pack_no, group_label, qty, uom, price, grade, status`,
+          [req.actor.companyId, run.id, input.batchId, sb.product_id, input.warehouseId,
+           packCode(), packNo, g.label ?? null, g.qtyPerPack, sb.base_uom,
+           money(g.price), sb.grade, req.actor.userId]);
+        made.push(rows[0]);
+      }
+    }
+
+    await emit(tx, req.actor, 'pack_run', run.id, 'packs.created',
+      { runNo, packs: made.length, batchNo: sb.batch_no, totalQty: wanted });
+
+    return { ...run, productName: sb.product_name, batchNo: sb.batch_no, packs: made };
+  });
+}));
+
+inventoryRouter.get('/pack-runs', h(async (req) =>
+  query(req.actor,
+    `SELECT r.*, p.name AS product_name, p.sku, b.batch_no, u.full_name AS packed_by_name,
+            (SELECT count(*) FROM packs k WHERE k.run_id = r.id AND k.status='IN_STOCK') AS in_stock,
+            (SELECT count(*) FROM packs k WHERE k.run_id = r.id AND k.status='SOLD')     AS sold
+       FROM pack_runs r
+       JOIN products p ON p.id = r.product_id
+       JOIN batches  b ON b.id = r.batch_id
+       LEFT JOIN users u ON u.id = r.created_by
+      WHERE r.company_id = $1
+        AND ($2::uuid IS NULL OR r.warehouse_id = $2)
+      ORDER BY r.created_at DESC LIMIT 100`,
+    [req.actor.companyId, req.query.warehouseId ?? null])));
+
+inventoryRouter.get('/packs', h(async (req) =>
+  query(req.actor,
+    `SELECT k.*, p.name AS product_name, p.sku, b.batch_no, r.run_no, r.packed_on,
+            COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date
+       FROM packs k
+       JOIN products p  ON p.id = k.product_id
+       JOIN batches  b  ON b.id = k.batch_id
+       JOIN pack_runs r ON r.id = k.run_id
+      WHERE k.company_id = $1
+        AND ($2 = '' OR k.status = $2)
+        AND ($3::uuid IS NULL OR k.run_id = $3)
+        AND ($4::uuid IS NULL OR k.warehouse_id = $4)
+      ORDER BY r.packed_on DESC, k.pack_no LIMIT 500`,
+    [req.actor.companyId, String(req.query.status ?? ''),
+     req.query.runId ?? null, req.query.warehouseId ?? null])));
+
+/** Records that labels went to a printer, so a reprint is visible as a reprint. */
+inventoryRouter.post('/packs/print', requires('inventory.stock.issue'), h(async (req) => {
+  const input = body(z.object({
+    packIds: z.array(z.string().uuid()).min(1),
+  }), req.body);
+  return withTx(req.actor, async (tx) => {
+    const { rowCount } = await tx.query(
+      `UPDATE packs SET printed_at = now(), print_count = print_count + 1
+        WHERE company_id = $1 AND id = ANY($2::uuid[])`,
+      [req.actor.companyId, input.packIds]);
+    return { ok: true, printed: rowCount };
+  });
+}));
+
+/**
+ * Marks a pack sold against a stock issue that has already been posted.
+ *
+ * The issue is what moves the stock; this only attaches the pack to it. The
+ * link is verified rather than trusted — same company, same batch, a POSTED
+ * SALE — so a pack cannot be marked sold against an unrelated document.
+ */
+inventoryRouter.post('/packs/:id/sold', requires('inventory.stock.issue'), h(async (req) => {
+  const input = body(z.object({ issueId: z.string().uuid() }), req.body);
+  return withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `SELECT * FROM packs WHERE id = $1 AND company_id = $2 FOR UPDATE`,
+      [req.params.id, req.actor.companyId]);
+    const pack = rows[0];
+    if (!pack) throw ApiError.notFound('Pack not found');
+    if (pack.status === 'SOLD') return { ok: true, alreadySold: true };
+    if (pack.status === 'VOID') throw ApiError.rule('That pack was voided.');
+
+    const { rows: iss } = await tx.query(
+      `SELECT si.id FROM stock_issues si
+        JOIN stock_issue_lines sil ON sil.issue_id = si.id
+       WHERE si.id = $1 AND si.company_id = $2 AND si.reason = 'SALE'
+         AND si.status = 'POSTED' AND sil.batch_id = $3
+       LIMIT 1`,
+      [input.issueId, req.actor.companyId, pack.batch_id]);
+    if (!iss.length) {
+      throw ApiError.rule('That sale does not cover this pack’s batch, so the pack cannot be marked sold against it.');
+    }
+
+    await tx.query(
+      `UPDATE packs SET status='SOLD', sold_issue_id=$2, sold_at=now() WHERE id=$1`,
+      [pack.id, input.issueId]);
+    await emit(tx, req.actor, 'pack', pack.id, 'pack.sold',
+      { code: pack.code, issueId: input.issueId });
+    return { ok: true };
+  });
+}));
+
+inventoryRouter.post('/packs/:id/void', requires('inventory.stock.issue'), h(async (req) => {
+  const input = body(z.object({
+    reason: z.string().trim().min(4, 'Say why this label is being voided'),
+  }), req.body);
+  return withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE packs SET status='VOID', void_reason=$3
+        WHERE id=$1 AND company_id=$2 AND status='IN_STOCK' RETURNING code`,
+      [req.params.id, req.actor.companyId, input.reason]);
+    if (!rows.length) throw ApiError.rule('Only a pack that is still in stock can be voided.');
+    await emit(tx, req.actor, 'pack', req.params.id, 'pack.voided',
+      { code: rows[0].code, reason: input.reason });
+    return { ok: true };
+  });
+}));
+
+/**
+ * Sell packs — the whole point of having made them.
+ *
+ * One transaction: lock the packs, post ONE stock issue through the shared
+ * postIssue() so the ledger, balances and batches move exactly as any other
+ * sale, then mark the packs sold against it. A crash at any point rolls back
+ * all of it, so a pack can never be sold-but-still-in-stock, or gone from
+ * stock but still showing as sellable.
+ *
+ * The idempotency key is derived from the packs themselves, so a double-tap on
+ * a warehouse tablet replays the first sale instead of selling twice.
+ */
+inventoryRouter.post('/packs/sell', requires('inventory.stock.issue'), h(async (req) => {
+  const input = body(z.object({
+    packIds: z.array(z.string().uuid()).min(1, 'Choose at least one pack'),
+    partyName: z.string().trim().optional(),
+    referenceNo: z.string().trim().optional(),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows: packs } = await tx.query(
+      `SELECT k.*, p.name AS product_name, b.batch_no
+         FROM packs k
+         JOIN products p ON p.id = k.product_id
+         JOIN batches  b ON b.id = k.batch_id
+        WHERE k.id = ANY($1::uuid[]) AND k.company_id = $2
+        ORDER BY k.pack_no
+        FOR UPDATE OF k`,
+      [input.packIds, req.actor.companyId]);
+
+    if (packs.length !== input.packIds.length) throw ApiError.notFound('One of those packs no longer exists.');
+    const bad = packs.find((k: any) => k.status !== 'IN_STOCK');
+    if (bad) {
+      throw ApiError.rule(bad.status === 'SOLD'
+        ? `Pack ${bad.code} has already been sold.`
+        : `Pack ${bad.code} was voided.`);
+    }
+    const warehouses = new Set(packs.map((k: any) => k.warehouse_id));
+    if (warehouses.size > 1) throw ApiError.rule('Those packs are in different warehouses — sell them separately.');
+
+    /* One issue line per batch. Several packs off the same batch collapse into
+     * one line whose rate is the money actually being charged for them, so the
+     * line value equals what the buyer pays and the margin comes out right. */
+    const byBatch = new Map<string, { qty: number; price: number }>();
+    for (const k of packs) {
+      const cur = byBatch.get(k.batch_id) ?? { qty: 0, price: 0 };
+      cur.qty += Number(k.qty);
+      cur.price += Number(k.price);
+      byBatch.set(k.batch_id, cur);
+    }
+
+    const issue = await postIssue(tx, req.actor, {
+      // Deterministic in the pack ids: the same basket cannot post twice.
+      idempotencyKey: `pack-sale-${createHash('sha256')
+        .update([...input.packIds].sort().join(','))
+        .digest('hex').slice(0, 40)}`,
+      warehouseId: packs[0].warehouse_id,
+      reason: 'SALE',
+      partyName: input.partyName || undefined,
+      referenceNo: input.referenceNo || undefined,
+      lines: [...byBatch.entries()].map(([batchId, v]) => ({
+        batchId,
+        qty: roundQty(v.qty),
+        rate: v.qty > 0 ? round(v.price / v.qty, 4) : 0,
+      })),
+    });
+
+    await tx.query(
+      `UPDATE packs SET status='SOLD', sold_issue_id=$2, sold_at=now()
+        WHERE id = ANY($1::uuid[])`,
+      [input.packIds, issue.id]);
+
+    await emit(tx, req.actor, 'stock_issue', issue.id, 'packs.sold', {
+      issueNo: issue.issue_no, packs: packs.map((k: any) => k.code),
+    });
+
+    return {
+      ...issue,
+      packsSold: packs.length,
+      codes: packs.map((k: any) => k.code),
+    };
+  });
 }));

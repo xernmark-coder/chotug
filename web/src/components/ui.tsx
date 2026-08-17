@@ -294,7 +294,12 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     };
   }, [navOpen]);
 
+  // An outside supplier has no work queue and no alerts, and asking for them
+  // just prints 403s in their console on every page.
+  const outside = !!me?.roles.includes('SUPPLIER');
+
   useEffect(() => {
+    if (outside) return;
     const load = async () => {
       try {
         const [q, a] = await Promise.all([
@@ -311,9 +316,18 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     void load();
     const t = setInterval(load, 60_000);
     return () => clearInterval(t);
-  }, []);
+  }, [outside]);
 
-  const groups: { label: string; items: NavDef[] }[] = [
+  /* An outside supplier has one screen. Rendering the staff sidebar with 30
+   * hidden items would leak the shape of our operation for no benefit. */
+  const groups: { label: string; items: NavDef[] }[] = outside ? [
+    {
+      label: 'Supplier',
+      items: [
+        { to: '/', label: 'My orders & invoices', icon: '📄' },
+      ],
+    },
+  ] : [
     {
       label: 'Work',
       items: [
@@ -360,6 +374,7 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         { to: '/stock', label: 'Stock & Batches', icon: '🧺' },
         // Selling is where stock stops being cost and becomes revenue, so it
         // sits with the money, not with the warehouse shelves.
+        { to: '/packing', label: 'Packing & Labels', icon: '🏷️', perms: ['inventory.stock.issue'] },
         { to: '/sales', label: 'Sell & Profit', icon: '💰' },
         { to: '/fleet', label: 'Vehicles & Drivers', icon: '🚚', perms: ['master.vehicle.manage', 'receiving.gate.create'] },
       ],

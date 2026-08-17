@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { query, withTx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
-import { authenticate, requires } from '../platform/auth.js';
+import { authenticate, staffOnly, requires } from '../platform/auth.js';
 import { emit, getSetting, nextDocNo, pushTask, raiseAlert, requestApprovals, resolveTask } from '../platform/services.js';
 import {
   computeLandingCost, money, round, threeWayMatch,
@@ -12,6 +12,8 @@ import { robustAnomaly } from '../ai/features.js';
 
 export const costingRouter = Router();
 costingRouter.use(authenticate);
+// Outside supplier logins never reach staff data — see staffOnly().
+costingRouter.use(staffOnly);
 
 /* ===========================================================================
  * §16 — LANDING COST ENGINE.
@@ -252,6 +254,28 @@ costingRouter.post('/invoices', requires('finance.invoice.create'), h(async (req
                OR (abs(total - $4) < 1 AND invoice_date = $5))
           AND status <> 'CANCELLED' LIMIT 1`,
       [req.actor.companyId, input.supplierId, input.invoiceNo, input.total, input.invoiceDate]);
+
+    /* Two different situations wear the same word.
+     *
+     * The SAME invoice number from the same supplier is not a suspicion, it is
+     * a re-submission — and the unique index on (company, supplier, invoice_no)
+     * would reject it anyway, with a message naming a database constraint. Say
+     * what happened and which document it already is, especially now that
+     * suppliers file their own invoices and will re-send one.
+     *
+     * A DIFFERENT number that happens to carry the same total on the same day
+     * is a suspicion, and that is what duplicate_of_id/duplicate_score exist
+     * for: it is recorded, flagged and left for a human to clear. */
+    const exact = dup.find(
+      (d: any) => String(d.invoice_no).toLowerCase() === input.invoiceNo.toLowerCase());
+    if (exact) {
+      throw ApiError.conflict(
+        `Invoice ${exact.invoice_no} from this supplier is already recorded (${
+          new Date(exact.invoice_date).toISOString().slice(0, 10)}, ${
+          Number(exact.total).toLocaleString('en-IN')}). Nothing was filed twice.`,
+        { existingInvoiceId: exact.id, invoiceNo: exact.invoice_no },
+      );
+    }
 
     const arithmeticOk = Math.abs(
       input.lines.reduce((a, l) => a + l.amount, 0) - input.subtotal) < 1;
@@ -583,4 +607,144 @@ costingRouter.get('/rate-check', h(async (req) => {
       ? `This rate is unusual — recent purchases have been around ₹${a.median}. Confirm before submitting.`
       : null,
   };
+}));
+
+/* ===========================================================================
+   CREDIT & DEBIT NOTES — the money that comes back
+
+   The match engine already drafts a debit note when a supplier bills for more
+   than we received. Until now that draft had nowhere to go: no way to issue
+   it, no way to record that the supplier accepted it, and no effect on what we
+   owe. A claim nobody can settle is a claim nobody makes.
+
+   Direction, stated once so the arithmetic is never guessed at:
+     DEBIT  — we are claiming money back. It REDUCES what we owe.
+     CREDIT — a correction in the supplier's favour. It INCREASES what we owe.
+   ======================================================================== */
+
+const NOTE_FLOW: Record<string, string[]> = {
+  DRAFT:    ['ISSUED', 'CANCELLED'],
+  ISSUED:   ['ACCEPTED', 'CANCELLED'],
+  ACCEPTED: ['SETTLED'],
+  SETTLED:  [],
+  CANCELLED: [],
+};
+
+costingRouter.get('/notes', h(async (req) =>
+  query(req.actor,
+    `SELECT n.*, s.trade_name AS supplier_name, i.invoice_no, g.grn_no,
+            u.full_name AS created_by_name
+       FROM credit_debit_notes n
+       JOIN suppliers s ON s.id = n.supplier_id
+       LEFT JOIN supplier_invoices i ON i.id = n.invoice_id
+       LEFT JOIN grns g ON g.id = n.grn_id
+       LEFT JOIN users u ON u.id = n.created_by
+      WHERE n.company_id = $1
+        AND ($2 = '' OR n.status = $2)
+        AND ($3 = '' OR n.note_type = $3)
+      ORDER BY n.created_at DESC LIMIT 200`,
+    [req.actor.companyId, String(req.query.status ?? ''), String(req.query.type ?? '')])));
+
+/** Raise one by hand — a rate correction, damage found later, a tax fix. */
+costingRouter.post('/notes', requires('finance.invoice.match'), h(async (req) => {
+  const input = body(z.object({
+    supplierId: z.string().uuid(),
+    branchId: z.string().uuid(),
+    noteType: z.enum(['CREDIT', 'DEBIT']),
+    reasonCode: z.enum(['QC_REJECTION', 'SHORT_SUPPLY', 'RATE_DIFFERENCE',
+      'WEIGHT_SHORTAGE', 'DAMAGE', 'TAX_CORRECTION', 'OTHER']),
+    invoiceId: z.string().uuid().nullable().optional(),
+    grnId: z.string().uuid().nullable().optional(),
+    amount: z.coerce.number().positive('How much is being claimed?'),
+    taxAmount: z.coerce.number().nonnegative().default(0),
+    remarks: z.string().trim().min(4, 'Say what this is for'),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    if (input.invoiceId) {
+      const { rowCount } = await tx.query(
+        `SELECT 1 FROM supplier_invoices WHERE id=$1 AND company_id=$2 AND supplier_id=$3`,
+        [input.invoiceId, req.actor.companyId, input.supplierId]);
+      if (!rowCount) throw ApiError.badRequest('That invoice does not belong to this supplier.');
+    }
+    const noteNo = await nextDocNo(tx, req.actor, input.branchId,
+      input.noteType === 'DEBIT' ? 'DN' : 'CN');
+    const total = money(input.amount + input.taxAmount);
+    const { rows } = await tx.query(
+      `INSERT INTO credit_debit_notes (company_id, branch_id, note_no, note_type, supplier_id,
+             invoice_id, grn_id, reason_code, amount, tax_amount, total, status,
+             auto_drafted, remarks, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'DRAFT',false,$12,$13,$13) RETURNING *`,
+      [req.actor.companyId, input.branchId, noteNo, input.noteType, input.supplierId,
+       input.invoiceId ?? null, input.grnId ?? null, input.reasonCode, money(input.amount),
+       money(input.taxAmount), total, input.remarks, req.actor.userId]);
+    await emit(tx, req.actor, 'credit_debit_note', rows[0].id, 'note.drafted',
+      { noteNo, type: input.noteType, total });
+    return rows[0];
+  });
+}));
+
+/**
+ * Move a note along. Settling is the only step that touches money: it adjusts
+ * what we still owe on the linked invoice, in the direction the note's type
+ * dictates — which is why a note with no invoice cannot be settled.
+ */
+costingRouter.post('/notes/:id/:action', requires('finance.invoice.match'), h(async (req) => {
+  const action = String(req.params.action).toUpperCase();
+  const target = ({ ISSUE: 'ISSUED', ACCEPT: 'ACCEPTED', SETTLE: 'SETTLED', CANCEL: 'CANCELLED' } as any)[action];
+  if (!target) throw ApiError.notFound('No such action');
+
+  const input = body(z.object({
+    reason: z.string().trim().optional(),
+  }), req.body ?? {});
+
+  return withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `SELECT * FROM credit_debit_notes WHERE id=$1 AND company_id=$2 FOR UPDATE`,
+      [req.params.id, req.actor.companyId]);
+    const n = rows[0];
+    if (!n) throw ApiError.notFound('Note not found');
+
+    const allowed = NOTE_FLOW[n.status] ?? [];
+    if (!allowed.includes(target)) {
+      throw ApiError.rule(
+        `A note that is ${n.status.toLowerCase()} cannot be ${action.toLowerCase()}d.`
+        + (allowed.length ? ` Allowed: ${allowed.join(', ').toLowerCase()}.` : ''));
+    }
+    if (target === 'CANCELLED' && !input.reason) {
+      throw ApiError.rule('Say why this note is being cancelled.');
+    }
+
+    await tx.query(
+      `UPDATE credit_debit_notes SET status=$2, updated_by=$3,
+              remarks = CASE WHEN $4::text IS NULL THEN remarks
+                             ELSE remarks || ' · ' || $4 END
+        WHERE id=$1`,
+      [n.id, target, req.actor.userId, input.reason ?? null]);
+
+    let balanceAfter: number | null = null;
+    if (target === 'SETTLED') {
+      if (!n.invoice_id) {
+        throw ApiError.rule(
+          'This note is not linked to an invoice, so there is nothing to settle it against.');
+      }
+      // DEBIT claws money back; CREDIT gives it. Never below zero — a note
+      // bigger than the balance settles the balance, not into a negative.
+      const delta = n.note_type === 'DEBIT' ? -Number(n.total) : Number(n.total);
+      const { rows: ps } = await tx.query(
+        `UPDATE payment_status
+            SET balance = GREATEST(balance + $2, 0), last_synced_at = now()
+          WHERE invoice_id = $1 RETURNING balance`,
+        [n.invoice_id, delta]);
+      if (!ps.length) {
+        throw ApiError.rule('That invoice is not payable yet, so it has no balance to adjust.');
+      }
+      balanceAfter = Number(ps[0].balance);
+    }
+
+    await emit(tx, req.actor, 'credit_debit_note', n.id, `note.${target.toLowerCase()}`,
+      { noteNo: n.note_no, type: n.note_type, total: n.total, balanceAfter });
+
+    return { ok: true, status: target, noteNo: n.note_no, balanceAfter };
+  });
 }));

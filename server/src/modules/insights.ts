@@ -2,13 +2,15 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { query, withTx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
-import { authenticate, requires } from '../platform/auth.js';
+import { authenticate, staffOnly, requires } from '../platform/auth.js';
 import { emit } from '../platform/services.js';
 import { supplierScore, round } from '../domain/index.js';
 import { assistantAnswer, forecastDemand, priceSignal } from '../ai/features.js';
 
 export const insightsRouter = Router();
 insightsRouter.use(authenticate);
+// Outside supplier logins never reach staff data — see staffOnly().
+insightsRouter.use(staffOnly);
 
 /* ===========================================================================
  * §5.3 — THE WORK QUEUE. This is the home screen for every role. One list,
