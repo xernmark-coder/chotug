@@ -58,13 +58,32 @@ CREATE INDEX IF NOT EXISTS ix_farms_own ON farms (company_id, is_own) WHERE is_o
 
 -- The work queue is the single home screen for every role (§5.3). Farming
 -- tasks belong in it, not in a second inbox nobody looks at.
-ALTER TABLE work_queue DROP CONSTRAINT IF EXISTS work_queue_queue_key_check;
-ALTER TABLE work_queue ADD  CONSTRAINT work_queue_queue_key_check
-      CHECK (queue_key IN ('REQUIREMENT_REVIEW','AI_SUGGESTION','APPROVAL',
-                           'EXPECTED_ARRIVAL','WEIGH_PENDING','QC_PENDING',
-                           'GRN_PENDING','PUTAWAY_PENDING','INVOICE_MATCH',
-                           'FINANCE_EXCEPTION','ALERT',
-                           'FARM_TASK','FARM_HARVEST','FARM_RECEIVE'));
+-- Rebuild the allowed queue keys as the union of what this migration needs and
+-- what is already in the table — the same trap the number_series rebuild below
+-- documents. A later migration adds its own key (PO_CONFIRM); a plain DROP/ADD
+-- here revoked it on the next re-run, and once rows carrying that key existed
+-- the constraint could no longer even be created:
+--
+--   check constraint "work_queue_queue_key_check" is violated by some row
+--
+-- which stopped every deploy at 04_farming.sql.
+DO $$
+DECLARE v_keys text[];
+BEGIN
+    SELECT array_agg(DISTINCT k ORDER BY k) INTO v_keys FROM (
+        SELECT unnest(ARRAY['REQUIREMENT_REVIEW','AI_SUGGESTION','APPROVAL',
+                            'EXPECTED_ARRIVAL','WEIGH_PENDING','QC_PENDING',
+                            'GRN_PENDING','PUTAWAY_PENDING','INVOICE_MATCH',
+                            'FINANCE_EXCEPTION','ALERT',
+                            'FARM_TASK','FARM_HARVEST','FARM_RECEIVE']) AS k
+        UNION
+        SELECT queue_key FROM work_queue
+    ) x;
+    ALTER TABLE work_queue DROP CONSTRAINT IF EXISTS work_queue_queue_key_check;
+    EXECUTE format(
+      'ALTER TABLE work_queue ADD CONSTRAINT work_queue_queue_key_check
+         CHECK (queue_key = ANY (%L))', v_keys);
+END $$;
 
 -- Document numbering for the three farming documents.
 -- Rebuild the allowed doc types as the union of what this migration needs and
@@ -585,7 +604,10 @@ BEGIN
 
         -- tenant isolation, identical to the policy every other table carries
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
-        EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+        -- FORCE is deliberately NOT applied: on a managed Postgres the
+        -- application connects as the table owner, and FORCE would apply the
+        -- policy to it too — breaking sign-in, which must look a user up
+        -- before any company is known. See 11_rls_managed_host.sql.
         IF NOT EXISTS (SELECT 1 FROM pg_policies
                         WHERE schemaname = current_schema() AND tablename = t
                           AND policyname = 'tenant_isolation') THEN

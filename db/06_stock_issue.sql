@@ -113,7 +113,10 @@ BEGIN
         END IF;
 
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
-        EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+        -- FORCE is deliberately NOT applied: on a managed Postgres the
+        -- application connects as the table owner, and FORCE would apply the
+        -- policy to it too — breaking sign-in, which must look a user up
+        -- before any company is known. See 11_rls_managed_host.sql.
         IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema()
                         AND tablename = t AND policyname = 'tenant_isolation') THEN
             EXECUTE format(

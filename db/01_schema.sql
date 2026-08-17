@@ -2786,7 +2786,10 @@ BEGIN
            AND c.relname NOT IN ('companies','audit_log')
     LOOP
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
-        EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+        -- FORCE is deliberately NOT applied: on a managed Postgres the
+        -- application connects as the table owner, and FORCE would apply the
+        -- policy to it too — breaking sign-in, which must look a user up
+        -- before any company is known. See 11_rls_managed_host.sql.
         EXECUTE format(
           'CREATE POLICY tenant_isolation ON %I
              USING (company_id IS NULL OR company_id = current_company_id())
