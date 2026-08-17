@@ -48,7 +48,9 @@ export type QueueKey =
   | 'REQUIREMENT_REVIEW' | 'AI_SUGGESTION' | 'APPROVAL' | 'EXPECTED_ARRIVAL'
   | 'WEIGH_PENDING' | 'QC_PENDING' | 'GRN_PENDING' | 'PUTAWAY_PENDING'
   | 'INVOICE_MATCH' | 'FINANCE_EXCEPTION' | 'ALERT'
-  | 'FARM_TASK' | 'FARM_HARVEST' | 'FARM_RECEIVE';
+  | 'FARM_TASK' | 'FARM_HARVEST' | 'FARM_RECEIVE'
+  // Approved, but the supplier has not been told yet. See db/10.
+  | 'PO_CONFIRM';
 
 export async function pushTask(
   tx: Tx,

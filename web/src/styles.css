@@ -83,7 +83,17 @@ a:hover { text-decoration: underline; }
 .sidebar-brand {
   padding: 18px 20px 14px;
   border-bottom: 1px solid rgba(199, 210, 254, .16);
+  display: flex; align-items: flex-start; gap: 10px;
 }
+/* Only meaningful once the sidebar is a drawer — see the drawer block below. */
+.nav-close {
+  display: none; flex: 0 0 auto;
+  background: rgba(199, 210, 254, .12); color: #C7D2FE;
+  border: none; border-radius: var(--radius-sm);
+  width: 38px; height: 38px; font-size: 15px; cursor: pointer;
+}
+.nav-close:hover { background: rgba(199, 210, 254, .22); color: #fff; }
+.nav-backdrop { display: none; }
 .sidebar-brand b { color: #fff; font-size: 17px; letter-spacing: -0.02em; }
 .sidebar-brand span { display: block; font-size: 11.5px; color: #A5B4FC; margin-top: 2px; }
 .sidebar-group { padding: 14px 12px 2px; }
@@ -115,9 +125,23 @@ a:hover { text-decoration: underline; }
   display: flex; align-items: center; gap: 16px;
   position: sticky; top: 0; z-index: 20;
 }
-.topbar .title { font-size: 18px; font-weight: 650; letter-spacing: -0.015em; }
+.topbar-head { min-width: 0; }
+.topbar .title {
+  font-size: 18px; font-weight: 650; letter-spacing: -0.015em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .topbar .sub { font-size: 13px; color: var(--muted); }
 .topbar .spacer { flex: 1; }
+.topbar-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.branch-select { width: 200px; }
+.nav-toggle {
+  display: none; flex: 0 0 auto;
+  width: 42px; height: 42px; font-size: 19px; line-height: 1;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.nav-toggle:hover { background: var(--surface-2); }
 
 .content { padding: 20px 24px 60px; max-width: 1500px; width: 100%; }
 
@@ -147,23 +171,170 @@ a:hover { text-decoration: underline; }
 }
 @media (max-width: 720px) {
   .grid.c2, .grid.c4 { grid-template-columns: minmax(0, 1fr); }
-  .sidebar { display: none; }
-  .content { padding: 14px; }
+  .content { padding: 14px 14px 72px; }
+}
+
+/* ===========================================================================
+   MOBILE / TABLET
+   Below 900px the sidebar stops being a column and becomes an off-canvas
+   drawer opened from the topbar. It is never removed — the nav is the app's
+   only way between modules, so hiding it strands the user on one page.
+   ======================================================================== */
+@media (max-width: 900px) {
+  .nav-toggle { display: inline-flex; align-items: center; justify-content: center; }
+  .nav-close  { display: inline-flex; align-items: center; justify-content: center; }
+
+  .sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0;
+    width: min(84vw, 300px); flex-basis: auto;
+    height: 100dvh; z-index: 60;
+    transform: translateX(-100%);
+    /* visibility keeps the closed drawer out of the tab order — an off-screen
+       transform alone leaves every link focusable. */
+    visibility: hidden;
+    transition: transform .22s ease, visibility .22s ease;
+    box-shadow: var(--shadow-lg);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .sidebar.open { transform: none; visibility: visible; }
+
+  .nav-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 55;
+    background: rgba(15, 23, 42, .5);
+  }
+  /* Drawer nav is thumb-driven, so the rows get real touch targets. */
+  .nav-item { padding: 11px 12px; font-size: 15px; }
+
+  .topbar { padding: 10px 14px; gap: 10px; }
+  .topbar .title { font-size: 16px; }
+  .topbar .sub { font-size: 12px; }
+  .branch-select { width: auto; max-width: 150px; }
+}
+
+body.nav-lock { overflow: hidden; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar { transition: none; }
+}
+
+/* --- phone-width tightening ---------------------------------------------- */
+@media (max-width: 560px) {
+  h1 { font-size: 19px; }
+  .card-body { padding: 13px; }
+  .card-head { padding: 12px 13px; }
+  /* Several screens set an inline pixel width on a select (e.g. the product
+     picker). max-width beats an inline width, so nothing can push the page
+     into a horizontal scroll. */
+  input, select, textarea { max-width: 100%; }
+  .card-head { flex-wrap: wrap; }
+
+  .kv { grid-template-columns: minmax(0, 1fr); gap: 0 0; }
+  .kv dt { margin-top: 8px; font-size: 12.5px; }
+  .kv dd { margin-bottom: 2px; }
+  .grade-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .search-bar input, .search-bar select { max-width: none; flex: 1 1 150px; }
+  /* Let the table keep readable column widths and scroll inside .table-wrap.
+     Without a min-width, width:100% crushes every column to a few characters
+     and each cell wraps into a vertical ribbon of single words. */
+  table.data { font-size: 13px; min-width: 660px; }
+  table.data th, table.data td { padding: 9px 10px; }
+  .table-wrap { -webkit-overflow-scrolling: touch; }
+  .kpi .value { font-size: 22px; }
+  .scale-readout { font-size: 34px; }
+  .btn-row .btn { flex: 1 1 auto; }
+  .timeline img { max-width: 100%; }
+
+  /* Dialogs become bottom sheets — reachable, and they no longer overflow
+     a short viewport when the on-screen keyboard opens. */
+  .modal-back { padding: 0; align-items: flex-end; }
+  .modal {
+    max-width: none; max-height: 92dvh;
+    border-radius: 14px 14px 0 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .modal-foot { flex-wrap: wrap; }
+  .modal-foot .btn { flex: 1 1 auto; }
+
+  .toast-wrap { left: 12px; right: 12px; bottom: 12px; }
+  .toast { max-width: none; }
 }
 
 /* --- KPI ---------------------------------------------------------------- */
 .kpi {
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 14px 15px; box-shadow: var(--shadow);
-  display: block; color: inherit; text-decoration: none;
+  border-radius: var(--radius); padding: 15px 16px 13px; box-shadow: var(--shadow);
+  display: flex; flex-direction: column; color: inherit; text-decoration: none;
+  position: relative; overflow: hidden;
+  transition: border-color .14s ease, box-shadow .14s ease, transform .14s ease;
 }
 .kpi:hover { border-color: var(--primary-border); text-decoration: none; box-shadow: var(--shadow-md); }
-.kpi .label { font-size: 12.5px; color: var(--muted); font-weight: 500; }
-.kpi .value { font-size: 26px; font-weight: 700; letter-spacing: -0.03em; margin-top: 3px; }
-.kpi .foot { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.kpi[role='button']:hover, .kpi.clickable:hover { transform: translateY(-1px); }
+.kpi .label {
+  font-size: 11.5px; color: var(--muted); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .055em;
+}
+.kpi .value {
+  font-size: 28px; font-weight: 700; letter-spacing: -0.035em; margin-top: 6px;
+  line-height: 1.1;
+  /* Deliberately NOT tabular-nums: equal-width digits are for columns that
+     line up. On a single large figure they leave gaps around 1s and read as
+     a rendering fault. */
+}
+.kpi .foot { font-size: 12px; color: var(--muted); margin-top: 4px; }
+/* A 3px rail rather than a tinted card: the tile stays quiet, the state reads
+   from the edge, and a row of tiles still scans as one row. */
 .kpi.warn { border-left: 3px solid var(--accent); }
 .kpi.crit { border-left: 3px solid var(--danger); }
 .kpi.good { border-left: 3px solid var(--ok); }
+.kpi .delta {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 12px; font-weight: 650; margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.kpi .delta.up { color: var(--ok); }
+.kpi .delta.down { color: var(--danger); }
+.kpi .delta.flat { color: var(--muted); }
+.kpi .spark { margin: 8px -16px -13px; opacity: .85; }
+
+/* --- charts ------------------------------------------------------------- */
+.chart-legend {
+  display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+  font-size: 12px; color: var(--text-2); margin-left: auto;
+}
+.chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.chart-legend i { width: 9px; height: 9px; border-radius: 2.5px; flex: 0 0 auto; }
+
+.chart-tip {
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-md);
+  padding: 9px 11px; font-size: 12.5px; min-width: 130px;
+}
+.chart-tip-head {
+  font-weight: 650; color: var(--text); margin-bottom: 6px;
+  padding-bottom: 5px; border-bottom: 1px solid var(--border);
+}
+.chart-tip-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; color: var(--text-2); }
+.chart-tip-row i { width: 9px; height: 9px; border-radius: 2.5px; flex: 0 0 auto; }
+.chart-tip-row b { margin-left: auto; color: var(--text); font-variant-numeric: tabular-nums; }
+
+.chart-hint { font-size: 12px; color: var(--muted); margin-top: 10px; }
+
+.meter { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.meter-track {
+  width: 54px; height: 6px; border-radius: 999px;
+  background: var(--sunk, #EEF1F7); overflow: hidden; flex: 0 0 auto;
+}
+.meter-track > i { display: block; height: 100%; border-radius: 999px; }
+.meter-label { font-variant-numeric: tabular-nums; font-size: 12.5px; }
+
+/* --- section heading ---------------------------------------------------- */
+.section-head {
+  display: flex; align-items: baseline; gap: 10px;
+  margin: 26px 0 12px;
+}
+.section-head:first-child { margin-top: 0; }
+.section-head h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+.section-head .rule { flex: 1; height: 1px; background: var(--border); }
 
 /* --- tables ------------------------------------------------------------- */
 .table-wrap { overflow-x: auto; }

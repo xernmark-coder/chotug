@@ -34,8 +34,18 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;      -- gen_random_uuid, digest
 CREATE EXTENSION IF NOT EXISTS pg_trgm;       -- fuzzy supplier/product search
 CREATE EXTENSION IF NOT EXISTS btree_gist;    -- exclusion constraints
-CREATE EXTENSION IF NOT EXISTS vector;        -- pgvector, AI retrieval
 CREATE EXTENSION IF NOT EXISTS unaccent;
+
+-- pgvector is reserved for AI retrieval and is not yet used by any column or
+-- query. It is also the one extension a managed provider may not ship, so a
+-- missing pgvector must not take the whole migration down with it. Give it
+-- back its own line above once something actually stores an embedding.
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS vector;
+EXCEPTION WHEN insufficient_privilege OR undefined_file OR feature_not_supported THEN
+    RAISE NOTICE 'pgvector unavailable (%) — skipped; nothing uses it yet.', SQLERRM;
+END $$;
 
 -- ---------------------------------------------------------------------------
 --  uuid v7 — time-ordered UUIDs.
@@ -2791,6 +2801,11 @@ CREATE POLICY tenant_self ON companies
 -- ---------------------------------------------------------------------------
 --  DATABASE ROLES — the app must not be able to rewrite history
 -- ---------------------------------------------------------------------------
+-- Creating a role needs CREATEROLE, which a managed Postgres (Render, Neon,
+-- RDS) does not give the database owner. These two roles are defence in depth
+-- — the application connects as the owner, not as either of them — so on a
+-- host that forbids them the migration must carry on rather than abort the
+-- whole deploy. Everything that depends on them is inside the same guard.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'chotug_app') THEN
@@ -2799,17 +2814,19 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'chotug_readonly') THEN
         CREATE ROLE chotug_readonly LOGIN;
     END IF;
+
+    GRANT USAGE ON SCHEMA public TO chotug_app, chotug_readonly;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO chotug_app;
+    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO chotug_app;
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO chotug_readonly;
+
+    -- Audit and ledger: insert and read only. This is the whole point of them.
+    REVOKE UPDATE, DELETE, TRUNCATE ON audit_log    FROM chotug_app;
+    REVOKE UPDATE, DELETE, TRUNCATE ON stock_ledger FROM chotug_app;
+    REVOKE DELETE, TRUNCATE          ON weighments  FROM chotug_app;
+EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'No CREATEROLE on this host — chotug_app/chotug_readonly skipped. %', SQLERRM;
 END $$;
-
-GRANT USAGE ON SCHEMA public TO chotug_app, chotug_readonly;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO chotug_app;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO chotug_app;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO chotug_readonly;
-
--- Audit and ledger: insert and read only. This is the whole point of them.
-REVOKE UPDATE, DELETE, TRUNCATE ON audit_log    FROM chotug_app;
-REVOKE UPDATE, DELETE, TRUNCATE ON stock_ledger FROM chotug_app;
-REVOKE DELETE, TRUNCATE          ON weighments  FROM chotug_app;
 
 -- ---------------------------------------------------------------------------
 --  VIEWS

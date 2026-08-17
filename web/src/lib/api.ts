@@ -3,7 +3,11 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 /* ---------------------------------------------------------------- API ---- */
 
 const TOKEN_KEY = 'chotug_token';
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+// Empty by design: requests go out same-origin as /api/… and the Vite dev
+// proxy forwards them to the API. An absolute localhost URL would break every
+// device that is not this machine (phones, ngrok/tunnel links) and would drag
+// CORS into a request that never needed it. Deployments set VITE_API_URL.
+const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public detail?: any, public code?: string) {

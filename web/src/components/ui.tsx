@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { NavLink, useNavigate } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { api, useAuth } from '../lib/api';
 
 /* ------------------------------------------------------------- toasts ---- */
@@ -57,15 +57,29 @@ export function Chip({ value, tone, children }: { value?: string | null; tone?: 
 }
 
 /* ---------------------------------------------------------------- KPI ---- */
-export function Kpi({ label, value, foot, tone, onClick }: {
+export function Kpi({ label, value, foot, tone, onClick, delta, deltaLabel, spark }: {
   label: string; value: React.ReactNode; foot?: React.ReactNode;
   tone?: 'warn' | 'crit' | 'good'; onClick?: () => void;
+  /** Signed change against the previous period. Direction is shown with an
+   *  arrow as well as colour, so it survives a colour-blind reader. */
+  delta?: number | null; deltaLabel?: string;
+  spark?: React.ReactNode;
 }) {
+  const dir = delta == null ? null : delta > 0.05 ? 'up' : delta < -0.05 ? 'down' : 'flat';
   return (
-    <div className={`kpi ${tone ?? ''}`} onClick={onClick} style={onClick ? { cursor: 'pointer' } : undefined}>
+    <div className={`kpi ${tone ?? ''} ${onClick ? 'clickable' : ''}`}
+      onClick={onClick} style={onClick ? { cursor: 'pointer' } : undefined}>
       <div className="label">{label}</div>
       <div className="value">{value}</div>
+      {dir ? (
+        <div className={`delta ${dir}`}>
+          <span>{dir === 'up' ? '▲' : dir === 'down' ? '▼' : '■'}</span>
+          {Math.abs(delta!).toFixed(1)}%
+          {deltaLabel ? <span style={{ color: 'var(--muted)', fontWeight: 500 }}> {deltaLabel}</span> : null}
+        </div>
+      ) : null}
       {foot ? <div className="foot">{foot}</div> : null}
+      {spark}
     </div>
   );
 }
@@ -103,6 +117,70 @@ export function PrefilledField({ label, value, hint, onEdit, edited, children }:
       )}
       {hint ? <div className="hint">{hint}</div> : null}
     </div>
+  );
+}
+
+/* ------------------------------------------------------- reason picker --- */
+
+const TYPE_IT = '__type__';
+
+export type ReasonBank = { reasons: string[]; remember: (r: string) => void };
+
+/**
+ * The company's shared list of reasons for changing a suggested quantity.
+ * Call once per page and hand the result to every ReasonPicker on it, so ten
+ * changed rows do not mean ten identical fetches.
+ */
+export function useReasonBank(): ReasonBank {
+  const { data, reload } = useApi<string[]>('/masters/qty-change-reasons');
+  const reasons = data ?? [];
+  return {
+    reasons,
+    remember: (r: string) => {
+      const t = r.trim();
+      if (t.length < 3) return;
+      if (reasons.some((x) => x.toLowerCase() === t.toLowerCase())) return;
+      // Fire and forget: failing to save a reason to the shared list must never
+      // block the order the buyer is in the middle of placing.
+      api.post('/masters/qty-change-reasons', { reason: t }).then(reload).catch(() => undefined);
+    },
+  };
+}
+
+/** A dropdown of known reasons, plus the option to type one nobody has used
+ *  before — which then joins the dropdown for everyone else. */
+export function ReasonPicker({ bank, value, onChange, placeholder = 'Choose a reason…' }: {
+  bank: ReasonBank; value: string; onChange: (v: string) => void; placeholder?: string;
+}) {
+  const known = bank.reasons.some((r) => r.toLowerCase() === value.trim().toLowerCase());
+  // A typed reason that is not (yet) in the list means the box stays open, so
+  // reopening a half-finished reason does not silently discard it.
+  const [typing, setTyping] = useState(!!value && !known);
+
+  return (
+    <>
+      <select
+        value={typing ? TYPE_IT : known ? bank.reasons.find((r) => r.toLowerCase() === value.trim().toLowerCase()) : ''}
+        onChange={(e) => {
+          if (e.target.value === TYPE_IT) { setTyping(true); onChange(''); }
+          else { setTyping(false); onChange(e.target.value); }
+        }}
+      >
+        <option value="">{placeholder}</option>
+        {bank.reasons.map((r) => <option key={r} value={r}>{r}</option>)}
+        <option value={TYPE_IT}>✎ Something else — type it</option>
+      </select>
+      {typing ? (
+        <input
+          className="mt"
+          autoFocus
+          placeholder="Type the reason"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={(e) => bank.remember(e.target.value)}
+        />
+      ) : null}
+    </>
   );
 }
 
@@ -194,9 +272,27 @@ export function Layout({ children, title, subtitle, actions, touch }: {
 }) {
   const { me, can, logout, branchId, setBranchId } = useAuth();
   const nav = useNavigate();
+  const { pathname } = useLocation();
   const [queueCount, setQueueCount] = useState(0);
   const [alertCount, setAlertCount] = useState(0);
   const [farmTasks, setFarmTasks] = useState(0);
+  // Below the drawer breakpoint the sidebar is off-canvas; above it the class
+  // does nothing and the aside is a plain column.
+  const [navOpen, setNavOpen] = useState(false);
+
+  // Tapping a link must dismiss the drawer, or the new page opens behind it.
+  useEffect(() => { setNavOpen(false); }, [pathname]);
+
+  useEffect(() => {
+    if (!navOpen) return;
+    document.body.classList.add('nav-lock');
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setNavOpen(false);
+    window.addEventListener('keydown', esc);
+    return () => {
+      document.body.classList.remove('nav-lock');
+      window.removeEventListener('keydown', esc);
+    };
+  }, [navOpen]);
 
   useEffect(() => {
     const load = async () => {
@@ -229,6 +325,10 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     {
       label: 'Plan & Buy',
       items: [
+        // The whole raise → approve → order → confirm chain in one page, for
+        // whoever owns the decision end to end. The separate screens below are
+        // unchanged and remain the path when the work is split across people.
+        { to: '/order-flow', label: 'Order in one flow', icon: '⚡', perms: ['purchase.po.create'] },
         { to: '/buy-list', label: 'What to Buy', icon: '🧮', perms: ['purchase.requirement.create'] },
         { to: '/requirements', label: 'Requirements', icon: '📝', perms: ['purchase.requirement.create'] },
         { to: '/purchase-orders', label: 'Purchase Orders', icon: '📦', perms: ['purchase.po.create', 'purchase.po.approve'] },
@@ -258,6 +358,9 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         { to: '/grns', label: 'Goods Receipts', icon: '📥', perms: ['receiving.grn.create', 'receiving.grn.submit'] },
         { to: '/putaway', label: 'Put-away', icon: '🏷️', perms: ['receiving.putaway.confirm'] },
         { to: '/stock', label: 'Stock & Batches', icon: '🧺' },
+        // Selling is where stock stops being cost and becomes revenue, so it
+        // sits with the money, not with the warehouse shelves.
+        { to: '/sales', label: 'Sell & Profit', icon: '💰' },
         { to: '/fleet', label: 'Vehicles & Drivers', icon: '🚚', perms: ['master.vehicle.manage', 'receiving.gate.create'] },
       ],
     },
@@ -274,6 +377,7 @@ export function Layout({ children, title, subtitle, actions, touch }: {
       items: [
         { to: '/reports', label: 'Reports', icon: '📈', perms: ['reports.purchase.view'] },
         { to: '/ai', label: 'AI Centre', icon: '✨' },
+        { to: '/people', label: 'People & Access', icon: '👥', perms: ['admin.rbac.manage'] },
         { to: '/settings', label: 'Settings', icon: '⚙️', perms: ['admin.settings.manage'] },
       ],
     },
@@ -281,10 +385,15 @@ export function Layout({ children, title, subtitle, actions, touch }: {
 
   return (
     <div className={`app ${touch ? 'touch' : ''}`}>
-      <aside className="sidebar">
+      {navOpen ? <div className="nav-backdrop" onClick={() => setNavOpen(false)} /> : null}
+
+      <aside className={`sidebar ${navOpen ? 'open' : ''}`}>
         <div className="sidebar-brand">
-          <b>ChotuG</b>
-          <span>Purchase &amp; Receiving</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <b>ChotuG</b>
+            <span>Purchase &amp; Receiving</span>
+          </div>
+          <button className="nav-close" onClick={() => setNavOpen(false)} aria-label="Close menu">✕</button>
         </div>
         {groups.map((g) => {
           const items = g.items.filter((i) => !i.perms || can(...i.perms));
@@ -319,17 +428,21 @@ export function Layout({ children, title, subtitle, actions, touch }: {
 
       <div className="main">
         <header className="topbar">
-          <div>
+          <button className="nav-toggle" onClick={() => setNavOpen(true)}
+            aria-label="Open menu" aria-expanded={navOpen}>☰</button>
+          <div className="topbar-head">
             <div className="title">{title}</div>
             {subtitle ? <div className="sub">{subtitle}</div> : null}
           </div>
           <div className="spacer" />
-          {me && me.branches.length > 1 ? (
-            <select style={{ width: 200 }} value={branchId ?? ''} onChange={(e) => setBranchId(e.target.value)}>
-              {me.branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-            </select>
-          ) : null}
-          {actions}
+          <div className="topbar-actions">
+            {me && me.branches.length > 1 ? (
+              <select className="branch-select" value={branchId ?? ''} onChange={(e) => setBranchId(e.target.value)}>
+                {me.branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+              </select>
+            ) : null}
+            {actions}
+          </div>
         </header>
         <div className="content">{children}</div>
       </div>

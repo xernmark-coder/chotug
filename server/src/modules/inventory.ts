@@ -30,6 +30,9 @@ inventoryRouter.use(authenticate);
 /** Reasons that remove value without earning any — these need the higher gate. */
 const WRITE_OFF_REASONS = new Set(['WASTAGE', 'ADJUSTMENT']);
 
+const inrText = (n: number) =>
+  `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+
 /* ---------------------------------------------------------------------------
  * What is available to issue, oldest-expiring first.
  *
@@ -172,14 +175,21 @@ inventoryRouter.post('/issues', requires('inventory.stock.issue'), h(async (req)
       const lineValue = money(l.qty * rate);
       const lineCost = money(l.qty * costPerUnit);
 
-      await tx.query(
+      const { rows: lineRows } = await tx.query(
         `INSERT INTO stock_issue_lines (company_id, issue_id, line_no, product_id, batch_id,
                 qty, weight_kg, uom, rate, value, landed_rate_per_kg)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
         [req.actor.companyId, issue.id, i + 1, sb.product_id, l.batchId,
          l.qty, weightOut, sb.base_uom, rate, lineValue, sb.landed_rate_per_kg]);
+      const issueLineId = lineRows[0].id;
 
-      /* --- the ledger. Append-only, OUT, once. --------------------------- */
+      /* --- the ledger. Append-only, OUT, once. ---------------------------
+       * ref_line_id was the batch id, and stock_ledger carries
+       * UNIQUE (ref_type, ref_line_id, txn_type) — so a batch could be sold
+       * exactly once, ever, and the second sale died on a constraint whose
+       * error message talks about goods receipts. Selling half a crate today
+       * and half tomorrow is the normal case for produce. The issue LINE id is
+       * the honest key: one ledger row per line, unique for all time. */
       await tx.query(
         `INSERT INTO stock_ledger (company_id, branch_id, warehouse_id, product_id, batch_id,
                 direction, qty, weight_kg, uom, rate, value, txn_type, ref_type, ref_id,
@@ -187,9 +197,7 @@ inventoryRouter.post('/issues', requires('inventory.stock.issue'), h(async (req)
          VALUES ($1,$2,$3,$4,$5,'OUT',$6,$7,$8,$9,$10,$11,'stock_issue',$12,$13,now(),$14)`,
         [req.actor.companyId, warehouse.branch_id, warehouse.id, sb.product_id, l.batchId,
          l.qty, weightOut, sb.base_uom, rate, lineValue, input.reason, issue.id,
-         // ref_line_id must be unique per (ref_type, txn_type): use the batch,
-         // since one issue never touches the same batch twice.
-         l.batchId, req.actor.userId]);
+         issueLineId, req.actor.userId]);
 
       await tx.query(
         `UPDATE stock_balances
@@ -341,4 +349,213 @@ inventoryRouter.post('/issues/:id/cancel', requires('inventory.stock.cancel'), h
 
     return { ok: true, issueNo: issue.issue_no, linesReturned: lines.length };
   });
+}));
+
+/* ===========================================================================
+   SELLING — what went out, what it earned, and what to move next
+
+   Stock could already leave as a SALE, and the line already carried both the
+   selling rate and the cost it was carrying. What was missing is the reading
+   of it: nobody could see whether a sale made money, how much of a purchase
+   has actually been sold, or which batch is about to become a write-off.
+
+   Cost basis: a batch prices per its own unit (landed_rate), and weight-priced
+   produce prices per kg. Take whichever the batch actually has, so margin is
+   never silently zero because the wrong column was read.
+   ======================================================================== */
+
+const LINE_COST = `COALESCE(sil.qty * b.landed_rate, sil.weight_kg * sil.landed_rate_per_kg, 0)`;
+
+inventoryRouter.get('/sales-summary', h(async (req) => {
+  const days = Math.min(365, Math.max(1, Number(req.query.days ?? 30)));
+  const warehouseId = (req.query.warehouseId as string) || null;
+  const p = [req.actor.companyId, warehouseId, String(days)];
+
+  const [totals] = await query(req.actor,
+    `SELECT
+       COALESCE(SUM(sil.value), 0)                                   AS revenue,
+       COALESCE(SUM(${LINE_COST}), 0)                                AS cost,
+       COALESCE(SUM(sil.value) - SUM(${LINE_COST}), 0)               AS profit,
+       COALESCE(SUM(sil.qty), 0)                                     AS qty_sold,
+       count(DISTINCT si.id)                                         AS sales
+       FROM stock_issues si
+       JOIN stock_issue_lines sil ON sil.issue_id = si.id
+       JOIN batches b ON b.id = sil.batch_id
+      WHERE si.company_id = $1 AND si.reason = 'SALE' AND si.status = 'POSTED'
+        AND si.issue_date >= CURRENT_DATE - ($3 || ' days')::interval
+        AND ($2::uuid IS NULL OR si.warehouse_id = $2)`, p);
+
+  /* What the same window destroyed rather than sold. A loss is not the absence
+   * of profit — it is stock that went out at no revenue at all. */
+  const [writeOffs] = await query(req.actor,
+    `SELECT COALESCE(SUM(${LINE_COST}), 0) AS cost, COALESCE(SUM(sil.qty), 0) AS qty,
+            count(DISTINCT si.id) AS events
+       FROM stock_issues si
+       JOIN stock_issue_lines sil ON sil.issue_id = si.id
+       JOIN batches b ON b.id = sil.batch_id
+      WHERE si.company_id = $1 AND si.status = 'POSTED'
+        AND si.reason IN ('WASTAGE', 'ADJUSTMENT')
+        AND si.issue_date >= CURRENT_DATE - ($3 || ' days')::interval
+        AND ($2::uuid IS NULL OR si.warehouse_id = $2)`, p);
+
+  /* Sold against still-here, per product — the "how much left" question. */
+  const byProduct = await query(req.actor,
+    `WITH sold AS (
+       SELECT sil.product_id,
+              SUM(sil.qty) AS qty_sold,
+              SUM(sil.value) AS revenue,
+              SUM(${LINE_COST}) AS cost
+         FROM stock_issues si
+         JOIN stock_issue_lines sil ON sil.issue_id = si.id
+         JOIN batches b ON b.id = sil.batch_id
+        WHERE si.company_id = $1 AND si.reason = 'SALE' AND si.status = 'POSTED'
+          AND si.issue_date >= CURRENT_DATE - ($3 || ' days')::interval
+          AND ($2::uuid IS NULL OR si.warehouse_id = $2)
+        GROUP BY sil.product_id
+     ), onhand AS (
+       SELECT sb.product_id, SUM(sb.qty) AS qty_left,
+              SUM(sb.qty * COALESCE(b.landed_rate, 0)) AS value_left
+         FROM stock_balances sb
+         JOIN batches b ON b.id = sb.batch_id
+        WHERE sb.company_id = $1 AND sb.qty > 0
+          AND ($2::uuid IS NULL OR sb.warehouse_id = $2)
+        GROUP BY sb.product_id
+     )
+     SELECT p.id, p.sku, p.name, p.base_uom,
+            COALESCE(s.qty_sold, 0)  AS qty_sold,
+            COALESCE(s.revenue, 0)   AS revenue,
+            COALESCE(s.cost, 0)      AS cost,
+            COALESCE(s.revenue, 0) - COALESCE(s.cost, 0) AS profit,
+            COALESCE(o.qty_left, 0)  AS qty_left,
+            COALESCE(o.value_left, 0) AS value_left
+       FROM products p
+       LEFT JOIN sold s   ON s.product_id = p.id
+       LEFT JOIN onhand o ON o.product_id = p.id
+      WHERE p.company_id = $1
+        AND (COALESCE(s.qty_sold,0) > 0 OR COALESCE(o.qty_left,0) > 0)
+      ORDER BY COALESCE(s.revenue,0) DESC, p.name`, p);
+
+  /* Daily revenue and profit, for the trend. */
+  const trend = await query(req.actor,
+    `SELECT si.issue_date::text AS date,
+            COALESCE(SUM(sil.value), 0) AS revenue,
+            COALESCE(SUM(sil.value) - SUM(${LINE_COST}), 0) AS profit
+       FROM stock_issues si
+       JOIN stock_issue_lines sil ON sil.issue_id = si.id
+       JOIN batches b ON b.id = sil.batch_id
+      WHERE si.company_id = $1 AND si.reason = 'SALE' AND si.status = 'POSTED'
+        AND si.issue_date >= CURRENT_DATE - ($3 || ' days')::interval
+        AND ($2::uuid IS NULL OR si.warehouse_id = $2)
+      GROUP BY si.issue_date ORDER BY si.issue_date`, p);
+
+  const revenue = Number(totals.revenue);
+  return {
+    days,
+    totals: {
+      ...totals,
+      marginPct: revenue > 0 ? round((Number(totals.profit) / revenue) * 100, 2) : null,
+    },
+    writeOffs,
+    byProduct,
+    trend,
+  };
+}));
+
+/* ---------------------------------------------------------------------------
+ * "Sell this before it turns." Rules, not a language model: the ranking is
+ * arithmetic on shelf life, quantity and money, so it is explainable, it works
+ * offline, and it cannot hallucinate a batch. §14 — advice is advisory, and
+ * every row shows the numbers it was derived from.
+ * ------------------------------------------------------------------------ */
+inventoryRouter.get('/sell-suggestions', h(async (req) => {
+  const rows = await query(req.actor,
+    `SELECT b.id AS batch_id, b.batch_no, b.grade,
+            p.id AS product_id, p.name AS product_name, p.sku, p.base_uom,
+            sb.warehouse_id, w.name AS warehouse_name,
+            (sb.qty - sb.reserved_qty) AS available_qty,
+            b.landed_rate, b.landed_rate_per_kg, b.initial_qty, b.received_date,
+            COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date,
+            (COALESCE(b.predicted_expiry_date, b.expiry_date) - CURRENT_DATE) AS days_left,
+            (CURRENT_DATE - b.received_date) AS age_days,
+            (sb.qty - sb.reserved_qty) * COALESCE(b.landed_rate, 0) AS value_at_risk,
+            -- What this product has actually been fetching lately, so the
+            -- suggested price is evidence rather than a guess.
+            (SELECT round(AVG(sil.rate), 2) FROM stock_issue_lines sil
+               JOIN stock_issues si2 ON si2.id = sil.issue_id
+              WHERE sil.product_id = p.id AND si2.reason = 'SALE'
+                AND si2.status = 'POSTED'
+                AND si2.issue_date >= CURRENT_DATE - 30
+                AND sil.rate IS NOT NULL) AS recent_sale_rate
+       FROM stock_balances sb
+       JOIN batches b    ON b.id = sb.batch_id
+       JOIN products p   ON p.id = sb.product_id
+       JOIN warehouses w ON w.id = sb.warehouse_id
+      WHERE sb.company_id = $1
+        AND sb.qty - sb.reserved_qty > 0
+        AND b.status = 'ACTIVE'
+        AND ($2::uuid IS NULL OR sb.warehouse_id = $2)
+      ORDER BY COALESCE(b.predicted_expiry_date, b.expiry_date) NULLS LAST
+      LIMIT 200`,
+    [req.actor.companyId, req.query.warehouseId ?? null]);
+
+  const scored = rows.map((r: any) => {
+    const daysLeft = r.days_left == null ? null : Number(r.days_left);
+    const value = Number(r.value_at_risk);
+    const cost = Number(r.landed_rate ?? 0);
+    const market = r.recent_sale_rate == null ? null : Number(r.recent_sale_rate);
+
+    // Urgency is shelf life; the money only decides the order within a band.
+    const urgency =
+      daysLeft == null ? 'NONE'
+      : daysLeft <= 0 ? 'CRITICAL'
+      : daysLeft <= 2 ? 'CRITICAL'
+      : daysLeft <= 5 ? 'HIGH'
+      : daysLeft <= 10 ? 'MEDIUM'
+      : 'NONE';
+
+    const reasons: string[] = [];
+    if (daysLeft != null) {
+      reasons.push(daysLeft <= 0 ? 'Past its expected date'
+        : `${daysLeft} day(s) of shelf life left`);
+    }
+    if (value > 0) reasons.push(`${inrText(value)} of stock sitting on it`);
+    if (r.age_days != null) reasons.push(`in the warehouse ${r.age_days} day(s)`);
+
+    /* A price that recovers cost is the floor. Close to expiry, holding out for
+     * the usual rate is how the whole batch becomes a write-off, so the
+     * suggestion drops toward cost as the days run out — never below it
+     * without saying so. */
+    const discount = urgency === 'CRITICAL' ? 0.85 : urgency === 'HIGH' ? 0.93 : 1;
+    const suggestedRate = market != null
+      ? round(Math.max(market * discount, cost), 2)
+      : cost > 0 ? round(cost * 1.15, 2) : null;
+
+    return {
+      ...r,
+      urgency,
+      valueAtRisk: round(value, 2),
+      suggestedRate,
+      wouldRecoverCost: suggestedRate != null && cost > 0 ? suggestedRate >= cost : null,
+      reasons,
+      action: urgency === 'CRITICAL' ? 'Sell today, even at a discount'
+        : urgency === 'HIGH' ? 'Sell this week'
+        : urgency === 'MEDIUM' ? 'Plan a buyer'
+        : 'No rush',
+    };
+  });
+
+  const rank: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, NONE: 3 };
+  scored.sort((a, b) =>
+    rank[a.urgency] - rank[b.urgency] || b.valueAtRisk - a.valueAtRisk);
+
+  return {
+    suggestions: scored,
+    atRisk: {
+      critical: scored.filter((s) => s.urgency === 'CRITICAL').length,
+      high: scored.filter((s) => s.urgency === 'HIGH').length,
+      value: round(scored
+        .filter((s) => s.urgency === 'CRITICAL' || s.urgency === 'HIGH')
+        .reduce((a, s) => a + s.valueAtRisk, 0), 2),
+    },
+  };
 }));

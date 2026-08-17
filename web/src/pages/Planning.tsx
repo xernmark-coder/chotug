@@ -3,8 +3,10 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Area, AreaChart } from 'recharts';
 import { api, useAuth, inr, num, date, addDays, pctText } from '../lib/api';
 import {
-  AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, useApi, useToast,
+  AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, ReasonPicker,
+  useApi, useReasonBank, useToast,
 } from '../components/ui';
+import { CHART } from '../components/charts';
 
 /* ===========================================================================
  * WHAT TO BUY — the answer to §2: "system khud bataye kya aur kitna kharidna
@@ -21,6 +23,7 @@ export function BuyListPage() {
   const [reasons, setReasons] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [editing, setEditing] = useState<any>(null);
+  const reasonBank = useReasonBank();
   const [insightFor, setInsightFor] = useState<any>(null);
   const [onlyNeeded, setOnlyNeeded] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -207,7 +210,9 @@ export function BuyListPage() {
                 setEditing(null);
               }}>Use suggested {num(editing.suggestedQty, 0)}</button>
               <button className="btn primary" onClick={() => setEditing(null)}
-                disabled={!reasons[editing.productId]}>Save reason</button>
+                disabled={!(reasons[editing.productId] ?? '').trim()}
+                onClickCapture={() => reasonBank.remember(reasons[editing.productId] ?? '')}>
+                Save reason</button>
             </>
           }>
           <p className="small muted">
@@ -215,18 +220,12 @@ export function BuyListPage() {
             <b>{num(finalQty(editing), 0)} {editing.uom}</b>. A short reason keeps the audit trail
             honest and improves future suggestions.
           </p>
-          <Field label="Reason">
-            <select value={reasons[editing.productId] ?? ''}
-              onChange={(e) => setReasons((s) => ({ ...s, [editing.productId]: e.target.value }))}>
-              <option value="">Choose a reason…</option>
-              <option value="Festival / event demand expected">Festival or event demand expected</option>
-              <option value="Supplier has limited stock">Supplier has limited stock</option>
-              <option value="Price is unusually good today">Price is unusually good today</option>
-              <option value="Price is too high, buying less">Price is too high, buying less</option>
-              <option value="Storage space is limited">Storage space is limited</option>
-              <option value="Quality issues expected this week">Quality issues expected this week</option>
-              <option value="Known upcoming order">Known upcoming customer order</option>
-            </select>
+          <Field label="Reason" hint="Pick one, or type a new one — it joins the list for everyone.">
+            <ReasonPicker
+              bank={reasonBank}
+              value={reasons[editing.productId] ?? ''}
+              onChange={(v) => setReasons((s) => ({ ...s, [editing.productId]: v }))}
+            />
           </Field>
           <ul className="reasons">
             {editing.reasons.map((r: any) => (
@@ -275,7 +274,7 @@ function InsightModal({ item, onClose }: { item: any; onClose: () => void }) {
               <div className="card-body">
                 <ResponsiveContainer width="100%" height={180}>
                   <AreaChart data={data.forecast.points}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
+                    <CartesianGrid strokeDasharray="0" stroke={CHART.grid} vertical={false} />
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={(d) => date(d).slice(0, 6)} />
                     <YAxis tick={{ fontSize: 11 }} />
                     <Tooltip labelFormatter={(l) => date(l)} />
@@ -304,7 +303,7 @@ function InsightModal({ item, onClose }: { item: any; onClose: () => void }) {
               <div className="card-body">
                 <ResponsiveContainer width="100%" height={140}>
                   <LineChart data={data.price.points}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
+                    <CartesianGrid strokeDasharray="0" stroke={CHART.grid} vertical={false} />
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={(d) => date(d).slice(0, 6)} />
                     <YAxis tick={{ fontSize: 11 }} />
                     <Tooltip formatter={(v: any) => inr(v)} />

@@ -353,8 +353,15 @@ export function PoCreatePage() {
 }
 
 /* §7 — source comparison on landed cost, not headline rate. */
-function CompareModal({ line, suppliers, onClose, onPick }: {
-  line: Line; suppliers: any[]; onClose: () => void;
+/**
+ * Landed-cost comparison across sources. Exported because the guided order
+ * flow needs exactly this, and a second copy would be a second set of bugs.
+ * The prop is the four fields it actually reads, not the PO page's Line, so
+ * any caller with a product and a quantity can use it.
+ */
+export function CompareModal({ line, suppliers, onClose, onPick }: {
+  line: { productId: string; name: string; uom: string; qty: number };
+  suppliers: any[]; onClose: () => void;
   onPick: (supplierId: string, rate: number) => void;
 }) {
   const toast = useToast();

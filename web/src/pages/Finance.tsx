@@ -4,6 +4,7 @@ import { api, useAuth, inr, num, date, dateTime, ago, today, addDays } from '../
 import {
   AiBox, Chip, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, useApi, useToast,
 } from '../components/ui';
+import { EmailSettingsCard } from './People';
 
 /* ====================================================== INVOICES ======== */
 export function InvoiceListPage() {
@@ -734,6 +735,7 @@ export function SettingsPage() {
   return (
     <Layout title="Settings" subtitle="Thresholds that change how the system behaves">
       <ErrorBanner error={error} />
+      <div className="mb"><EmailSettingsCard /></div>
       {loading ? <Loading /> : (
         <div className="card"><div className="card-body">
           {(data ?? []).map((s) => (

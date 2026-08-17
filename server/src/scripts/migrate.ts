@@ -37,6 +37,8 @@ async function main() {
   await run('06_stock_issue.sql');
   await run('07_flow_fixes.sql');
   await run('08_fleet_masters.sql');
+  await run('09_user_invites.sql');
+  await run('10_po_confirm_queue.sql');
   console.log('\nSchema and master data are in place.');
   console.log('Next: npm run seed   (sets demo passwords and generates demand history)');
   await pool.end();

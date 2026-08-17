@@ -145,7 +145,37 @@ insightsRouter.get('/dashboard', h(async (req) => {
       ORDER BY value_30d DESC LIMIT 8`,
     [req.actor.companyId]);
 
-  return { kpis, quality, criticalStock, trend, topSuppliers };
+  /* Where the money actually goes. Four source types, which is exactly the
+   * categorical palette's width — a fifth would fold into "Other". */
+  const sourceMix = await query(req.actor,
+    `SELECT s.source_type, COALESCE(SUM(g.total_value),0) AS value_30d, count(g.id) AS receipts_30d
+       FROM grns g JOIN suppliers s ON s.id = g.supplier_id
+      WHERE g.company_id=$1 AND g.status='POSTED'
+        AND g.posting_date >= CURRENT_DATE - 30
+        AND ($2::uuid IS NULL OR g.branch_id=$2)
+      GROUP BY s.source_type ORDER BY value_30d DESC`,
+    [req.actor.companyId, branchId]);
+
+  /* The same window, one window back. A number with no comparison is a number
+   * nobody can act on. */
+  const [prev] = await query(req.actor,
+    `SELECT
+       COALESCE(SUM(g.total_value) FILTER (
+         WHERE g.posting_date >= CURRENT_DATE - 29), 0)                       AS value_30d,
+       COALESCE(SUM(g.total_value) FILTER (
+         WHERE g.posting_date >= CURRENT_DATE - 59
+           AND g.posting_date <  CURRENT_DATE - 29), 0)                       AS value_prev_30d,
+       COALESCE(SUM(g.total_rejected_qty) FILTER (
+         WHERE g.posting_date >= CURRENT_DATE - 29), 0)                       AS rejected_30d,
+       COALESCE(SUM(g.total_accepted_qty) FILTER (
+         WHERE g.posting_date >= CURRENT_DATE - 29), 0)                       AS accepted_30d
+       FROM grns g
+      WHERE g.company_id=$1 AND g.status='POSTED'
+        AND g.posting_date >= CURRENT_DATE - 59
+        AND ($2::uuid IS NULL OR g.branch_id=$2)`,
+    [req.actor.companyId, branchId]);
+
+  return { kpis, quality, criticalStock, trend, topSuppliers, sourceMix, prev };
 }));
 
 /* ===========================================================================

@@ -8,6 +8,9 @@ import { ApprovalsPage, PoCreatePage, PoDetailPage, PoListPage } from './pages/P
 import { ArrivalsPage, GateDetailPage, GateEntryPage, GatePipelinePage } from './pages/Receiving';
 import { GrnDetailPage, GrnListPage, PutawayPage, StockPage } from './pages/Grn';
 import { FleetPage } from './pages/Fleet';
+import { AcceptInvitePage, PeoplePage } from './pages/People';
+import { QuickOrderPage } from './pages/QuickOrder';
+import { SalesPage } from './pages/Sales';
 import {
   AiCentrePage, AlertsPage, InvoiceCreatePage, InvoiceDetailPage, InvoiceListPage,
   PaymentsPage, ProfilePage, ReportsPage, SettingsPage, SuppliersPage,
@@ -26,6 +29,8 @@ export default function App() {
     return (
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        {/* Signed out by definition — an invited person has no account yet. */}
+        <Route path="/accept-invite" element={<AcceptInvitePage />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     );
@@ -38,6 +43,7 @@ export default function App() {
       <Route path="/dashboard" element={<DashboardPage />} />
       <Route path="/alerts" element={<AlertsPage />} />
 
+      <Route path="/order-flow" element={<QuickOrderPage />} />
       <Route path="/buy-list" element={<BuyListPage />} />
       <Route path="/requirements" element={<RequirementListPage />} />
       <Route path="/requirements/:id" element={<RequirementDetailPage />} />
@@ -57,6 +63,7 @@ export default function App() {
       <Route path="/grns/:id" element={<GrnDetailPage />} />
       <Route path="/putaway" element={<PutawayPage />} />
       <Route path="/stock" element={<StockPage />} />
+      <Route path="/sales" element={<SalesPage />} />
 
       <Route path="/invoices" element={<InvoiceListPage />} />
       <Route path="/invoices/new" element={<InvoiceCreatePage />} />
@@ -80,8 +87,12 @@ export default function App() {
 
       <Route path="/reports" element={<ReportsPage />} />
       <Route path="/ai" element={<AiCentrePage />} />
+      <Route path="/people" element={<PeoplePage />} />
       <Route path="/settings" element={<SettingsPage />} />
       <Route path="/profile" element={<ProfilePage />} />
+      {/* Reachable while signed in too, so an admin testing the link, or
+          someone already logged in on that browser, still lands correctly. */}
+      <Route path="/accept-invite" element={<AcceptInvitePage />} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

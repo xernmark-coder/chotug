@@ -484,7 +484,7 @@ planningRouter.post('/quotes', requires('purchase.quote.compare'), h(async (req)
         note: best.quoteId === cheapestByRate.quoteId
           ? `${best.supplierName} is both the lowest rate and the lowest landed cost.`
           : `${best.supplierName} has a higher headline rate than ${cheapestByRate.supplierName} ` +
-            `but a lower landed cost of ₹${best.landedRate}/unit after charges, rejection and credit.`,
+            `but a lower landed cost of ₹${round(best.landedRate, 2)}/unit after charges, rejection and credit.`,
       },
     };
   });
@@ -674,6 +674,32 @@ planningRouter.get('/purchase-orders/:id', h(async (req) => {
   return { ...po, lines, charges, approvals, revisions };
 }));
 
+/**
+ * An approved order is not a placed order — this panel is internal, and the
+ * supplier learns nothing until somebody calls them. Queue that call, so an
+ * order raised and then abandoned is picked up by whoever is free rather than
+ * sitting in APPROVED where nobody is looking.
+ */
+async function pushPoConfirmTask(tx: any, actor: any, poId: string) {
+  const { rows } = await tx.query(
+    `SELECT o.id, o.po_no, o.branch_id, o.expected_date, o.is_urgent, o.grand_total,
+            COALESCE(s.trade_name, s.legal_name) AS supplier_name, s.phone
+       FROM purchase_orders o JOIN suppliers s ON s.id = o.supplier_id
+      WHERE o.id = $1`, [poId]);
+  const po = rows[0];
+  if (!po) return;
+  await pushTask(tx, actor, {
+    branchId: po.branch_id,
+    queueKey: 'PO_CONFIRM', docType: 'PO', docId: po.id, docNo: po.po_no,
+    title: `Confirm ${po.po_no} with ${po.supplier_name}`,
+    subtitle: `${inrText(Number(po.grand_total))} · expected ${po.expected_date}`
+      + (po.phone ? ` · ${po.phone}` : ''),
+    severity: po.is_urgent ? 'warn' : 'normal',
+    requiredPermission: 'purchase.po.submit',
+    slaMinutes: po.is_urgent ? 120 : 480,
+  });
+}
+
 planningRouter.post('/purchase-orders/:id/submit', requires('purchase.po.submit'), h(async (req) =>
   withTx(req.actor, async (tx) => {
     const { rows } = await tx.query(
@@ -745,6 +771,7 @@ planningRouter.post('/purchase-orders/:id/submit', requires('purchase.po.submit'
                 self_approved=true, self_approved_reason=$3, updated_by=$2
           WHERE id=$1`,
         [po.id, req.actor.userId, selfReason]);
+      await pushPoConfirmTask(tx, req.actor, po.id);
       await emit(tx, req.actor, 'purchase_order', po.id, 'po.approved', {
         poNo: po.po_no, auto: true, selfApproved,
         wouldHaveNeededLevel: wouldHaveNeededLevel ?? 0, reasons,
@@ -853,6 +880,7 @@ planningRouter.post('/approvals/:id/decide', h(async (req) => {
           await tx.query(
             `UPDATE purchase_orders SET status='APPROVED', approved_at=now(), approved_by=$2, updated_by=$2
               WHERE id=$1 AND status='SUBMITTED'`, [a.doc_id, req.actor.userId]);
+          await pushPoConfirmTask(tx, req.actor, a.doc_id);
           await emit(tx, req.actor, 'purchase_order', a.doc_id, 'po.approved', { docNo: a.doc_no });
         }
       } else if (status === 'REJECTED') {
@@ -911,6 +939,8 @@ planningRouter.post('/purchase-orders/:id/confirm', requires('purchase.po.submit
       requiredPermission: 'receiving.gate.create',
       payload: { expectedArrivalId: ea[0].id },
     });
+    // The call has been made; the job now belongs to the gate.
+    await resolveTask(tx, req.actor, 'PO_CONFIRM', 'PO', po.id);
     await emit(tx, req.actor, 'purchase_order', po.id, 'po.confirmed', { poNo: po.po_no });
     return { ok: true, status: 'CONFIRMED', expectedArrivalId: ea[0].id };
   });

@@ -1,8 +1,10 @@
 import { Router } from 'express';
+import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { pool, query, withTx } from '../db.js';
+import { config, pool, query, withTx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
 import { authenticate, loadActor, requires, signToken, verifyPassword, hashPassword } from '../platform/auth.js';
+import { encryptSecret, inviteEmail, loadSmtp, sendMail, sendTestMail } from '../platform/mailer.js';
 
 export const authRouter = Router();
 
@@ -83,6 +85,96 @@ authRouter.post('/change-password', authenticate, h(async (req) => {
     'UPDATE users SET password_hash = $2, password_changed_at = now() WHERE id = $1',
     [req.actor.userId, await hashPassword(input.newPassword)]);
   return { ok: true };
+}));
+
+/* ------------------------------------------------------- invite tokens --- */
+
+const INVITE_TTL_DAYS = 7;
+
+const hashToken = (raw: string) => createHash('sha256').update(raw).digest('hex');
+
+/** The link the invited person opens. WEB_ORIGIN may hold a comma-separated
+ *  list for CORS; the first entry is the canonical site. */
+export function inviteUrl(rawToken: string) {
+  const origin = config.webOrigin.split(',')[0].trim().replace(/\/$/, '');
+  return `${origin}/accept-invite?token=${rawToken}`;
+}
+
+/** Issues a fresh token and retires any earlier unused one for that user, so a
+ *  re-send always invalidates the link that was sent before it. */
+export async function issueInvite(userId: string, createdBy: string | null) {
+  const raw = randomBytes(32).toString('base64url');
+  await pool.query('DELETE FROM user_invites WHERE user_id = $1 AND accepted_at IS NULL', [userId]);
+  await pool.query(
+    `INSERT INTO user_invites (user_id, token_hash, expires_at, created_by)
+     VALUES ($1, $2, now() + ($3 || ' days')::interval, $4)`,
+    [userId, hashToken(raw), String(INVITE_TTL_DAYS), createdBy],
+  );
+  return { token: raw, url: inviteUrl(raw) };
+}
+
+async function findInvite(rawToken: string) {
+  const { rows } = await pool.query(
+    `SELECT i.id, i.user_id, i.expires_at, i.accepted_at,
+            u.full_name, u.email, u.status, u.company_id,
+            c.trade_name AS company_name,
+            (SELECT r.name FROM user_role_assignments ura
+               JOIN roles r ON r.id = ura.role_id
+              WHERE ura.user_id = u.id ORDER BY ura.created_at LIMIT 1) AS role_name
+       FROM user_invites i
+       JOIN users u     ON u.id = i.user_id
+       JOIN companies c ON c.id = u.company_id
+      WHERE i.token_hash = $1`,
+    [hashToken(rawToken)],
+  );
+  const inv = rows[0];
+  // One message for every failure mode on purpose: a stranger poking at tokens
+  // learns nothing about which ones exist.
+  const dead = () => {
+    throw ApiError.badRequest('This invite link is no longer valid. Ask your admin to send a new one.');
+  };
+  if (!inv) dead();
+  if (inv.accepted_at) dead();
+  if (new Date(inv.expires_at) <= new Date()) dead();
+  if (inv.status !== 'INVITED') dead();
+  return inv;
+}
+
+/** Public — the invited person has no account yet, so this cannot be gated. */
+authRouter.get('/invite/:token', h(async (req) => {
+  const inv = await findInvite(String(req.params.token));
+  return {
+    fullName: inv.full_name,
+    email: inv.email,
+    companyName: inv.company_name,
+    roleName: inv.role_name,
+  };
+}));
+
+authRouter.post('/invite/:token/accept', h(async (req) => {
+  const input = body(z.object({
+    password: z.string().min(8, 'Use at least 8 characters'),
+  }), req.body);
+
+  const inv = await findInvite(String(req.params.token));
+  const hash = await hashPassword(input.password);
+
+  await withTx({ companyId: inv.company_id, userId: inv.user_id }, async (tx) => {
+    await tx.query(
+      `UPDATE users
+          SET password_hash = $2, password_changed_at = now(), status = 'ACTIVE',
+              failed_login_count = 0, locked_until = NULL, updated_at = now()
+        WHERE id = $1`,
+      [inv.user_id, hash],
+    );
+    await tx.query('UPDATE user_invites SET accepted_at = now() WHERE id = $1', [inv.id]);
+  });
+
+  // Sign them straight in — making someone log in again immediately after
+  // choosing a password is a step that exists only for the developer.
+  const actor = await loadActor(inv.user_id);
+  if (!actor) throw ApiError.badRequest('This account is not active yet. Ask your admin.');
+  return { token: signToken(actor.userId, actor.companyId), user: await profile(actor.userId) };
 }));
 
 /* ======================================================================== */
@@ -494,13 +586,20 @@ mastersRouter.get('/bins', h(async (req) =>
       ORDER BY z.code, r.code, b.code`,
     [req.actor.companyId, req.query.warehouseId ?? null])));
 
+/* This endpoint is open to every signed-in user, so it must never hand back a
+ * credential. The SMTP block is excluded here and served by /smtp below, which
+ * is permission-gated and redacts the password. */
 mastersRouter.get('/settings', h(async (req) =>
   query(req.actor,
-    `SELECT key, value, data_type FROM settings WHERE company_id = $1 ORDER BY key`,
+    `SELECT key, value, data_type FROM settings
+      WHERE company_id = $1 AND key NOT LIKE 'smtp.%' ORDER BY key`,
     [req.actor.companyId])));
 
 mastersRouter.put('/settings/:key', requires('admin.settings.manage'), h(async (req) => {
   const input = body(z.object({ value: z.any() }), req.body);
+  if (req.params.key.startsWith('smtp.')) {
+    throw ApiError.badRequest('Use the email settings form — the password is encrypted on the way in.');
+  }
   return withTx(req.actor, async (tx) => {
     const { rows } = await tx.query(
       `INSERT INTO settings (company_id, scope, key, value, updated_by)
@@ -539,3 +638,265 @@ mastersRouter.get('/audit', requires('admin.audit.view'), h(async (req) =>
         AND ($3::uuid IS NULL OR a.entity_id = $3)
       ORDER BY a.occurred_at DESC LIMIT 200`,
     [req.actor.companyId, String(req.query.table ?? ''), req.query.recordId ?? null])));
+
+/* ===========================================================================
+   PEOPLE & ACCESS
+
+   Adding a person is an invitation, never a password. The admin supplies a
+   name, an email and one role; the person supplies their own password through
+   the one-time link. §25 — every gate below is a server-side permission check,
+   because the UI hiding a button is not access control.
+   ======================================================================== */
+
+mastersRouter.get('/roles', requires('admin.rbac.manage'), h(async (req) =>
+  query(req.actor,
+    `SELECT id, code, name, description
+       FROM roles WHERE company_id = $1 ORDER BY name`,
+    [req.actor.companyId])));
+
+mastersRouter.get('/users', requires('admin.rbac.manage'), h(async (req) =>
+  query(req.actor,
+    `SELECT u.id, u.full_name, u.email, u.phone, u.status, u.last_login_at, u.created_at,
+            COALESCE(array_agg(r.name ORDER BY r.name)
+                     FILTER (WHERE r.name IS NOT NULL), '{}') AS roles,
+            (SELECT i.expires_at FROM user_invites i
+              WHERE i.user_id = u.id AND i.accepted_at IS NULL
+              ORDER BY i.created_at DESC LIMIT 1) AS invite_expires_at
+       FROM users u
+       LEFT JOIN user_role_assignments ura ON ura.user_id = u.id
+       LEFT JOIN roles r ON r.id = ura.role_id
+      WHERE u.company_id = $1
+      GROUP BY u.id
+      ORDER BY u.full_name`,
+    [req.actor.companyId])));
+
+mastersRouter.post('/users/invite', requires('admin.rbac.manage'), h(async (req) => {
+  const input = body(z.object({
+    fullName: z.string().trim().min(2, 'Enter their full name'),
+    email: z.string().trim().email('Enter a valid email address'),
+    roleId: z.string().uuid('Choose a role'),
+  }), req.body);
+
+  const email = input.email.toLowerCase();
+
+  const existing = await pool.query(
+    'SELECT id, status FROM users WHERE company_id = $1 AND lower(email) = $2',
+    [req.actor.companyId, email]);
+  if (existing.rowCount) {
+    throw ApiError.conflict(
+      existing.rows[0].status === 'INVITED'
+        ? 'That person has already been invited. Use "Send new link" instead.'
+        : 'Someone with that email already has an account.');
+  }
+
+  const role = await pool.query(
+    'SELECT id FROM roles WHERE id = $1 AND company_id = $2',
+    [input.roleId, req.actor.companyId]);
+  if (!role.rowCount) throw ApiError.badRequest('That role does not exist.');
+
+  const userId = await withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `INSERT INTO users (company_id, full_name, email, status, default_branch_id, created_by)
+       VALUES ($1, $2, $3, 'INVITED', $4, $5) RETURNING id`,
+      [req.actor.companyId, input.fullName, email, req.actor.branchId, req.actor.userId]);
+    await tx.query(
+      `INSERT INTO user_role_assignments (company_id, user_id, role_id, created_by)
+       VALUES ($1, $2, $3, $4)`,
+      [req.actor.companyId, rows[0].id, input.roleId, req.actor.userId]);
+    return rows[0].id as string;
+  });
+
+  const invite = await issueInvite(userId, req.actor.userId);
+  const delivery = await deliverInvite(req.actor.companyId, userId, invite.url);
+  return { id: userId, email, inviteUrl: invite.url, expiresInDays: 7, ...delivery };
+}));
+
+/** Emails the link if SMTP is configured. Never throws: a mail server having a
+ *  bad day must not lose the invite that was just created — the admin still
+ *  gets the link on screen and can send it by hand. */
+async function deliverInvite(companyId: string, userId: string, url: string) {
+  const { rows } = await pool.query(
+    `SELECT u.full_name, u.email, c.trade_name AS company_name,
+            (SELECT r.name FROM user_role_assignments ura
+               JOIN roles r ON r.id = ura.role_id
+              WHERE ura.user_id = u.id ORDER BY ura.created_at LIMIT 1) AS role_name
+       FROM users u JOIN companies c ON c.id = u.company_id WHERE u.id = $1`,
+    [userId]);
+  const u = rows[0];
+  if (!u?.email) return { emailSent: false, emailError: 'No email address on file' };
+
+  const mail = inviteEmail(u.full_name, u.company_name, u.role_name, url);
+  const r = await sendMail(companyId, u.email, mail.subject, mail.html, mail.text);
+  return { emailSent: r.sent, emailError: r.sent ? undefined : r.reason };
+}
+
+/** Re-issues the link — for an invite that expired, or one that never arrived. */
+mastersRouter.post('/users/:id/reinvite', requires('admin.rbac.manage'), h(async (req) => {
+  const { rows } = await pool.query(
+    'SELECT id, status, email FROM users WHERE id = $1 AND company_id = $2',
+    [req.params.id, req.actor.companyId]);
+  const u = rows[0];
+  if (!u) throw ApiError.notFound('No such person');
+  if (u.status === 'ACTIVE') {
+    throw ApiError.badRequest('They have already set a password. Nothing to send.');
+  }
+  if (u.status !== 'INVITED') {
+    await withTx(req.actor, (tx) =>
+      tx.query(`UPDATE users SET status = 'INVITED', updated_at = now() WHERE id = $1`, [u.id]));
+  }
+  const invite = await issueInvite(u.id, req.actor.userId);
+  const delivery = await deliverInvite(req.actor.companyId, u.id, invite.url);
+  return { inviteUrl: invite.url, email: u.email, expiresInDays: 7, ...delivery };
+}));
+
+/** Suspend or restore access. Deleting a person is deliberately not offered:
+ *  their name is on documents that must stay readable. */
+mastersRouter.post('/users/:id/status', requires('admin.rbac.manage'), h(async (req) => {
+  const input = body(z.object({
+    status: z.enum(['ACTIVE', 'SUSPENDED']),
+  }), req.body);
+
+  if (req.params.id === req.actor.userId) {
+    throw ApiError.badRequest('You cannot change your own access.');
+  }
+  const { rows } = await pool.query(
+    'SELECT id, status, password_hash FROM users WHERE id = $1 AND company_id = $2',
+    [req.params.id, req.actor.companyId]);
+  const u = rows[0];
+  if (!u) throw ApiError.notFound('No such person');
+  if (input.status === 'ACTIVE' && !u.password_hash) {
+    throw ApiError.badRequest('They have not set a password yet. Send them a new link instead.');
+  }
+
+  await withTx(req.actor, (tx) =>
+    tx.query('UPDATE users SET status = $2, updated_at = now() WHERE id = $1',
+      [u.id, input.status]));
+  return { ok: true, status: input.status };
+}));
+
+/* ---------------------------------------------------------------- email --- */
+
+/** Never returns the password — only whether one is on file. */
+mastersRouter.get('/smtp', requires('admin.settings.manage'), h(async (req) => {
+  const rows = await query<{ key: string; value: any }>(req.actor,
+    `SELECT key, value FROM settings WHERE company_id = $1 AND key LIKE 'smtp.%'`,
+    [req.actor.companyId]);
+  const v = Object.fromEntries(rows.map((r) => [r.key, r.value])) as Record<string, any>;
+  return {
+    host: v['smtp.host'] ?? '',
+    port: Number(v['smtp.port'] ?? 587),
+    secure: v['smtp.secure'] === true || v['smtp.secure'] === 'true',
+    user: v['smtp.user'] ?? '',
+    fromName: v['smtp.from_name'] ?? '',
+    fromEmail: v['smtp.from_email'] ?? '',
+    hasPassword: !!v['smtp.password'],
+    ready: !!(await loadSmtp(req.actor.companyId)),
+  };
+}));
+
+mastersRouter.put('/smtp', requires('admin.settings.manage'), h(async (req) => {
+  const input = body(z.object({
+    host: z.string().trim().min(1, 'Enter the mail server address'),
+    port: z.coerce.number().int().min(1).max(65535),
+    secure: z.boolean().default(false),
+    user: z.string().trim().default(''),
+    // Omitted means "keep what is already stored", so an admin editing the
+    // port does not have to retype the password. Empty string clears it.
+    password: z.string().optional(),
+    fromName: z.string().trim().default('ChotuG'),
+    fromEmail: z.string().trim().email('Enter the address mail should come from'),
+  }), req.body);
+
+  const pairs: [string, any][] = [
+    ['smtp.host', input.host],
+    ['smtp.port', input.port],
+    ['smtp.secure', input.secure],
+    ['smtp.user', input.user],
+    ['smtp.from_name', input.fromName],
+    ['smtp.from_email', input.fromEmail],
+  ];
+  if (input.password !== undefined) {
+    pairs.push(['smtp.password', input.password ? encryptSecret(input.password) : '']);
+  }
+
+  await withTx(req.actor, async (tx) => {
+    for (const [key, value] of pairs) {
+      await tx.query(
+        `INSERT INTO settings (company_id, scope, key, value, updated_by)
+         VALUES ($1,'COMPANY',$2,$3,$4)
+         ON CONFLICT (company_id, branch_id, key)
+         DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+        [req.actor.companyId, key, JSON.stringify(value), req.actor.userId]);
+    }
+  });
+  return { ok: true, ready: !!(await loadSmtp(req.actor.companyId)) };
+}));
+
+mastersRouter.post('/smtp/test', requires('admin.settings.manage'), h(async (req) => {
+  const input = body(z.object({
+    to: z.string().trim().email('Enter an address to send the test to'),
+  }), req.body);
+  const r = await sendTestMail(req.actor.companyId, input.to);
+  if (!r.sent) throw ApiError.badRequest(r.reason ?? 'The test email could not be sent');
+  return { ok: true };
+}));
+
+/* ------------------------------------------------- quantity-change reasons */
+
+/* §5 — changing a suggested quantity demands a reason. The seven below are the
+ * ones that come up constantly; anything else a buyer types is kept so the next
+ * person can pick it instead of retyping it. Company-wide on purpose: this is
+ * shared vocabulary, and it is what the AI feedback loop reads back. */
+const QTY_REASON_KEY = 'planning.qty_change_reasons';
+const QTY_REASON_PRESETS = [
+  'Festival / event demand expected',
+  'Supplier has limited stock',
+  'Price is unusually good today',
+  'Price is too high, buying less',
+  'Storage space is limited',
+  'Quality issues expected this week',
+  'Known upcoming order',
+];
+
+async function savedReasons(actor: any): Promise<string[]> {
+  const rows = await query<{ value: any }>(actor,
+    `SELECT value FROM settings WHERE company_id = $1 AND key = $2`,
+    [actor.companyId, QTY_REASON_KEY]);
+  const v = rows[0]?.value;
+  return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+}
+
+mastersRouter.get('/qty-change-reasons', h(async (req) => {
+  const saved = await savedReasons(req.actor);
+  const seen = new Set(QTY_REASON_PRESETS.map((r) => r.toLowerCase()));
+  // Newest additions first among the custom ones — the reason someone just
+  // added is usually the one the next person wants.
+  const custom = [...saved].reverse().filter((r) => {
+    const k = r.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return [...QTY_REASON_PRESETS, ...custom];
+}));
+
+mastersRouter.post('/qty-change-reasons', requires('purchase.requirement.create'), h(async (req) => {
+  const input = body(z.object({
+    reason: z.string().trim().min(3, 'Give a few words at least').max(120, 'Keep it short'),
+  }), req.body);
+
+  const saved = await savedReasons(req.actor);
+  const known = [...QTY_REASON_PRESETS, ...saved].map((r) => r.toLowerCase());
+  if (known.includes(input.reason.toLowerCase())) return { ok: true, added: false };
+
+  // Capped so a typo-prone month cannot turn the dropdown into a scroll of 500.
+  const next = [...saved, input.reason].slice(-40);
+  await withTx(req.actor, (tx) => tx.query(
+    `INSERT INTO settings (company_id, scope, key, value, updated_by)
+     VALUES ($1,'COMPANY',$2,$3,$4)
+     ON CONFLICT (company_id, branch_id, key)
+     DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+    [req.actor.companyId, QTY_REASON_KEY, JSON.stringify(next), req.actor.userId]));
+
+  return { ok: true, added: true };
+}));

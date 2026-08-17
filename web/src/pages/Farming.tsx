@@ -24,6 +24,7 @@ import {
   Chip, Col, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal,
   Steps, useApi, useToast,
 } from '../components/ui';
+import { CHART, compact, Meter, TrendArea } from '../components/charts';
 
 /* ----------------------------------------------------------- primitives -- */
 
@@ -1517,16 +1518,9 @@ export function FarmDashboardPage() {
             </div>
             <div className="card-body">
               {data?.forecast?.length ? (
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart data={data.forecast}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
-                    <XAxis dataKey="harvest_date" tick={{ fontSize: 11 }}
-                      tickFormatter={(d) => date(d).slice(0, 6)} />
-                    <YAxis tick={{ fontSize: 11 }} />
-                    <Tooltip formatter={(v: any) => `${num(v, 0)} kg`} labelFormatter={(l) => date(l)} />
-                    <Bar dataKey="expected_kg" fill="#4338CA" radius={[3, 3, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
+                <TrendArea data={data.forecast} x="harvest_date" y="expected_kg" height={220}
+                  labelFmt={(d: any) => date(d).slice(0, 6)}
+                  valueFmt={(v: any) => `${compact(Number(v))} kg`} />
               ) : <Empty icon="📅" title="No harvest expected in the next week" />}
             </div>
           </div>
