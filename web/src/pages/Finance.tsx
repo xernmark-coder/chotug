@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, useAuth, inr, num, date, dateTime, ago, today, addDays } from '../lib/api';
 import {
-  AiBox, Chip, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, useApi, useToast,
+  AiBox, Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
 } from '../components/ui';
 import { EmailSettingsCard } from './People';
 
@@ -343,11 +343,21 @@ export function InvoiceDetailPage() {
 export function PaymentsPage() {
   const nav = useNavigate();
   const [filter, setFilter] = useState('');
+  const [tab, setTab] = useState<'due' | 'notes'>('due');
   const { data, loading, error } = useApi<any[]>(`/costing/payments?filter=${filter}`, [filter]);
 
   return (
     <Layout title="Payment status" subtitle="Read-only — payments are made in Finance">
       <ErrorBanner error={error} />
+      <div className="tabs">
+        <button className={`tab ${tab === 'due' ? 'active' : ''}`} onClick={() => setTab('due')}>
+          What we owe
+        </button>
+        <button className={`tab ${tab === 'notes' ? 'active' : ''}`} onClick={() => setTab('notes')}>
+          Credit &amp; debit notes
+        </button>
+      </div>
+      {tab === 'notes' ? <NotesPanel /> : <>
       <div className="search-bar">
         <select value={filter} onChange={(e) => setFilter(e.target.value)}>
           <option value="">Everything</option>
@@ -375,6 +385,7 @@ export function PaymentsPage() {
           empty={<Empty icon="💳" title="Nothing payable" />}
         />
       </div></div>
+    </>}
     </Layout>
   );
 }
@@ -789,5 +800,130 @@ export function ProfilePage() {
         </div>
       </div>
     </Layout>
+  );
+}
+
+/* =============================================== CREDIT & DEBIT NOTES ==== */
+
+const NOTE_ACTIONS: Record<string, { action: string; label: string; primary?: boolean }[]> = {
+  DRAFT:    [{ action: 'issue', label: 'Send to supplier', primary: true }, { action: 'cancel', label: 'Cancel' }],
+  ISSUED:   [{ action: 'accept', label: 'They accepted', primary: true }, { action: 'cancel', label: 'Cancel' }],
+  ACCEPTED: [{ action: 'settle', label: 'Settle against invoice', primary: true }],
+  SETTLED:  [],
+  CANCELLED: [],
+};
+
+/**
+ * The claims we have on suppliers. A debit note takes money off what we owe;
+ * a credit note adds to it. Nothing moves until it is settled, and settling
+ * needs a linked invoice with a live balance — which is why the direction is
+ * spelled out on screen rather than left to be inferred from the word.
+ */
+function NotesPanel() {
+  const toast = useToast();
+  const { can } = useAuth();
+  const [status, setStatus] = useState('');
+  const { data, loading, error, reload } = useApi<any[]>(`/costing/notes?status=${status}`, [status]);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const act = async (n: any, action: string) => {
+    if (action === 'cancel') {
+      const reason = window.prompt(`Why is ${n.note_no} being cancelled?`);
+      if (!reason || reason.trim().length < 4) return;
+      setBusy(n.id);
+      try {
+        await api.post(`/costing/notes/${n.id}/cancel`, { reason });
+        toast(`${n.note_no} cancelled`, 'ok'); reload();
+      } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(null); }
+      return;
+    }
+    setBusy(n.id);
+    try {
+      const r = await api.post<any>(`/costing/notes/${n.id}/${action}`, {});
+      toast(r.balanceAfter != null
+        ? `${n.note_no} settled — invoice balance is now ${inr(r.balanceAfter, 0)}`
+        : `${n.note_no} is now ${String(r.status).toLowerCase()}`, 'ok');
+      reload();
+    } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(null); }
+  };
+
+  const open = (data ?? []).filter((n: any) => ['DRAFT', 'ISSUED', 'ACCEPTED'].includes(n.status));
+  const recoverable = open
+    .filter((n: any) => n.note_type === 'DEBIT')
+    .reduce((a: number, n: any) => a + Number(n.total), 0);
+
+  return (
+    <>
+      <div className="grid c3 mb">
+        <Kpi label="Open claims" value={open.length}
+          foot="raised but not settled" />
+        <Kpi label="Money to recover" value={inr(recoverable, 0)}
+          tone={recoverable > 0 ? 'warn' : 'good'}
+          foot="debit notes not yet settled" />
+        <Kpi label="Auto-drafted" value={(data ?? []).filter((n: any) => n.auto_drafted).length}
+          foot="raised by the match engine" />
+      </div>
+
+      <div className="search-bar">
+        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="">Every note</option>
+          <option value="DRAFT">Draft</option>
+          <option value="ISSUED">Sent to supplier</option>
+          <option value="ACCEPTED">Accepted</option>
+          <option value="SETTLED">Settled</option>
+        </select>
+      </div>
+
+      <ErrorBanner error={error} />
+      <div className="card"><div className="card-body tight">
+        <DataTable
+          rows={data ?? []} loading={loading}
+          rowTone={(n: any) => (n.status === 'DRAFT' && n.auto_drafted ? 'warn' : undefined)}
+          cols={[
+            { key: 'n', head: 'Note', render: (n: any) => (
+              <div>
+                <b className="mono">{n.note_no}</b>
+                <div className="small muted">
+                  {n.supplier_name}{n.invoice_no ? ` · ${n.invoice_no}` : ' · not linked'}
+                </div>
+              </div>
+            ) },
+            { key: 't', head: 'Direction', render: (n: any) => (
+              <div>
+                <Chip tone={n.note_type === 'DEBIT' ? 'danger' : 'primary'}>
+                  {n.note_type === 'DEBIT' ? 'we claim back' : 'we owe more'}
+                </Chip>
+                <div className="small muted">{String(n.reason_code).replace(/_/g, ' ').toLowerCase()}</div>
+              </div>
+            ) },
+            { key: 'a', head: 'Amount', num: true, render: (n: any) => (
+              <b style={{ color: n.note_type === 'DEBIT' ? 'var(--danger)' : 'var(--primary)' }}>
+                {n.note_type === 'DEBIT' ? '−' : '+'}{inr(n.total, 0)}
+              </b>
+            ) },
+            { key: 's', head: 'Status', render: (n: any) => (
+              <div>
+                <Chip value={n.status} />
+                {n.auto_drafted ? <div className="small muted">from the match</div> : null}
+              </div>
+            ) },
+            { key: 'r', head: 'Why', render: (n: any) => (
+              <span className="small muted">{n.remarks ?? '—'}</span>
+            ) },
+            { key: 'act', head: '', width: 230, render: (n: any) => can('finance.invoice.match') ? (
+              <div className="btn-row">
+                {(NOTE_ACTIONS[n.status] ?? []).map((a) => (
+                  <button key={a.action} disabled={busy === n.id}
+                    className={`btn sm ${a.primary ? 'primary' : ''}`}
+                    onClick={() => act(n, a.action)}>{a.label}</button>
+                ))}
+              </div>
+            ) : null },
+          ]}
+          empty={<Empty icon="🧾" title="No credit or debit notes"
+            hint="The match engine raises one automatically when a supplier bills for more than we received." />}
+        />
+      </div></div>
+    </>
   );
 }

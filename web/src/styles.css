@@ -673,3 +673,87 @@ label.check input { width: auto; }
   font-size: 9px; color: #777; text-align: center; margin-top: 2px;
   letter-spacing: .02em;
 }
+
+/* --- the pipeline strip ------------------------------------------------- */
+.flow {
+  display: grid; gap: 8px; margin-bottom: 14px;
+  /* All eleven stages on one line where there is room — the strip only reads
+     as a pipeline if it is a line. It wraps gracefully below that. */
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+}
+.flow-step {
+  position: relative;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px 12px 11px;
+  display: flex; flex-direction: column; gap: 2px;
+  color: inherit; text-decoration: none; cursor: pointer;
+  overflow: hidden;
+  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+}
+.flow-step:hover {
+  transform: translateY(-2px); text-decoration: none;
+  box-shadow: var(--shadow-md); border-color: var(--primary-border);
+}
+/* The arrow between stages. Drawn on the card, so it survives wrapping. */
+.flow-step::after {
+  content: ''; position: absolute; right: -5px; top: 50%;
+  width: 9px; height: 9px; margin-top: -4.5px;
+  border-top: 1.5px solid var(--border-strong);
+  border-right: 1.5px solid var(--border-strong);
+  transform: rotate(45deg);
+  background: var(--bg);
+  z-index: 1;
+}
+.flow-step:last-child::after { display: none; }
+/* The arrow means "and then" — which is only true while the strip is one
+   line. Once it wraps, every row-end arrow points at nothing. */
+@media (max-width: 1240px) { .flow-step::after { display: none; } }
+.flow-step .n {
+  font-size: 22px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1;
+}
+.flow-step .t {
+  font-size: 11px; color: var(--muted); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .05em;
+}
+.flow-step .ic { color: var(--muted-2); margin-bottom: 4px; }
+.flow-step.hot { border-color: var(--accent-border); background: var(--accent-soft); }
+.flow-step.hot .n { color: #B45309; }
+.flow-step.hot .ic { color: var(--accent); }
+.flow-step.crit { border-color: var(--danger-border); background: var(--danger-soft); }
+.flow-step.crit .n { color: #B91C1C; }
+.flow-step.crit .ic { color: var(--danger); }
+.flow-step.idle .n { color: var(--muted-2); }
+
+/* A quiet pulse on anything overdue — it draws the eye once, then stops. */
+@keyframes flow-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+  50%      { box-shadow: 0 0 0 4px rgba(220, 38, 38, .12); }
+}
+.flow-step.crit { animation: flow-pulse 2.6s ease-in-out 3; }
+
+/* --- landing hero ------------------------------------------------------- */
+.hero {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 16px 18px; margin-bottom: 16px;
+  border-radius: var(--radius);
+  background: linear-gradient(120deg, #312E81 0%, #4338CA 58%, #6366F1 100%);
+  color: #fff;
+}
+.hero h1 { font-size: 20px; letter-spacing: -0.02em; }
+.hero p { margin: 2px 0 0; font-size: 13.5px; color: #C7D2FE; }
+.hero .spacer { flex: 1; }
+.hero .btn { border-color: transparent; }
+.hero .btn.ghost-light {
+  background: rgba(255, 255, 255, .14); color: #fff; border-color: rgba(255, 255, 255, .28);
+}
+.hero .btn.ghost-light:hover { background: rgba(255, 255, 255, .24); }
+.hero-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--accent); color: #fff; border-radius: 999px;
+  padding: 1px 8px; font-size: 12px; font-weight: 700;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-step { transition: none; }
+  .flow-step.crit { animation: none; }
+}

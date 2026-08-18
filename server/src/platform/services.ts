@@ -11,7 +11,7 @@ export async function nextDocNo(
   docType:
     | 'REQ' | 'RFQ' | 'IND' | 'PO' | 'GATE' | 'WGT' | 'QC' | 'GRN'
     | 'BATCH' | 'LABEL' | 'INV' | 'DN' | 'CN' | 'PUT'
-    | 'CROP' | 'HARV' | 'FDN' | 'ISS' | 'PCK',
+    | 'CROP' | 'HARV' | 'FDN' | 'ISS' | 'PCK' | 'PIC',
 ): Promise<string> {
   const { rows } = await tx.query('SELECT next_doc_no($1,$2,$3,$4) AS no', [
     actor.companyId, branchId, docType, config.fy,

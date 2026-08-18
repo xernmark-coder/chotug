@@ -14,6 +14,9 @@ import { SalesPage } from './pages/Sales';
 import { PackingPage } from './pages/Packing';
 import { ScanLandingPage, ScanResultPage } from './pages/Scan';
 import { SupplierPortalPage } from './pages/SupplierPortal';
+import { WarehouseIntakePage } from './pages/Warehouse';
+import { LogisticsDispatchPage } from './pages/Dispatch';
+import { DriverAppPage } from './pages/DriverApp';
 import {
   AiCentrePage, AlertsPage, InvoiceCreatePage, InvoiceDetailPage, InvoiceListPage,
   PaymentsPage, ProfilePage, ReportsPage, SettingsPage, SuppliersPage,
@@ -45,6 +48,16 @@ export default function App() {
   /* An outside contact at a supplier gets their own application, not our
    * sidebar with most of it hidden. Anything they ask for that is not theirs
    * lands back on their own home. */
+  if (me.roles.includes('DRIVER')) {
+    return (
+      <Routes>
+        <Route path="/" element={<DriverAppPage />} />
+        <Route path="/profile" element={<ProfilePage />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    );
+  }
+
   if (me.roles.includes('SUPPLIER')) {
     return (
       <Routes>
@@ -60,8 +73,11 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Navigate to="/" replace />} />
-      <Route path="/" element={<WorkQueuePage />} />
-      <Route path="/dashboard" element={<DashboardPage />} />
+      {/* The dashboard is the landing page: a list of tasks is what you open
+          next, not what you want to be shown the moment you sign in. */}
+      <Route path="/" element={<DashboardPage />} />
+      <Route path="/my-work" element={<WorkQueuePage />} />
+      <Route path="/dashboard" element={<Navigate to="/" replace />} />
       <Route path="/alerts" element={<AlertsPage />} />
 
       <Route path="/order-flow" element={<QuickOrderPage />} />
@@ -75,6 +91,8 @@ export default function App() {
       <Route path="/approvals" element={<ApprovalsPage />} />
 
       <Route path="/arrivals" element={<ArrivalsPage />} />
+      <Route path="/intake" element={<WarehouseIntakePage />} />
+      <Route path="/dispatch" element={<LogisticsDispatchPage />} />
       <Route path="/gate" element={<GatePipelinePage />} />
       <Route path="/gate/new" element={<GateEntryPage />} />
       <Route path="/gate/:id" element={<GateDetailPage />} />

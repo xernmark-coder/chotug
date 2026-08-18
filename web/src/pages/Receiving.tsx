@@ -798,6 +798,17 @@ function QcModal({ gate, line, onClose, onDone }: {
     } catch (e: any) { toast(e.message, 'err'); }
   };
 
+  /* Optional split of one load into graded groups. Empty means the whole line
+   * carries one verdict, which is what most deliveries need. */
+  const [groups, setGroups] = useState<any[]>([]);
+  const groupSum = (d: string) => groups
+    .filter((g) => g.disposition === d)
+    .reduce((a, g) => a + (Number(g.qty) || 0), 0);
+  const groupsBalance = !groups.length
+    || (Math.abs(groupSum('ACCEPT') - accepted) < 0.001
+      && Math.abs(groupSum('REJECT') - rejected) < 0.001
+      && Math.abs(groupSum('HOLD') - hold) < 0.001);
+
   const save = async () => {
     setBusy(true);
     try {
@@ -824,6 +835,15 @@ function QcModal({ gate, line, onClose, onDone }: {
         rejectionReasonCodes: reasons,
         aiRunId: aiRun?.aiRunId ?? null,
         overrideReason: overrideReason || null,
+        grades: groups.length ? groups.map((g) => ({
+          label: g.label || undefined,
+          grade: g.grade,
+          containerCount: g.containerCount ? Number(g.containerCount) : null,
+          qty: Number(g.qty),
+          disposition: g.disposition,
+          reasonCode: g.reasonCode || null,
+          priceFactorPct: Number(g.priceFactorPct ?? 100),
+        })) : undefined,
       });
       toast('Quality check saved', 'ok');
       onDone();
@@ -833,11 +853,112 @@ function QcModal({ gate, line, onClose, onDone }: {
   const REJECT_REASONS = ['ROT', 'OVERRIPE', 'UNDERRIPE', 'DAMAGE', 'UNDERSIZE',
     'FOREIGN_MATTER', 'WET', 'PEST', 'WRONG_VARIETY', 'TEMPERATURE_ABUSE'];
 
+  /* The grading panel. Kept out of the way until someone asks for it: most
+   * loads are one grade, and a table of empty rows on every inspection is
+   * noise. */
+  const gradePanel = (
+    <div className="card mt">
+      <div className="card-head">
+        <h2>Grade it in groups</h2>
+        <span className="muted small">
+          {groups.length
+            ? `${groupSum('ACCEPT')} accepted · ${groupSum('REJECT')} rejected · ${groupSum('HOLD')} held`
+            : 'optional — for when one load is not one quality'}
+        </span>
+        <button className="btn sm" onClick={() => setGroups((g) => [...g, {
+          label: '', grade: grade || 'A', containerCount: '', qty: '',
+          disposition: 'ACCEPT', reasonCode: '', priceFactorPct: 100,
+        }])}>Add a group</button>
+      </div>
+      {groups.length ? (
+        <div className="card-body tight">
+          <div className="table-wrap">
+            <table className="data">
+              <thead><tr>
+                <th>Which crates</th><th style={{ width: 80 }}>Grade</th>
+                <th className="num" style={{ width: 90 }}>Crates</th>
+                <th className="num" style={{ width: 100 }}>Quantity</th>
+                <th style={{ width: 120 }}>What happens</th>
+                <th className="num" style={{ width: 100 }}>% of rate</th>
+                <th style={{ width: 44 }}></th>
+              </tr></thead>
+              <tbody>
+                {groups.map((g, i) => {
+                  const set = (p: any) => setGroups((s2) => s2.map((x, j) => j === i ? { ...x, ...p } : x));
+                  return (
+                    <tr key={i}>
+                      <td>
+                        <input className="inline" value={g.label} placeholder="top layer"
+                          onChange={(e) => set({ label: e.target.value })} />
+                        {g.disposition === 'REJECT' ? (
+                          <select className="mt" value={g.reasonCode}
+                            onChange={(e) => set({ reasonCode: e.target.value })}>
+                            <option value="">Why rejected…</option>
+                            {REJECT_REASONS.map((r) => <option key={r} value={r}>{r.replace(/_/g, ' ').toLowerCase()}</option>)}
+                          </select>
+                        ) : null}
+                      </td>
+                      <td>
+                        <input className="inline" style={{ width: 60 }} value={g.grade}
+                          onChange={(e) => set({ grade: e.target.value })} />
+                      </td>
+                      <td className="num">
+                        <input className="inline num" style={{ width: 74 }} type="number" value={g.containerCount}
+                          onChange={(e) => set({ containerCount: e.target.value })} />
+                      </td>
+                      <td className="num">
+                        <input className="inline num" style={{ width: 84 }} type="number" value={g.qty}
+                          onChange={(e) => set({ qty: e.target.value })} />
+                      </td>
+                      <td>
+                        <select value={g.disposition} onChange={(e) => set({ disposition: e.target.value })}>
+                          <option value="ACCEPT">Take it</option>
+                          <option value="REJECT">Send back</option>
+                          <option value="HOLD">Hold</option>
+                        </select>
+                      </td>
+                      <td className="num">
+                        <input className="inline num" style={{ width: 76 }} type="number" value={g.priceFactorPct}
+                          onChange={(e) => set({ priceFactorPct: e.target.value })} />
+                      </td>
+                      <td>
+                        <button className="btn sm ghost"
+                          onClick={() => setGroups((s2) => s2.filter((_, j) => j !== i))}>✕</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {!groupsBalance ? (
+            <div className="banner danger" style={{ margin: 12 }}>
+              <span>⚠</span>
+              <div>
+                <b>The groups do not add up to the totals above.</b>
+                <div className="small">
+                  Groups say {groupSum('ACCEPT')} accepted, {groupSum('REJECT')} rejected,
+                  {' '}{groupSum('HOLD')} held — the totals say {accepted}, {rejected}, {hold}.
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="chart-hint" style={{ padding: '0 12px 12px' }}>
+              A group at less than 100% of rate is the price you actually agreed for those
+              crates. It is recorded against the delivery, not negotiated again later.
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+
+
   return (
     <Modal title={`Quality check — ${line.product_name}`} onClose={onClose} wide
       footer={<>
         <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn primary" disabled={busy || loading || (criticalFailed.length > 0 && accepted > 0 && !overrideReason)}
+        <button className="btn primary" disabled={busy || loading || !groupsBalance || (criticalFailed.length > 0 && accepted > 0 && !overrideReason)}
           onClick={save}>{busy ? 'Saving…' : 'Save inspection'}</button>
       </>}>
       {loading ? <Loading /> : !plan ? <Empty title="No QC template for this product" /> : (
@@ -941,6 +1062,8 @@ function QcModal({ gate, line, onClose, onDone }: {
               ) : null}
             </div>
           </div>
+
+          {gradePanel}
         </div>
       )}
     </Modal>

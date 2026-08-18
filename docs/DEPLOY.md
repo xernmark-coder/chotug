@@ -117,14 +117,15 @@ exist but cannot log in** — `password_hash` is null until this runs.
 
 ### 6B — From your laptop
 
-Use the database's **External** connection string. `PGSSL=require` is mandatory from
-outside Render's network; the internal URL used by the deployed API does not need it.
+Use the database's **External** connection string. TLS is worked out from the URL — a
+host that is not on your own machine gets an encrypted connection automatically, so no
+extra flag is needed. (`PGSSL=require` or `PGSSL=disable` still force it either way.)
 
 ```bash
 cd server
 npm ci --include=dev && npm run build
-PGSSL=require DATABASE_URL='<external-url>' node dist/scripts/migrate.js
-PGSSL=require DATABASE_URL='<external-url>' node dist/scripts/seed.js
+DATABASE_URL='<external-url>' node dist/scripts/migrate.js
+DATABASE_URL='<external-url>' node dist/scripts/seed.js
 ```
 
 Or push the raw SQL with psql, in exactly this order:

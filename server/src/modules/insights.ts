@@ -177,7 +177,44 @@ insightsRouter.get('/dashboard', h(async (req) => {
         AND ($2::uuid IS NULL OR g.branch_id=$2)`,
     [req.actor.companyId, branchId]);
 
-  return { kpis, quality, criticalStock, trend, topSuppliers, sourceMix, prev };
+  /* The pipeline, stage by stage — the shape of the business rather than a
+   * pile of unrelated numbers. Each figure is what is SITTING at that stage
+   * right now, which is the only thing anyone can act on. */
+  const [flow] = await query(req.actor,
+    `SELECT
+       (SELECT count(*) FROM requirements r
+         WHERE r.company_id=$1 AND r.status IN ('DRAFT','SUBMITTED')
+           AND ($2::uuid IS NULL OR r.branch_id=$2))                        AS need,
+       (SELECT count(*) FROM approvals a
+         WHERE a.company_id=$1 AND a.status='PENDING'
+           AND ($2::uuid IS NULL OR a.branch_id=$2))                        AS approve,
+       (SELECT count(*) FROM purchase_orders o
+         WHERE o.company_id=$1 AND o.status='APPROVED'
+           AND ($2::uuid IS NULL OR o.branch_id=$2))                        AS to_confirm,
+       (SELECT count(*) FROM pickups p
+         WHERE p.company_id=$1 AND p.status IN ('OFFERED','ASSIGNED','EN_ROUTE','LOADED')
+           AND ($2::uuid IS NULL OR p.branch_id=$2))                        AS in_transit,
+       (SELECT count(*) FROM gate_entries g
+         WHERE g.company_id=$1 AND g.status IN ('ARRIVED','WEIGHED')
+           AND ($2::uuid IS NULL OR g.branch_id=$2))                        AS at_gate,
+       (SELECT count(*) FROM gate_entries g
+         WHERE g.company_id=$1 AND g.status='QC_PENDING'
+           AND ($2::uuid IS NULL OR g.branch_id=$2))                        AS in_qc,
+       (SELECT count(*) FROM gate_entries g
+         WHERE g.company_id=$1 AND g.status IN ('QC_COMPLETE','GRN_PENDING')
+           AND ($2::uuid IS NULL OR g.branch_id=$2))                        AS to_book,
+       (SELECT count(*) FROM putaway_tasks t
+         WHERE t.company_id=$1 AND t.status IN ('PENDING','IN_PROGRESS'))   AS to_putaway,
+       (SELECT count(*) FROM packs k
+         WHERE k.company_id=$1 AND k.status='IN_STOCK')                     AS packed,
+       (SELECT count(*) FROM supplier_invoices i
+         WHERE i.company_id=$1 AND i.status IN ('PENDING','MISMATCH','HOLD')
+           AND ($2::uuid IS NULL OR i.branch_id=$2))                        AS to_match,
+       (SELECT count(*) FROM payment_status ps
+         WHERE ps.company_id=$1 AND ps.balance > 0)                         AS to_pay`,
+    [req.actor.companyId, branchId]);
+
+  return { kpis, quality, criticalStock, trend, topSuppliers, sourceMix, prev, flow };
 }));
 
 /* ===========================================================================

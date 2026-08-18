@@ -511,12 +511,49 @@ receivingRouter.post('/gate-entries/:id/inspections', requires('quality.inspecti
     aiRunId: z.string().uuid().nullable().optional(),
     overrideReason: z.string().nullable().optional(),
     remarks: z.string().optional(),
+    /* §17 — one verdict for forty crates is a fiction. Optional groups let the
+     * inspector say "25 crates grade A at full price, 10 grade B at 80%, 5
+     * rejected", and the totals above must be exactly what these add up to. */
+    grades: z.array(z.object({
+      label: z.string().trim().optional(),
+      grade: z.string().trim().min(1, 'Every group needs a grade'),
+      containerCount: z.coerce.number().int().nonnegative().nullable().optional(),
+      qty: z.coerce.number().positive('How much is in this group?'),
+      weightKg: z.coerce.number().nonnegative().nullable().optional(),
+      disposition: z.enum(['ACCEPT', 'REJECT', 'HOLD']).default('ACCEPT'),
+      reasonCode: z.string().trim().nullable().optional(),
+      priceFactorPct: z.coerce.number().min(0).max(200).default(100),
+      note: z.string().trim().optional(),
+    })).optional(),
   }), req.body);
 
   const total = input.acceptedQty + input.rejectedQty + input.holdQty;
   if (total > input.receivedQty + 0.001) {
     throw ApiError.rule('Accepted + rejected + hold cannot be more than the received quantity.');
   }
+  if (input.grades?.length) {
+    const sumOf = (d: string) => input.grades!
+      .filter((x) => x.disposition === d)
+      .reduce((a, x) => a + Number(x.qty), 0);
+    const checks: [string, number, number][] = [
+      ['accepted', sumOf('ACCEPT'), input.acceptedQty],
+      ['rejected', sumOf('REJECT'), input.rejectedQty],
+      ['held',     sumOf('HOLD'),   input.holdQty],
+    ];
+    for (const [what, grouped, headline] of checks) {
+      if (Math.abs(grouped - headline) > 0.001) {
+        throw ApiError.rule(
+          `The groups add up to ${round(grouped, 3)} ${what}, but the ${what} quantity says ${headline}. They have to agree.`,
+          { field: what, grouped, headline });
+      }
+    }
+    const noReason = input.grades.find(
+      (x) => x.disposition === 'REJECT' && !x.reasonCode?.trim());
+    if (noReason) {
+      throw ApiError.rule(`Give a reason for rejecting the "${noReason.label ?? noReason.grade}" group.`);
+    }
+  }
+
   if (input.rejectedQty > 0 && input.rejectionReasonCodes.length === 0) {
     throw ApiError.rule('Choose at least one rejection reason for the rejected quantity.');
   }
@@ -593,6 +630,21 @@ receivingRouter.post('/gate-entries/:id/inspections', requires('quality.inspecti
        input.remarks ?? null, req.actor.userId]);
 
     const inspection = ins[0];
+
+    /* The groups, if the inspector split the load. They are the working shown
+     * behind the accepted/rejected/hold totals, so they are written with the
+     * inspection and never separately. */
+    for (const [i, gr] of (input.grades ?? []).entries()) {
+      await tx.query(
+        `INSERT INTO qc_lot_grades (company_id, inspection_id, group_no, label, grade,
+                container_count, qty, uom, weight_kg, disposition, reason_code,
+                price_factor_pct, note, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+        [req.actor.companyId, inspection.id, i + 1, gr.label ?? null, gr.grade,
+         gr.containerCount ?? null, gr.qty, null, gr.weightKg ?? null,
+         gr.disposition, gr.reasonCode ?? null, gr.priceFactorPct, gr.note ?? null,
+         req.actor.userId]);
+    }
 
     for (const a of input.answers) {
       const p = paramRows.find((x: any) => x.code === a.code);
@@ -1171,4 +1223,121 @@ receivingRouter.get('/trace/:code', h(async (req) => {
       WHERE l.company_id=$1 AND l.code = $2`, [req.actor.companyId, req.params.code]);
   if (!label) throw ApiError.notFound('No label found with that code');
   return label;
+}));
+
+/* ===========================================================================
+   PICKUPS — arranging the vehicle
+
+   A confirmed order still has to be fetched. This is the job board: dispatch
+   publishes a pickup, drivers see it in their app, and every step after that
+   is visible here and on the gate's queue.
+   ======================================================================== */
+
+receivingRouter.get('/pickups', h(async (req) =>
+  query(req.actor,
+    `SELECT p.*, s.trade_name AS supplier_name, s.phone AS supplier_phone,
+            o.po_no, o.grand_total, w.name AS warehouse_name,
+            d.full_name AS driver_name, d.phone AS driver_phone, v.reg_no AS vehicle_no
+       FROM pickups p
+       JOIN suppliers s ON s.id = p.supplier_id
+       JOIN purchase_orders o ON o.id = p.po_id
+       LEFT JOIN warehouses w ON w.id = p.warehouse_id
+       LEFT JOIN drivers d ON d.id = p.driver_id
+       LEFT JOIN vehicles v ON v.id = p.vehicle_id
+      WHERE p.company_id = $1
+        AND ($2 = '' OR p.status = $2)
+      ORDER BY (p.status = 'DELIVERED'), p.pickup_on DESC, p.created_at DESC
+      LIMIT 200`,
+    [req.actor.companyId, String(req.query.status ?? '')])));
+
+/** Orders that are confirmed but have nobody going to fetch them. */
+receivingRouter.get('/pickups/candidates', requires('logistics.pickup.manage'), h(async (req) =>
+  query(req.actor,
+    `SELECT o.id AS po_id, o.po_no, o.expected_date, o.grand_total, o.branch_id,
+            o.warehouse_id, s.id AS supplier_id, s.trade_name AS supplier_name,
+            s.phone AS supplier_phone,
+            NULLIF(concat_ws(', ',
+              s.address->>'line1', s.address->>'line2',
+              s.address->>'city', s.address->>'state'), '') AS pickup_address
+       FROM purchase_orders o
+       JOIN suppliers s ON s.id = o.supplier_id
+      WHERE o.company_id = $1 AND o.status = 'CONFIRMED'
+        AND NOT EXISTS (SELECT 1 FROM pickups p
+                         WHERE p.po_id = o.id AND p.status <> 'CANCELLED')
+      ORDER BY o.expected_date LIMIT 100`,
+    [req.actor.companyId])));
+
+receivingRouter.post('/pickups', requires('logistics.pickup.manage'), h(async (req) => {
+  const input = body(z.object({
+    poId: z.string().uuid(),
+    pickupOn: z.string(),
+    windowStart: z.string().nullable().optional(),
+    windowEnd: z.string().nullable().optional(),
+    pickupAddress: z.string().trim().optional(),
+    notes: z.string().trim().optional(),
+    /* Named driver, or leave it empty and let whoever is free take it. The
+     * second is what actually happens with a pool of freelance vehicles. */
+    driverId: z.string().uuid().nullable().optional(),
+    vehicleId: z.string().uuid().nullable().optional(),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows: poRows } = await tx.query(
+      `SELECT o.id, o.po_no, o.branch_id, o.warehouse_id, o.supplier_id, o.status,
+              NULLIF(concat_ws(', ',
+                s.address->>'line1', s.address->>'line2',
+                s.address->>'city', s.address->>'state'), '') AS pickup_address
+         FROM purchase_orders o JOIN suppliers s ON s.id = o.supplier_id
+        WHERE o.id = $1 AND o.company_id = $2`,
+      [input.poId, req.actor.companyId]);
+    const po = poRows[0];
+    if (!po) throw ApiError.notFound('Order not found');
+    if (po.status !== 'CONFIRMED') {
+      throw ApiError.rule(
+        `Only a confirmed order can be collected. This one is ${po.status.toLowerCase().replace('_', ' ')}.`);
+    }
+    const { rows: existing } = await tx.query(
+      `SELECT pickup_no FROM pickups WHERE po_id = $1 AND status <> 'CANCELLED'`, [po.id]);
+    if (existing.length) {
+      throw ApiError.conflict(`${existing[0].pickup_no} is already arranged for this order.`);
+    }
+
+    const pickupNo = await nextDocNo(tx, req.actor, po.branch_id, 'PIC');
+    const assigned = !!input.driverId;
+    const { rows } = await tx.query(
+      `INSERT INTO pickups (company_id, branch_id, pickup_no, po_id, supplier_id, warehouse_id,
+             pickup_on, window_start, window_end, pickup_address, notes,
+             driver_id, vehicle_id, assigned_at, status, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+               CASE WHEN $12::uuid IS NULL THEN NULL ELSE now() END,
+               CASE WHEN $12::uuid IS NULL THEN 'OFFERED' ELSE 'ASSIGNED' END,
+               $14,$14)
+       RETURNING *`,
+      [req.actor.companyId, po.branch_id, pickupNo, po.id, po.supplier_id, po.warehouse_id,
+       input.pickupOn, input.windowStart || null, input.windowEnd || null,
+       input.pickupAddress || po.pickup_address || null,
+       input.notes ?? null, input.driverId ?? null, input.vehicleId ?? null, req.actor.userId]);
+
+    await emit(tx, req.actor, 'pickup', rows[0].id, 'pickup.created',
+      { pickupNo, poNo: po.po_no, offered: !assigned });
+    return rows[0];
+  });
+}));
+
+receivingRouter.post('/pickups/:id/cancel', requires('logistics.pickup.manage'), h(async (req) => {
+  const input = body(z.object({
+    reason: z.string().trim().min(4, 'Say why this pickup is being cancelled'),
+  }), req.body);
+  return withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE pickups SET status='CANCELLED', cancel_reason=$3, updated_by=$4, updated_at=now()
+        WHERE id=$1 AND company_id=$2 AND status NOT IN ('DELIVERED','CANCELLED')
+        RETURNING pickup_no`,
+      [req.params.id, req.actor.companyId, input.reason, req.actor.userId]);
+    if (!rows.length) throw ApiError.rule('That pickup is already delivered or cancelled.');
+    await resolveTask(tx, req.actor, 'EXPECTED_ARRIVAL', 'PICKUP', req.params.id);
+    await emit(tx, req.actor, 'pickup', req.params.id, 'pickup.cancelled',
+      { pickupNo: rows[0].pickup_no, reason: input.reason });
+    return { ok: true };
+  });
 }));

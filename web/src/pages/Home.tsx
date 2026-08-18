@@ -10,6 +10,7 @@ import {
 import {
   CHART, ChartCard, compact, inrCompact, Meter, RankedBars, Spark, StackedStatus, TrendArea,
 } from '../components/charts';
+import { Icon } from '../components/icons';
 
 /* ========================================================== LOGIN ======== */
 const DEMO = [
@@ -166,8 +167,10 @@ export function WorkQueuePage() {
 /* ======================================================= DASHBOARD ======= */
 export function DashboardPage() {
   const nav = useNavigate();
-  const { branchId, can } = useAuth();
+  const { branchId, can, me } = useAuth();
   const { data, loading, error } = useApi<any>(`/insights/dashboard?branchId=${branchId ?? ''}`, [branchId]);
+  const queue = useApi<any[]>('/insights/work-queue');
+  const queueCount = (queue.data ?? []).length;
 
   if (loading) return <Layout title="Dashboard"><Loading /></Layout>;
 
@@ -202,6 +205,32 @@ export function DashboardPage() {
   return (
     <Layout title="Purchase dashboard" subtitle="Today at a glance">
       <ErrorBanner error={error} />
+
+      <div className="hero">
+        <div>
+          <h1>{greeting()}, {me?.fullName?.split(' ')[0]}</h1>
+          <p>
+            {queueCount > 0
+              ? `${queueCount} thing${queueCount === 1 ? '' : 's'} are waiting on you.`
+              : 'Nothing is waiting on you right now.'}
+          </p>
+        </div>
+        <span className="spacer" />
+        <button className="btn ghost-light lg" onClick={() => nav('/my-work')}>
+          <Icon name="target" />
+          My work
+          {queueCount > 0 ? <span className="hero-badge">{queueCount}</span> : null}
+        </button>
+        {can('purchase.po.create') ? (
+          <button className="btn lg" onClick={() => nav('/order-flow')}>
+            <Icon name="bolt" />
+            Order in one flow
+          </button>
+        ) : null}
+      </div>
+
+      <div className="section-head"><h2>Where everything is</h2><span className="rule" /></div>
+      <FlowStrip flow={data?.flow ?? {}} overdue={Number(k.overdue_approvals ?? 0)} nav={nav} />
 
       <div className="section-head"><h2>Needs a person</h2><span className="rule" /></div>
       <div className="grid c4 mb">
@@ -337,22 +366,70 @@ export function DashboardPage() {
             </div>
           </div>
 
-          <div className="card">
-            <div className="card-head"><h2>Pipeline</h2></div>
-            <div className="card-body">
-              <dl className="kv">
-                <dt>Open requirements</dt><dd>{k.open_requirements ?? 0}</dd>
-                <dt>Draft / submitted POs</dt><dd>{k.pending_pos ?? 0}</dd>
-                <dt>Waiting to weigh</dt><dd>{k.awaiting_weighment ?? 0}</dd>
-                <dt>Waiting for QC</dt><dd>{k.awaiting_qc ?? 0}</dd>
-                <dt>Waiting for receipt</dt><dd>{k.awaiting_grn ?? 0}</dd>
-                <dt>Waiting for put-away</dt><dd>{k.awaiting_putaway ?? 0}</dd>
-                <dt>Invoices to match</dt><dd>{k.invoices_to_match ?? 0}</dd>
-              </dl>
-            </div>
-          </div>
         </div>
       </div>
     </Layout>
   );
+}
+
+/* ===========================================================================
+ * THE PIPELINE
+ *
+ * Produce moves in one direction — a need becomes an order, an order becomes a
+ * vehicle, a vehicle becomes stock, stock becomes money — and the number that
+ * matters at each stage is how much is SITTING there. Read left to right it is
+ * the whole business on one line, and every step opens the screen where that
+ * work is actually done.
+ * ======================================================================== */
+
+const FLOW_STEPS: {
+  key: string; label: string; icon: string; to: string;
+  /** Sitting here is normal up to this many; past it, it is a queue. */
+  hot?: number;
+}[] = [
+  { key: 'need',       label: 'To buy',      icon: 'calculator', to: '/buy-list' },
+  { key: 'approve',    label: 'Approve',     icon: 'checkDoc',   to: '/approvals', hot: 1 },
+  { key: 'to_confirm', label: 'Confirm',     icon: 'box',        to: '/purchase-orders', hot: 1 },
+  { key: 'in_transit', label: 'On the road', icon: 'route',      to: '/dispatch' },
+  { key: 'at_gate',    label: 'At the gate', icon: 'gate',       to: '/intake', hot: 1 },
+  { key: 'in_qc',      label: 'Quality',     icon: 'scale',      to: '/gate', hot: 1 },
+  { key: 'to_book',    label: 'Book in',     icon: 'inbox',      to: '/gate', hot: 1 },
+  { key: 'to_putaway', label: 'Put away',    icon: 'shelf',      to: '/putaway', hot: 1 },
+  { key: 'packed',     label: 'Packed',      icon: 'tag',        to: '/packing' },
+  { key: 'to_match',   label: 'Match bills', icon: 'invoice',    to: '/invoices', hot: 1 },
+  { key: 'to_pay',     label: 'To pay',      icon: 'card',       to: '/payments' },
+];
+
+function FlowStrip({ flow, overdue, nav }: {
+  flow: Record<string, any>; overdue: number; nav: (to: string) => void;
+}) {
+  return (
+    <div className="flow">
+      {FLOW_STEPS.map((s) => {
+        const n = Number(flow[s.key] ?? 0);
+        // Approvals are the one stage where late is worse than many.
+        const crit = s.key === 'approve' && overdue > 0;
+        const hot = !crit && s.hot != null && n >= s.hot;
+        return (
+          <a
+            key={s.key}
+            className={`flow-step ${crit ? 'crit' : hot ? 'hot' : n === 0 ? 'idle' : ''}`}
+            onClick={(e) => { e.preventDefault(); nav(s.to); }}
+            href={s.to}
+            title={`${n} at ${s.label.toLowerCase()} — open`}
+          >
+            <span className="ic"><Icon name={s.icon} size={16} /></span>
+            <span className="n">{n}</span>
+            <span className="t">{s.label}</span>
+            {crit ? <span className="small" style={{ color: 'var(--danger)' }}>{overdue} late</span> : null}
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
 }

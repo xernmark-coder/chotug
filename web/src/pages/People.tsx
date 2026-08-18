@@ -10,6 +10,7 @@ type Person = {
   status: string; last_login_at: string | null; created_at: string;
   roles: string[]; invite_expires_at: string | null;
   supplier_id: string | null; supplier_name: string | null;
+  driver_id: string | null; driver_name: string | null;
 };
 type Role = { id: string; code: string; name: string; description: string | null };
 
@@ -62,18 +63,20 @@ export function PeoplePage() {
   const { data, loading, error, reload } = useApi<Person[]>('/masters/users');
   const roles = useApi<Role[]>('/masters/roles');
   const suppliers = useApi<any[]>('/masters/suppliers');
+  const drivers = useApi<any[]>('/masters/drivers');
 
   const [open, setOpen] = useState(false);
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [roleId, setRoleId] = useState('');
   const [supplierId, setSupplierId] = useState('');
+  const [driverId, setDriverId] = useState('');
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<any>(null);
   const [link, setLink] = useState<{ url: string; email: string; sent?: boolean; error?: string } | null>(null);
 
   const reset = () => {
-    setFullName(''); setEmail(''); setRoleId(''); setSupplierId(''); setFormError(null);
+    setFullName(''); setEmail(''); setRoleId(''); setSupplierId(''); setDriverId(''); setFormError(null);
   };
 
   const invite = async () => {
@@ -82,7 +85,7 @@ export function PeoplePage() {
     try {
       const r = await api.post<{ inviteUrl: string; email: string; emailSent: boolean; emailError?: string }>(
         '/masters/users/invite',
-        { fullName, email, roleId, supplierId: supplierId || null });
+        { fullName, email, roleId, supplierId: supplierId || null, driverId: driverId || null });
       setLink({ url: r.inviteUrl, email: r.email, sent: r.emailSent, error: r.emailError });
       setOpen(false);
       reset();
@@ -136,6 +139,7 @@ export function PeoplePage() {
                   <b>{p.full_name}</b>
                   {p.id === me?.id ? <span className="muted small"> — you</span> : null}
                   {p.supplier_name ? <Chip tone="warn">outside · {p.supplier_name}</Chip> : null}
+                  {p.driver_name ? <Chip tone="warn">driver · {p.driver_name}</Chip> : null}
                   <div className="small muted">{p.email ?? p.phone ?? '—'}</div>
                 </div>
               ),
@@ -207,6 +211,17 @@ export function PeoplePage() {
               ))}
             </select>
           </Field>
+          {(roles.data ?? []).find((r) => r.id === roleId)?.code === 'DRIVER' ? (
+            <Field label="Which driver?"
+              hint="They will see only the pickups offered to or assigned to them.">
+              <select value={driverId} onChange={(e) => setDriverId(e.target.value)}>
+                <option value="">Choose a driver…</option>
+                {(drivers.data ?? []).map((d: any) => (
+                  <option key={d.id} value={d.id}>{d.full_name}{d.phone ? ` — ${d.phone}` : ''}</option>
+                ))}
+              </select>
+            </Field>
+          ) : null}
           {(roles.data ?? []).find((r) => r.id === roleId)?.code === 'SUPPLIER' ? (
             <Field label="Which supplier?"
               hint="They will see only this supplier's orders, deliveries and invoices.">

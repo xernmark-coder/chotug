@@ -14,6 +14,7 @@ import { farmingRouter } from './modules/farming.js';
 import { inventoryRouter } from './modules/inventory.js';
 import { publicRouter } from './modules/public.js';
 import { supplierRouter } from './modules/supplier.js';
+import { driverRouter } from './modules/driver.js';
 
 const app = express();
 
@@ -44,6 +45,7 @@ app.use('/api/insights', insightsRouter);
 app.use('/api/farming', farmingRouter);
 app.use('/api/inventory', inventoryRouter);
 app.use('/api/supplier', supplierRouter);
+app.use('/api/driver', driverRouter);
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'No such endpoint' }));
 app.use(errorHandler);

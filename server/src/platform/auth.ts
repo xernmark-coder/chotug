@@ -29,7 +29,7 @@ export async function hashPassword(plain: string) {
 export async function loadActor(userId: string): Promise<Actor | null> {
   const { rows } = await pool.query(
     `
-    SELECT u.id, u.company_id, u.default_branch_id, u.status, u.supplier_id,
+    SELECT u.id, u.company_id, u.default_branch_id, u.status, u.supplier_id, u.driver_id,
            COALESCE(array_agg(DISTINCT r.code)   FILTER (WHERE r.code IS NOT NULL), '{}') AS role_codes,
            COALESCE(array_agg(DISTINCT rp.permission_code)
                     FILTER (WHERE rp.permission_code IS NOT NULL), '{}')                  AS perms,
@@ -58,6 +58,7 @@ export async function loadActor(userId: string): Promise<Actor | null> {
     companyId: r.company_id,
     branchId: r.default_branch_id,
     supplierId: r.supplier_id ?? null,
+    driverId: r.driver_id ?? null,
     permissions: new Set<string>(r.perms),
     roleCodes: r.role_codes,
     limits: {
@@ -132,6 +133,10 @@ export function staffOnly(req: Request, _res: Response, next: NextFunction) {
   if (actor.supplierId) {
     return next(ApiError.forbidden(
       'This is a supplier login. It can only see your own orders, deliveries and invoices.'));
+  }
+  if (actor.driverId) {
+    return next(ApiError.forbidden(
+      'This is a driver login. It can only see the pickups offered to you.'));
   }
   next();
 }

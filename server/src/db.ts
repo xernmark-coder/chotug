@@ -43,14 +43,45 @@ export const config = {
   },
 };
 
+/* ---------------------------------------------------------------------------
+ * TLS, decided here and never left to chance.
+ *
+ * This used to pass `ssl: undefined` unless PGSSL=require, and "undefined" is
+ * not "off" to node-postgres — it falls back to reading PGSSLMODE and the
+ * connection string's own sslmode, then verifies the certificate. Both the
+ * managed hosts (Render, Neon, RDS) and a stock Ubuntu Postgres present a
+ * self-signed certificate, so that verification fails with the singularly
+ * unhelpful:
+ *
+ *     Migration failed: self-signed certificate
+ *
+ * — while pointing at localhost, which is what made it baffling.
+ *
+ * So: always pass an explicit value.
+ *
+ *   · encryption ON, verification OFF for anything not on this machine, which
+ *     is every managed provider and matches how they document themselves;
+ *   · OFF for localhost, because a plain local Postgres has no TLS to offer
+ *     and asking for it fails outright;
+ *   · PGSSL forces either way when a deployment needs something else.
+ * ------------------------------------------------------------------------ */
+function sslConfig(): false | { rejectUnauthorized: boolean } {
+  const force = process.env.PGSSL?.toLowerCase();
+  if (force === 'disable' || force === 'off' || force === 'false') return false;
+  if (force === 'require' || force === 'true') return { rejectUnauthorized: false };
+
+  const url = config.databaseUrl;
+  if (/[?&]sslmode=disable/i.test(url)) return false;
+  if (/[?&]sslmode=/i.test(url)) return { rejectUnauthorized: false };
+
+  // Anything off this machine crosses a network we do not own.
+  const local = /@(localhost|127\.0\.0\.1|\[::1\])[:/]/i.test(url) || /^postgres(ql)?:\/\/[^@]*$/i.test(url);
+  return local ? false : { rejectUnauthorized: false };
+}
+
 export const pool = new pg.Pool({
   connectionString: config.databaseUrl,
-  /* A managed Postgres reached over the public internet — Render's external
-   * URL, used when running a migration from a laptop — refuses a plaintext
-   * connection. The internal URL inside the provider's own network does not
-   * need TLS and does not present a certificate you can verify, so this is
-   * opt-in per environment rather than always on. */
-  ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : undefined,
+  ssl: sslConfig(),
   max: Number(process.env.PG_POOL_MAX ?? 12),
   idleTimeoutMillis: 30_000,
   application_name: 'chotug-purchase-api',
@@ -66,6 +97,8 @@ export type Actor = {
   branchId: string | null;
   /** Set for an OUTSIDE contact at a supplier; null for our own staff. */
   supplierId: string | null;
+  /** Set for an OUTSIDE driver; null for our own staff. */
+  driverId: string | null;
   permissions: Set<string>;
   roleCodes: string[];
   limits: {

@@ -664,14 +664,15 @@ mastersRouter.get('/users', requires('admin.rbac.manage'), h(async (req) =>
             (SELECT i.expires_at FROM user_invites i
               WHERE i.user_id = u.id AND i.accepted_at IS NULL
               ORDER BY i.created_at DESC LIMIT 1) AS invite_expires_at,
-            u.supplier_id,
-            sup.trade_name AS supplier_name
+            u.supplier_id, u.driver_id,
+            sup.trade_name AS supplier_name, drv.full_name AS driver_name
        FROM users u
        LEFT JOIN user_role_assignments ura ON ura.user_id = u.id
        LEFT JOIN roles r ON r.id = ura.role_id
        LEFT JOIN suppliers sup ON sup.id = u.supplier_id
+       LEFT JOIN drivers drv ON drv.id = u.driver_id
       WHERE u.company_id = $1
-      GROUP BY u.id, sup.trade_name
+      GROUP BY u.id, sup.trade_name, drv.full_name
       ORDER BY u.full_name`,
     [req.actor.companyId])));
 
@@ -684,6 +685,7 @@ mastersRouter.post('/users/invite', requires('admin.rbac.manage'), h(async (req)
     // portal shows is scoped by this column, so it is the whole of their
     // access — which is why it is set once, here, and never by them.
     supplierId: z.string().uuid().nullable().optional(),
+    driverId: z.string().uuid().nullable().optional(),
   }), req.body);
 
   const email = input.email.toLowerCase();
@@ -707,11 +709,24 @@ mastersRouter.post('/users/invite', requires('admin.rbac.manage'), h(async (req)
    * with no supplier sees nothing and is confusing; an inside role carrying a
    * supplier link would quietly scope a colleague to one vendor. Refuse both. */
   const isSupplierRole = role.rows[0].code === 'SUPPLIER';
+  const isDriverRole = role.rows[0].code === 'DRIVER';
   if (isSupplierRole && !input.supplierId) {
     throw ApiError.badRequest('Choose which supplier this person belongs to.');
   }
   if (!isSupplierRole && input.supplierId) {
     throw ApiError.badRequest('Only the Supplier role can be linked to a supplier.');
+  }
+  if (isDriverRole && !input.driverId) {
+    throw ApiError.badRequest('Choose which driver this login belongs to.');
+  }
+  if (!isDriverRole && input.driverId) {
+    throw ApiError.badRequest('Only the Driver role can be linked to a driver.');
+  }
+  if (input.driverId) {
+    const drv = await pool.query(
+      'SELECT id FROM drivers WHERE id = $1 AND company_id = $2',
+      [input.driverId, req.actor.companyId]);
+    if (!drv.rowCount) throw ApiError.badRequest('That driver does not exist.');
   }
   if (input.supplierId) {
     const sup = await pool.query(
@@ -722,10 +737,11 @@ mastersRouter.post('/users/invite', requires('admin.rbac.manage'), h(async (req)
 
   const userId = await withTx(req.actor, async (tx) => {
     const { rows } = await tx.query(
-      `INSERT INTO users (company_id, full_name, email, status, default_branch_id, supplier_id, created_by)
-       VALUES ($1, $2, $3, 'INVITED', $4, $5, $6) RETURNING id`,
+      `INSERT INTO users (company_id, full_name, email, status, default_branch_id,
+              supplier_id, driver_id, created_by)
+       VALUES ($1, $2, $3, 'INVITED', $4, $5, $6, $7) RETURNING id`,
       [req.actor.companyId, input.fullName, email, req.actor.branchId,
-       input.supplierId ?? null, req.actor.userId]);
+       input.supplierId ?? null, input.driverId ?? null, req.actor.userId]);
     await tx.query(
       `INSERT INTO user_role_assignments (company_id, user_id, role_id, created_by)
        VALUES ($1, $2, $3, $4)`,

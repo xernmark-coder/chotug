@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { api, useAuth } from '../lib/api';
+import { Icon } from './icons';
 
 /* ------------------------------------------------------------- toasts ---- */
 type Toast = { id: number; text: string; kind: 'ok' | 'err' | 'info' };
@@ -296,7 +297,7 @@ export function Layout({ children, title, subtitle, actions, touch }: {
 
   // An outside supplier has no work queue and no alerts, and asking for them
   // just prints 403s in their console on every page.
-  const outside = !!me?.roles.includes('SUPPLIER');
+  const outside = !!me?.roles.includes('SUPPLIER') || !!me?.roles.includes('DRIVER');
 
   useEffect(() => {
     if (outside) return;
@@ -322,18 +323,20 @@ export function Layout({ children, title, subtitle, actions, touch }: {
    * hidden items would leak the shape of our operation for no benefit. */
   const groups: { label: string; items: NavDef[] }[] = outside ? [
     {
-      label: 'Supplier',
+      label: me?.roles.includes('DRIVER') ? 'Driver' : 'Supplier',
       items: [
-        { to: '/', label: 'My orders & invoices', icon: '📄' },
+        me?.roles.includes('DRIVER')
+          ? { to: '/', label: 'My pickups', icon: 'truck' }
+          : { to: '/', label: 'My orders & invoices', icon: 'doc' },
       ],
     },
   ] : [
     {
       label: 'Work',
       items: [
-        { to: '/', label: 'My Work', icon: '🎯', badge: queueCount },
-        { to: '/dashboard', label: 'Dashboard', icon: '📊' },
-        { to: '/alerts', label: 'Alerts', icon: '🔔', badge: alertCount },
+        { to: '/', label: 'Dashboard', icon: 'dashboard' },
+        { to: '/my-work', label: 'My Work', icon: 'target', badge: queueCount },
+        { to: '/alerts', label: 'Alerts', icon: 'bell', badge: alertCount },
       ],
     },
     {
@@ -342,11 +345,11 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         // The whole raise → approve → order → confirm chain in one page, for
         // whoever owns the decision end to end. The separate screens below are
         // unchanged and remain the path when the work is split across people.
-        { to: '/order-flow', label: 'Order in one flow', icon: '⚡', perms: ['purchase.po.create'] },
-        { to: '/buy-list', label: 'What to Buy', icon: '🧮', perms: ['purchase.requirement.create'] },
-        { to: '/requirements', label: 'Requirements', icon: '📝', perms: ['purchase.requirement.create'] },
-        { to: '/purchase-orders', label: 'Purchase Orders', icon: '📦', perms: ['purchase.po.create', 'purchase.po.approve'] },
-        { to: '/approvals', label: 'Approvals', icon: '✅', perms: ['purchase.po.approve', 'purchase.requirement.approve', 'finance.invoice.approve'] },
+        { to: '/order-flow', label: 'Order in one flow', icon: 'bolt', perms: ['purchase.po.create'] },
+        { to: '/buy-list', label: 'What to Buy', icon: 'calculator', perms: ['purchase.requirement.create'] },
+        { to: '/requirements', label: 'Requirements', icon: 'clipboard', perms: ['purchase.requirement.create'] },
+        { to: '/purchase-orders', label: 'Purchase Orders', icon: 'box', perms: ['purchase.po.create', 'purchase.po.approve'] },
+        { to: '/approvals', label: 'Approvals', icon: 'checkDoc', perms: ['purchase.po.approve', 'purchase.requirement.approve', 'finance.invoice.approve'] },
       ],
     },
     {
@@ -354,46 +357,49 @@ export function Layout({ children, title, subtitle, actions, touch }: {
       items: [
         // FARM TODAY first and deliberately: for a field worker this one line
         // is the entire product.
-        { to: '/farm', label: 'Farm Today', icon: '🌤️', perms: ['farming.task.complete'], badge: farmTasks },
-        { to: '/farm/dashboard', label: 'Farm Control', icon: '🏡', perms: ['farming.report.view'] },
-        { to: '/farm/crops', label: 'Crops', icon: '🌾', perms: ['farming.crop.start', 'farming.report.view'] },
-        { to: '/farm/harvest', label: 'Harvest', icon: '🧺', perms: ['farming.harvest.record'] },
-        { to: '/farm/dispatch', label: 'Farm → Warehouse', icon: '🚜', perms: ['farming.dispatch.create', 'farming.dispatch.receive'] },
-        { to: '/farm/expenses', label: 'Farm Expenses', icon: '🧾', perms: ['farming.expense.create', 'farming.cost.view'] },
-        { to: '/farm/planning', label: 'Crop Planning', icon: '🧭', perms: ['farming.report.view'] },
-        { to: '/farm/setup', label: 'Farms & Plots', icon: '📍', perms: ['farming.farm.manage', 'farming.report.view'] },
+        { to: '/farm', label: 'Farm Today', icon: 'sun', perms: ['farming.task.complete'], badge: farmTasks },
+        { to: '/farm/dashboard', label: 'Farm Control', icon: 'home', perms: ['farming.report.view'] },
+        { to: '/farm/crops', label: 'Crops', icon: 'sprout', perms: ['farming.crop.start', 'farming.report.view'] },
+        { to: '/farm/harvest', label: 'Harvest', icon: 'basket', perms: ['farming.harvest.record'] },
+        { to: '/farm/dispatch', label: 'Farm → Warehouse', icon: 'tractor', perms: ['farming.dispatch.create', 'farming.dispatch.receive'] },
+        { to: '/farm/expenses', label: 'Farm Expenses', icon: 'receipt', perms: ['farming.expense.create', 'farming.cost.view'] },
+        { to: '/farm/planning', label: 'Crop Planning', icon: 'compass', perms: ['farming.report.view'] },
+        { to: '/farm/setup', label: 'Farms & Plots', icon: 'pin', perms: ['farming.farm.manage', 'farming.report.view'] },
       ],
     },
     {
       label: 'Receive',
       items: [
-        { to: '/arrivals', label: 'Expected Arrivals', icon: '🚛', perms: ['receiving.gate.create'] },
-        { to: '/gate', label: 'Gate & Receiving', icon: '🛃', perms: ['receiving.gate.create', 'receiving.weighment.create', 'quality.inspection.create', 'receiving.grn.submit'] },
-        { to: '/grns', label: 'Goods Receipts', icon: '📥', perms: ['receiving.grn.create', 'receiving.grn.submit'] },
-        { to: '/putaway', label: 'Put-away', icon: '🏷️', perms: ['receiving.putaway.confirm'] },
-        { to: '/stock', label: 'Stock & Batches', icon: '🧺' },
+        { to: '/arrivals', label: 'Expected Arrivals', icon: 'truckIn', perms: ['receiving.gate.create'] },
+        // The warehouse's own first step: weigh it, count the crates, pass it on.
+        { to: '/intake', label: 'Warehouse Intake', icon: 'scale', perms: ['receiving.weighment.create'] },
+        { to: '/gate', label: 'Gate & Receiving', icon: 'gate', perms: ['receiving.gate.create', 'receiving.weighment.create', 'quality.inspection.create', 'receiving.grn.submit'] },
+        { to: '/grns', label: 'Goods Receipts', icon: 'inbox', perms: ['receiving.grn.create', 'receiving.grn.submit'] },
+        { to: '/putaway', label: 'Put-away', icon: 'shelf', perms: ['receiving.putaway.confirm'] },
+        { to: '/stock', label: 'Stock & Batches', icon: 'crates' },
         // Selling is where stock stops being cost and becomes revenue, so it
         // sits with the money, not with the warehouse shelves.
-        { to: '/packing', label: 'Packing & Labels', icon: '🏷️', perms: ['inventory.stock.issue'] },
-        { to: '/sales', label: 'Sell & Profit', icon: '💰' },
-        { to: '/fleet', label: 'Vehicles & Drivers', icon: '🚚', perms: ['master.vehicle.manage', 'receiving.gate.create'] },
+        { to: '/packing', label: 'Packing & Labels', icon: 'tag', perms: ['inventory.stock.issue'] },
+        { to: '/sales', label: 'Sell & Profit', icon: 'coins' },
+        { to: '/dispatch', label: 'Dispatch', icon: 'route', perms: ['logistics.pickup.manage', 'receiving.gate.create'] },
+        { to: '/fleet', label: 'Vehicles & Drivers', icon: 'truck', perms: ['master.vehicle.manage', 'receiving.gate.create'] },
       ],
     },
     {
       label: 'Money',
       items: [
-        { to: '/invoices', label: 'Invoices & Match', icon: '🧾', perms: ['finance.invoice.create', 'finance.invoice.match'] },
-        { to: '/payments', label: 'Payment Status', icon: '💳', perms: ['finance.payment.view'] },
-        { to: '/suppliers', label: 'Suppliers', icon: '🤝' },
+        { to: '/invoices', label: 'Invoices & Match', icon: 'invoice', perms: ['finance.invoice.create', 'finance.invoice.match'] },
+        { to: '/payments', label: 'Payment Status', icon: 'card', perms: ['finance.payment.view'] },
+        { to: '/suppliers', label: 'Suppliers', icon: 'handshake' },
       ],
     },
     {
       label: 'Insight',
       items: [
-        { to: '/reports', label: 'Reports', icon: '📈', perms: ['reports.purchase.view'] },
-        { to: '/ai', label: 'AI Centre', icon: '✨' },
-        { to: '/people', label: 'People & Access', icon: '👥', perms: ['admin.rbac.manage'] },
-        { to: '/settings', label: 'Settings', icon: '⚙️', perms: ['admin.settings.manage'] },
+        { to: '/reports', label: 'Reports', icon: 'chart', perms: ['reports.purchase.view'] },
+        { to: '/ai', label: 'AI Centre', icon: 'sparkle' },
+        { to: '/people', label: 'People & Access', icon: 'people', perms: ['admin.rbac.manage'] },
+        { to: '/settings', label: 'Settings', icon: 'gear', perms: ['admin.settings.manage'] },
       ],
     },
   ];
@@ -419,7 +425,7 @@ export function Layout({ children, title, subtitle, actions, touch }: {
               {items.map((i) => (
                 <NavLink key={i.to} to={i.to} end={i.to === '/'}
                   className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
-                  <span className="ic">{i.icon}</span>
+                  <span className="ic"><Icon name={i.icon} /></span>
                   <span>{i.label}</span>
                   {i.badge ? (
                     <span className={`nav-badge ${i.label === 'Alerts' ? 'crit' : ''}`}>{i.badge}</span>
@@ -432,11 +438,11 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         <div style={{ flex: 1 }} />
         <div className="sidebar-group" style={{ paddingBottom: 14 }}>
           <div className="nav-item" onClick={() => nav('/profile')}>
-            <span className="ic">👤</span>
+            <span className="ic"><Icon name="user" /></span>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{me?.fullName}</span>
           </div>
           <div className="nav-item" onClick={() => { logout(); nav('/login'); }}>
-            <span className="ic">↩</span><span>Sign out</span>
+            <span className="ic"><Icon name="signOut" /></span><span>Sign out</span>
           </div>
         </div>
       </aside>
@@ -451,7 +457,9 @@ export function Layout({ children, title, subtitle, actions, touch }: {
           </div>
           <div className="spacer" />
           <div className="topbar-actions">
-            {me && me.branches.length > 1 ? (
+            {/* Branch is our internal structure — an outside user has no use for
+                it and no business seeing how many we have. */}
+            {!outside && me && me.branches.length > 1 ? (
               <select className="branch-select" value={branchId ?? ''} onChange={(e) => setBranchId(e.target.value)}>
                 {me.branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
               </select>

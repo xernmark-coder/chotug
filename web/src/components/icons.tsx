@@ -1,0 +1,88 @@
+import React from 'react';
+
+/* ===========================================================================
+   ICONS
+
+   Emoji in a navigation rail are somebody else's design: they change shape
+   between Windows, Android and a Mac, several render in full colour next to
+   monochrome text, and a few (🧾 vs 📝, 🧺 twice) were doing duty for two
+   different things at once.
+
+   These are one stroked set instead — 24×24, 1.6 stroke, currentColor, so the
+   rail inherits its own palette and the active row's white. Each is drawn from
+   the thing it names rather than a generic glyph: put-away is a box going onto
+   a shelf, weighing is a balance, approvals is a document with a tick.
+   ======================================================================== */
+
+const P: Record<string, React.ReactNode> = {
+  /* --- work ------------------------------------------------------------- */
+  target: <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3.4" /><path d="M12 2v2.4M12 19.6V22M2 12h2.4M19.6 12H22" /></>,
+  dashboard: <><rect x="3" y="3" width="7.5" height="8.5" rx="1.4" /><rect x="13.5" y="3" width="7.5" height="5" rx="1.4" /><rect x="13.5" y="11" width="7.5" height="10" rx="1.4" /><rect x="3" y="14.5" width="7.5" height="6.5" rx="1.4" /></>,
+  bell: <><path d="M18 9a6 6 0 1 0-12 0c0 5-2 6.5-2 6.5h16S18 14 18 9Z" /><path d="M10.4 19a2 2 0 0 0 3.2 0" /></>,
+
+  /* --- plan & buy ------------------------------------------------------- */
+  bolt: <path d="M13.2 2 4.5 13.4h6.1L10.2 22l8.7-11.4h-6.1L13.2 2Z" />,
+  calculator: <><rect x="4" y="2.5" width="16" height="19" rx="2.2" /><path d="M8 7h8" /><path d="M8.5 12h.01M12 12h.01M15.5 12h.01M8.5 16.5h.01M12 16.5h.01M15.5 16.5h.01" /></>,
+  clipboard: <><rect x="4.5" y="4" width="15" height="17.5" rx="2" /><path d="M9 4V3a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 3v1" /><path d="M8.5 11h7M8.5 15h4.5" /></>,
+  box: <><path d="M3.5 7.6 12 3l8.5 4.6v8.8L12 21l-8.5-4.6V7.6Z" /><path d="m3.5 7.6 8.5 4.7 8.5-4.7M12 12.3V21" /></>,
+  checkDoc: <><path d="M6 2.5h8.5L19 7v14.5H6z" /><path d="M14 2.5V7h5" /><path d="m9 14 2.2 2.2L15.5 12" /></>,
+
+  /* --- farm ------------------------------------------------------------- */
+  sun: <><circle cx="12" cy="12" r="4.2" /><path d="M12 2v2.6M12 19.4V22M4.2 4.2l1.9 1.9M17.9 17.9l1.9 1.9M2 12h2.6M19.4 12H22M4.2 19.8l1.9-1.9M17.9 6.1l1.9-1.9" /></>,
+  home: <><path d="M3.5 10.5 12 3.5l8.5 7" /><path d="M5.5 9.7V20a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V9.7" /><path d="M9.8 21v-6h4.4v6" /></>,
+  sprout: <><path d="M12 21v-8" /><path d="M12 13C12 9.5 9 7 5.5 7c0 3.5 3 6 6.5 6Z" /><path d="M12 13c0-3 2.6-5.4 5.6-5.4 0 3-2.6 5.4-5.6 5.4Z" /></>,
+  basket: <><path d="M3 9.5h18l-1.6 9.1a2 2 0 0 1-2 1.6H6.6a2 2 0 0 1-2-1.6L3 9.5Z" /><path d="m8 9.5 2.4-6M16 9.5l-2.4-6" /><path d="M9.6 13.4v3M14.4 13.4v3" /></>,
+  tractor: <><circle cx="7" cy="17" r="3.6" /><circle cx="18" cy="18" r="2.6" /><path d="M7 13.4V6.5h4.6l2.2 5.4H18v3.6" /><path d="M3.6 10.5H7" /></>,
+  receipt: <><path d="M5.5 2.5h13v19l-2.2-1.6-2.2 1.6-2.1-1.6-2.2 1.6-2.2-1.6-2.1 1.6v-19Z" /><path d="M9 8h6M9 12h6" /></>,
+  compass: <><circle cx="12" cy="12" r="9" /><path d="m15.2 8.8-1.9 4.4-4.5 1.9 1.9-4.4 4.5-1.9Z" /></>,
+  pin: <><path d="M12 21.5s7-5.6 7-11a7 7 0 1 0-14 0c0 5.4 7 11 7 11Z" /><circle cx="12" cy="10.4" r="2.7" /></>,
+
+  /* --- receive ---------------------------------------------------------- */
+  truckIn: <><path d="M2.5 6.5h10.5v10H2.5z" /><path d="M13 9.5h4l3 3.2v3.8h-7" /><circle cx="6.5" cy="18.5" r="2" /><circle cx="16.5" cy="18.5" r="2" /></>,
+  route: <><circle cx="5.5" cy="5.5" r="2.5" /><circle cx="18.5" cy="18.5" r="2.5" /><path d="M8 5.5h6.5a4 4 0 0 1 0 8h-5a4 4 0 0 0 0 8H16" /></>,
+  scale: <><path d="M12 4.5V21" /><path d="M7 21h10" /><path d="M4.5 7.5h15" /><path d="M7.6 7.7 4.5 14h6.2L7.6 7.7Z" /><path d="M16.4 7.7 13.3 14h6.2l-3.1-6.3Z" /></>,
+  gate: <><path d="M3 21V6.5A2.5 2.5 0 0 1 5.5 4h13A2.5 2.5 0 0 1 21 6.5V21" /><path d="M3 11h18M8 4v17M16 4v17" /></>,
+  inbox: <><path d="M3.5 13.5 6 5.2A2 2 0 0 1 7.9 3.8h8.2A2 2 0 0 1 18 5.2l2.5 8.3" /><path d="M3.5 13.5h4.2l1.2 2.6h6.2l1.2-2.6h4.2v5.2a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5v-5.2Z" /></>,
+  shelf: <><rect x="3.5" y="3.5" width="17" height="7" rx="1.4" /><rect x="3.5" y="13.5" width="17" height="7" rx="1.4" /><path d="M7.5 3.5v7M7.5 13.5v7" /></>,
+  crates: <><rect x="2.5" y="9" width="9" height="11.5" rx="1.3" /><rect x="12.5" y="9" width="9" height="11.5" rx="1.3" /><rect x="7.5" y="2.5" width="9" height="6" rx="1.3" /></>,
+  tag: <><path d="M11 2.5H20a1.5 1.5 0 0 1 1.5 1.5v9L12 22.5 1.5 12 11 2.5Z" /><circle cx="16.8" cy="7.2" r="1.5" /></>,
+  coins: <><ellipse cx="12" cy="6.2" rx="7.5" ry="3.2" /><path d="M4.5 6.2v5.6c0 1.8 3.4 3.2 7.5 3.2s7.5-1.4 7.5-3.2V6.2" /><path d="M4.5 11.8v5.6c0 1.8 3.4 3.2 7.5 3.2s7.5-1.4 7.5-3.2v-5.6" /></>,
+  truck: <><rect x="1.5" y="6.5" width="12" height="9.5" rx="1.4" /><path d="M13.5 10h3.6l3.4 3.6V16h-7" /><circle cx="6" cy="18.5" r="2.1" /><circle cx="17" cy="18.5" r="2.1" /></>,
+
+  /* --- money ------------------------------------------------------------ */
+  invoice: <><path d="M5.5 2.5h13v19l-2.2-1.6-2.2 1.6-2.1-1.6-2.2 1.6-2.2-1.6-2.1 1.6v-19Z" /><path d="M9.5 7.5h5M9.5 11h5M9.5 14.5h3" /></>,
+  card: <><rect x="2.5" y="5" width="19" height="14" rx="2.4" /><path d="M2.5 9.8h19" /><path d="M6.5 14.6h3.5" /></>,
+  handshake: <><path d="m2.5 12 3.6-3.6a2 2 0 0 1 2.8 0L12 11.5l1.6-1.6a2 2 0 0 1 2.8 0L21.5 15" /><path d="m12 11.5-2.6 2.6a1.8 1.8 0 0 0 2.5 2.5l1-1 2.2 2.2a1.7 1.7 0 0 0 2.4-2.4" /><path d="M2.5 12v-2.5M21.5 15v-3" /></>,
+
+  /* --- insight ---------------------------------------------------------- */
+  chart: <><path d="M3.5 20.5h17" /><path d="M6.5 20.5V13M11 20.5V6.5M15.5 20.5v-5M20 20.5V10" /></>,
+  sparkle: <><path d="M12 2.5 13.9 8 19.5 10l-5.6 2L12 17.5 10.1 12 4.5 10 10.1 8 12 2.5Z" /><path d="M18.5 16.5 19.3 18.8 21.5 19.5 19.3 20.3 18.5 22.5 17.7 20.3 15.5 19.5 17.7 18.8 18.5 16.5Z" /></>,
+  people: <><circle cx="9" cy="8" r="3.5" /><path d="M2.8 20.5a6.2 6.2 0 0 1 12.4 0" /><path d="M16.2 5.1a3.5 3.5 0 0 1 0 6.6" /><path d="M17.6 14.9a6.2 6.2 0 0 1 3.6 5.6" /></>,
+  gear: <><circle cx="12" cy="12" r="3.2" /><path d="M19.5 12a7.6 7.6 0 0 0-.12-1.34l2-1.55-2-3.46-2.36.95a7.5 7.5 0 0 0-2.32-1.34L14.4 2.8h-4l-.3 2.46a7.5 7.5 0 0 0-2.32 1.34l-2.36-.95-2 3.46 2 1.55a7.6 7.6 0 0 0 0 2.68l-2 1.55 2 3.46 2.36-.95a7.5 7.5 0 0 0 2.32 1.34l.3 2.46h4l.3-2.46a7.5 7.5 0 0 0 2.32-1.34l2.36.95 2-3.46-2-1.55c.08-.44.12-.89.12-1.34Z" /></>,
+
+  /* --- shell ------------------------------------------------------------ */
+  user: <><circle cx="12" cy="8" r="4" /><path d="M4.5 21a7.5 7.5 0 0 1 15 0" /></>,
+  signOut: <><path d="M14.5 3.5h3.5A1.5 1.5 0 0 1 19.5 5v14a1.5 1.5 0 0 1-1.5 1.5h-3.5" /><path d="M9.5 16 5.5 12l4-4" /><path d="M5.5 12h9" /></>,
+  doc: <><path d="M6 2.5h8.5L19 7v14.5H6z" /><path d="M14 2.5V7h5" /><path d="M9 12h6M9 16h4" /></>,
+};
+
+export type IconName = keyof typeof P;
+
+export function Icon({ name, size = 18, className }: {
+  name: string; size?: number; className?: string;
+}) {
+  const path = P[name];
+  if (!path) return null;
+  return (
+    <svg
+      className={className}
+      width={size} height={size} viewBox="0 0 24 24"
+      fill="none" stroke="currentColor"
+      strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true" focusable="false"
+      style={{ flex: '0 0 auto' }}
+    >
+      {path}
+    </svg>
+  );
+}
