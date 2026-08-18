@@ -5,6 +5,7 @@ import { config, pool, query, withTx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
 import { authenticate, staffOnly, loadActor, requires, signToken, verifyPassword, hashPassword } from '../platform/auth.js';
 import { encryptSecret, inviteEmail, loadSmtp, sendMail, sendTestMail } from '../platform/mailer.js';
+import { emit } from '../platform/services.js';
 
 export const authRouter = Router();
 
@@ -207,19 +208,27 @@ mastersRouter.get('/products', h(async (req) => {
 
 mastersRouter.get('/suppliers', h(async (req) => {
   const sourceType = String(req.query.sourceType ?? '');
+  // Pickers want only the suppliers you may actually order from; the manage
+  // screen passes ?includeBlocked=1 to see the ones that were taken out.
+  const includeBlocked = String(req.query.includeBlocked ?? '') === '1';
   return query(req.actor,
-    `SELECT s.id, s.code, s.legal_name, s.trade_name, s.source_type, s.gstin,
-            s.is_unregistered, s.phone, s.district, s.payment_terms_days,
-            s.status, s.trust_score, s.performance_score,
+    `SELECT s.id, s.code, s.legal_name, s.trade_name, s.source_type, s.gstin, s.pan,
+            s.is_unregistered, s.phone, s.email, s.district, s.state_code, s.payment_terms_days,
+            s.status, s.status_reason, s.trust_score, s.performance_score,
+            s.first_purchase_at, s.last_purchase_at,
             a.commission_pct, a.settlement_cycle_days,
-            m.name AS mandi_name
+            m.name AS mandi_name,
+            (SELECT count(*) FROM purchase_orders o
+              WHERE o.supplier_id = s.id AND o.status NOT IN ('DRAFT','CANCELLED')) AS order_count,
+            (SELECT count(*) FROM users u WHERE u.supplier_id = s.id) AS login_count
        FROM suppliers s
        LEFT JOIN aadhtis a ON a.supplier_id = s.id
        LEFT JOIN mandis   m ON m.id = a.mandi_id
       WHERE s.company_id = $1
         AND ($2 = '' OR s.source_type = $2)
+        AND ($3 OR s.status <> 'BLOCKED')
       ORDER BY (s.status = 'PREFERRED') DESC, s.performance_score DESC NULLS LAST, s.legal_name`,
-    [req.actor.companyId, sourceType]);
+    [req.actor.companyId, sourceType, includeBlocked]);
 }));
 
 mastersRouter.post('/suppliers', requires('master.supplier.manage'), h(async (req) => {
@@ -242,6 +251,88 @@ mastersRouter.post('/suppliers', requires('master.supplier.manage'), h(async (re
     return rows[0];
   });
 }));
+
+/* ---------------------------------------------------------------------------
+ *  Editing and retiring a supplier.
+ *
+ *  Nothing here deletes. Purchase orders, receipts, batches and invoices point
+ *  at a supplier for years, and a farmer who stops selling this season often
+ *  comes back the next one. "Remove" therefore sets status = BLOCKED with a
+ *  reason, which takes the row out of every picker and leaves the history — and
+ *  the trust score it earned — exactly where it was.
+ * ------------------------------------------------------------------------ */
+const supplierFields = z.object({
+  legalName: z.string().trim().min(2, 'Enter the registered name'),
+  tradeName: z.string().trim().optional().or(z.literal('')),
+  sourceType: z.enum(['FARMER', 'MANDI', 'AADHTI', 'WHOLESALER']),
+  gstin: z.string().trim().optional().or(z.literal('')),
+  phone: z.string().trim().optional().or(z.literal('')),
+  email: z.string().trim().email('Enter a valid email').optional().or(z.literal('')),
+  district: z.string().trim().optional().or(z.literal('')),
+  paymentTermsDays: z.number().int().min(0).max(180).default(0),
+  isUnregistered: z.boolean().default(false),
+});
+
+mastersRouter.put('/suppliers/:id', requires('master.supplier.manage'), h(async (req) => {
+  const input = body(supplierFields, req.body);
+  const blank = (v?: string) => (v && v.trim() ? v.trim() : null);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE suppliers
+          SET legal_name=$2, trade_name=$3, source_type=$4, gstin=$5, phone=$6, email=$7,
+              district=$8, payment_terms_days=$9, is_unregistered=$10, updated_by=$11
+        WHERE id=$1 AND company_id=$12
+        RETURNING id, code, legal_name, status`,
+      [req.params.id, input.legalName, blank(input.tradeName), input.sourceType,
+       blank(input.gstin), blank(input.phone), blank(input.email), blank(input.district),
+       input.paymentTermsDays, input.isUnregistered, req.actor.userId, req.actor.companyId]);
+    if (!rows[0]) throw ApiError.notFound('Supplier not found');
+    return rows[0];
+  });
+}));
+
+/** Take a supplier out of the pickers. Their history is untouched. */
+mastersRouter.post('/suppliers/:id/block', requires('master.supplier.block', 'master.supplier.manage'),
+  h(async (req) => {
+    const input = body(z.object({
+      reason: z.string().trim().min(4, 'Say why this supplier is being removed'),
+    }), req.body);
+
+    return withTx(req.actor, async (tx) => {
+      const { rows: open } = await tx.query(
+        `SELECT count(*)::int c FROM purchase_orders
+          WHERE supplier_id=$1 AND status IN ('SUBMITTED','APPROVED','CONFIRMED','PART_RECEIVED')`,
+        [req.params.id]);
+      if (open[0].c > 0) {
+        throw ApiError.rule(
+          `This supplier still has ${open[0].c} order(s) on the way. Close or cancel them first — `
+          + 'blocking them now would leave deliveries nobody can receive.');
+      }
+      const { rows } = await tx.query(
+        `UPDATE suppliers SET status='BLOCKED', status_reason=$2, status_changed_at=now(),
+                status_changed_by=$3, updated_by=$3
+          WHERE id=$1 AND company_id=$4 RETURNING id, code, legal_name, status`,
+        [req.params.id, input.reason, req.actor.userId, req.actor.companyId]);
+      if (!rows[0]) throw ApiError.notFound('Supplier not found');
+      await emit(tx, req.actor, 'supplier', rows[0].id, 'supplier.blocked',
+        { code: rows[0].code, reason: input.reason });
+      return rows[0];
+    });
+  }));
+
+mastersRouter.post('/suppliers/:id/restore', requires('master.supplier.block', 'master.supplier.manage'),
+  h(async (req) =>
+    withTx(req.actor, async (tx) => {
+      const { rows } = await tx.query(
+        `UPDATE suppliers SET status='ACTIVE', status_reason=NULL, status_changed_at=now(),
+                status_changed_by=$2, updated_by=$2
+          WHERE id=$1 AND company_id=$3 AND status='BLOCKED'
+          RETURNING id, code, legal_name, status`,
+        [req.params.id, req.actor.userId, req.actor.companyId]);
+      if (!rows[0]) throw ApiError.notFound('Supplier not found, or not blocked.');
+      return rows[0];
+    })));
 
 mastersRouter.get('/warehouses', h(async (req) =>
   query(req.actor,

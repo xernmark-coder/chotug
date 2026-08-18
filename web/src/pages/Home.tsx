@@ -180,6 +180,24 @@ export function DashboardPage() {
   const trend = data?.trend ?? [];
   const showMoney = can('data.cost.view', 'reports.purchase.view');
 
+  /* Which parts of the business this person actually owns. A quality inspector
+   * has no use for outstanding payables and a gate clerk has none for the
+   * buy list, so each block below is shown to the people whose job it is —
+   * the same permission that guards the page it links to. */
+  const isApprover = can('purchase.po.approve', 'purchase.requirement.approve', 'finance.invoice.approve');
+  const isGate     = can('receiving.gate.create');
+  const isQc       = can('quality.inspection.create', 'quality.inspection.approve');
+  const isStore    = can('receiving.grn.submit', 'receiving.putaway.confirm', 'inventory.stock.issue');
+  const isBuyer    = can('purchase.po.create', 'purchase.requirement.create');
+  const seesReports = can('reports.purchase.view');
+  // The pipeline strip is only meaningful to someone who works somewhere in it.
+  const seesFlow   = isBuyer || isGate || isStore || seesReports;
+  const seesAlerts = can('reports.purchase.view', 'admin.settings.manage',
+                         'quality.inspection.approve', 'farming.report.view');
+  // Everyone gets at least one tile; if none of the above fired, the work
+  // queue is the whole dashboard rather than an empty page.
+  const seesNeedsPerson = isApprover || isGate || isQc || isStore || seesAlerts;
+
   const day = (d: string) => date(d).slice(0, 6);
 
   const spend30 = Number(prev.value_30d ?? 0);
@@ -203,7 +221,10 @@ export function DashboardPage() {
   }));
 
   return (
-    <Layout title="Purchase dashboard" subtitle="Today at a glance">
+    <Layout title={isQc && !isBuyer ? 'Quality dashboard'
+      : isStore && !isBuyer ? 'Warehouse dashboard'
+      : isGate && !isBuyer && !isStore ? 'Gate dashboard'
+      : 'Purchase dashboard'} subtitle="Today at a glance">
       <ErrorBanner error={error} />
 
       <div className="hero">
@@ -229,25 +250,67 @@ export function DashboardPage() {
         ) : null}
       </div>
 
-      <div className="section-head"><h2>Where everything is</h2><span className="rule" /></div>
-      <FlowStrip flow={data?.flow ?? {}} overdue={Number(k.overdue_approvals ?? 0)} nav={nav} />
+      {seesFlow ? (
+        <>
+          <div className="section-head"><h2>Where everything is</h2><span className="rule" /></div>
+          <FlowStrip flow={data?.flow ?? {}} overdue={Number(k.overdue_approvals ?? 0)} nav={nav} />
+        </>
+      ) : null}
 
-      <div className="section-head"><h2>Needs a person</h2><span className="rule" /></div>
-      <div className="grid c4 mb">
-        <Kpi label="Needs approval" value={k.pending_approvals ?? 0}
-          tone={k.overdue_approvals > 0 ? 'crit' : k.pending_approvals > 0 ? 'warn' : undefined}
-          foot={k.overdue_approvals > 0 ? `${k.overdue_approvals} past the agreed time` : 'all within time'}
-          onClick={() => nav('/approvals')} />
-        <Kpi label="Arriving today" value={k.arrivals_today ?? 0}
-          foot="expected vehicles" onClick={() => nav('/arrivals')} />
-        <Kpi label="At the gate" value={gateTotal}
-          tone={(k.awaiting_qc ?? 0) > 0 ? 'warn' : undefined}
-          foot={`${k.awaiting_weighment ?? 0} to weigh · ${k.awaiting_qc ?? 0} QC · ${k.awaiting_grn ?? 0} to post`}
-          onClick={() => nav('/gate')} />
-        <Kpi label="Open alerts" value={k.open_alerts ?? 0}
-          tone={(k.open_alerts ?? 0) > 0 ? 'crit' : 'good'}
-          foot="high or critical" onClick={() => nav('/alerts')} />
-      </div>
+      {seesNeedsPerson ? (
+        <>
+          <div className="section-head"><h2>Needs a person</h2><span className="rule" /></div>
+          <div className="grid c4 mb">
+            {isApprover ? (
+              <Kpi label="Needs approval" value={k.pending_approvals ?? 0}
+                tone={k.overdue_approvals > 0 ? 'crit' : k.pending_approvals > 0 ? 'warn' : undefined}
+                foot={k.overdue_approvals > 0 ? `${k.overdue_approvals} past the agreed time` : 'all within time'}
+                onClick={() => nav('/approvals')} />
+            ) : null}
+            {isGate ? (
+              <Kpi label="Arriving today" value={k.arrivals_today ?? 0}
+                foot="expected vehicles" onClick={() => nav('/arrivals')} />
+            ) : null}
+            {isGate || isQc || isStore ? (
+              <Kpi label="At the gate" value={gateTotal}
+                tone={(k.awaiting_qc ?? 0) > 0 ? 'warn' : undefined}
+                foot={`${k.awaiting_weighment ?? 0} to weigh · ${k.awaiting_qc ?? 0} QC · ${k.awaiting_grn ?? 0} to post`}
+                onClick={() => nav('/gate')} />
+            ) : null}
+            {isStore ? (
+              <Kpi label="Waiting for put-away" value={k.awaiting_putaway ?? 0}
+                tone={(k.awaiting_putaway ?? 0) > 0 ? 'warn' : 'good'}
+                foot="posted, not yet on a shelf" onClick={() => nav('/putaway')} />
+            ) : null}
+            {seesAlerts ? (
+              <Kpi label="Open alerts" value={k.open_alerts ?? 0}
+                tone={(k.open_alerts ?? 0) > 0 ? 'crit' : 'good'}
+                foot="high or critical" onClick={() => nav('/alerts')} />
+            ) : null}
+          </div>
+        </>
+      ) : null}
+
+      {/* The inspector's own numbers. Without this a QC login saw a page about
+          spend and payables and nothing at all about quality. */}
+      {isQc ? (
+        <>
+          <div className="section-head"><h2>Quality, last 30 days</h2><span className="rule" /></div>
+          <div className="grid c4 mb">
+            <Kpi label="Waiting for you" value={k.awaiting_qc ?? 0}
+              tone={(k.awaiting_qc ?? 0) > 0 ? 'warn' : 'good'}
+              foot="vehicles to inspect" onClick={() => nav('/gate')} />
+            <Kpi label="Inspections done" value={q.inspections_30d ?? 0}
+              foot="in the last 30 days" />
+            <Kpi label="Rejection rate" value={`${num(q.rejection_pct_30d, 1)}%`}
+              tone={Number(q.rejection_pct_30d) > 8 ? 'crit'
+                : Number(q.rejection_pct_30d) > 4 ? 'warn' : 'good'}
+              foot="of everything you inspected" />
+            <Kpi label="Average score" value={num(q.avg_quality_score_30d, 0)}
+              foot="across all checklists" />
+          </div>
+        </>
+      ) : null}
 
       {showMoney ? (
         <>
@@ -272,6 +335,10 @@ export function DashboardPage() {
         </>
       ) : null}
 
+      {/* Trend charts, supplier mix and the buy list are a buyer's and an
+          owner's view of the business. A gate clerk or an inspector has no
+          decision to make with them. */}
+      {seesReports || isBuyer ? (<>
       <div className="section-head"><h2>Last 30 days</h2><span className="rule" /></div>
       <div className="grid c2 mb">
         <ChartCard
@@ -368,6 +435,8 @@ export function DashboardPage() {
 
         </div>
       </div>
+      </>) : null}
+
     </Layout>
   );
 }

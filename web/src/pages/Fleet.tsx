@@ -420,6 +420,10 @@ export function DriverModal({ driver, onClose, onSaved }: {
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
+  const { can } = useAuth();
+  // Creating a login is an admin act, so only offer it to somebody who may.
+  const mayInvite = can('admin.rbac.manage');
+  const [saved, setSaved] = useState<any>(null);
   const set = (k: string, v: any) => setF({ ...f, [k]: v });
 
   const save = async () => {
@@ -437,11 +441,26 @@ export function DriverModal({ driver, onClose, onSaved }: {
       const r: any = isNew
         ? await api.post('/masters/drivers', payload)
         : await api.put(`/masters/drivers/${driver.id}`, payload);
+
+      /* A driver who cannot see his own pickups is a phone call waiting to
+       * happen. Offer the login here, while his name and number are still on
+       * screen, rather than sending someone to People & Access to find him
+       * again — which is why almost nobody used to get one. */
+      if (mayInvite && !r.has_login) { setSaved(r); return; }
+
       onSaved(r.restored
         ? `${r.full_name} was removed earlier — back on the list with his old record`
         : isNew ? `${r.full_name} added` : `${r.full_name} updated`, r);
     } catch (e: any) { setError(e); } finally { setBusy(false); }
   };
+
+  if (saved) {
+    return (
+      <DriverLoginStep driver={saved}
+        onSkip={() => onSaved(`${saved.full_name} added`, saved)}
+        onDone={(msg) => onSaved(msg, saved)} />
+    );
+  }
 
   return (
     <Modal title={isNew ? 'Add driver' : `Edit ${driver.full_name}`} onClose={onClose}
@@ -520,6 +539,98 @@ function RetireModal({ title, what, hint, onClose, onConfirm }: {
       <Field label="Reason (optional)" hint={hint}>
         <input value={reason} autoFocus onChange={(e) => setReason(e.target.value)} />
       </Field>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ *  The driver's own login, offered the moment he is added.
+ *
+ *  A pickup is only worth writing down if the person doing it can see it. This
+ *  creates the account, links it to this driver row — which is the whole of
+ *  what the driver portal scopes on — and hands back a link to send him.
+ * ------------------------------------------------------------------------ */
+export function DriverLoginStep({ driver, onSkip, onDone }: {
+  driver: any; onSkip: () => void; onDone: (msg: string) => void;
+}) {
+  const toast = useToast();
+  const { data: roles } = useApi<any[]>('/masters/roles');
+  const [email, setEmail] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+  const [link, setLink] = useState<{ url: string; emailed: boolean } | null>(null);
+
+  const driverRole = (roles ?? []).find((r) => r.code === 'DRIVER');
+
+  const invite = async () => {
+    setBusy(true); setError(null);
+    try {
+      const r = await api.post<any>('/masters/users/invite', {
+        fullName: driver.full_name,
+        email: email.trim().toLowerCase(),
+        roleId: driverRole.id,
+        driverId: driver.id,
+      });
+      setLink({ url: r.inviteUrl, emailed: !!r.emailed });
+    } catch (e) { setError(e); } finally { setBusy(false); }
+  };
+
+  if (link) {
+    return (
+      <Modal title={`${driver.full_name} can now sign in`} onClose={() => onDone(`${driver.full_name} added and invited`)}
+        footer={<button className="btn primary"
+          onClick={() => onDone(`${driver.full_name} added and invited`)}>Done</button>}>
+        <div className="banner ok mb">
+          <span><Icon name="check" size={16} /></span>
+          <div>
+            {link.emailed
+              ? <>The link has been emailed to <b>{email}</b>.</>
+              : <>No mail server is configured, so <b>send him this link yourself</b>.</>}
+            {' '}It works once and expires in 7 days.
+          </div>
+        </div>
+        <Field label="His sign-in link">
+          <div className="prefill">
+            <input readOnly className="mono small" value={link.url}
+              onFocus={(e) => e.currentTarget.select()} />
+            <button className="btn sm" onClick={() => {
+              navigator.clipboard?.writeText(link.url);
+              toast('Link copied — paste it into WhatsApp or SMS', 'ok');
+            }}>Copy</button>
+          </div>
+        </Field>
+        <p className="small muted">
+          Opening it lets him set a password. After that he sees only his own pickups —
+          which order to collect, from whom, and where to deliver it.
+        </p>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title={`Give ${driver.full_name} a login?`} onClose={onSkip}
+      footer={<>
+        <button className="btn" onClick={onSkip}>Not now</button>
+        <button className="btn primary" disabled={busy || !email.includes('@') || !driverRole}
+          onClick={invite}>{busy ? 'Creating…' : 'Create login & get link'}</button>
+      </>}>
+      <ErrorBanner error={error} />
+      <p className="small muted mb">
+        <b>{driver.full_name}</b> is on the list. With a login he can see the pickups assigned to
+        him and mark each one collected and delivered, so the gate knows a vehicle is coming
+        before it arrives.
+      </p>
+      <Field label="His email address"
+        hint="Used only to sign in. You can also just copy the link and send it on WhatsApp.">
+        <input value={email} autoFocus placeholder="driver@example.com"
+          onChange={(e) => setEmail(e.target.value)} />
+      </Field>
+      {!driverRole ? (
+        <div className="banner warn">
+          <span><Icon name="alert" size={16} /></span>
+          <div className="small">The Driver role is missing — run the migrations, then try again.</div>
+        </div>
+      ) : null}
     </Modal>
   );
 }

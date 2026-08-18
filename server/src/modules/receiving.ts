@@ -841,9 +841,45 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
     const createdBatches: any[] = [];
     const putawayTasks: any[] = [];
 
+    /* §17 — a receipt is measured against the order it fulfils.
+     *
+     * Nothing used to check this: the GRN simply added whatever quantity it was
+     * given to po_lines.received_qty. A quality check entered as "100" against
+     * an order for "10 BOX" — easy to do, because neither screen showed the
+     * unit — posted 100 BOX at the PO's own rate, turning a ₹900 order into an
+     * ₹8,100 receipt and leaving the order reading 100 received of 10.
+     *
+     * Over-receipt is a real thing (a supplier sends a spare crate), so it is
+     * allowed — but only inside tolerance, or with someone who may approve a
+     * quantity variance saying so. */
+    const qtyTolPct = Number(await getSetting(tx, req.actor, 'purchase.qty_tolerance_pct', 5));
+    const mayOverReceive = req.actor.permissions.has('receiving.exception.approve')
+      || req.actor.permissions.has('purchase.po.approve')
+      || req.actor.permissions.has('admin.override');
+
     for (const [i, l] of input.lines.entries()) {
       if (l.rejectedQty > 0 && !l.rejectionReasonCode) {
         throw ApiError.rule('Every rejected quantity needs a reason code.');
+      }
+
+      if (l.poLineId) {
+        const { rows: po } = await tx.query(
+          `SELECT pl.qty, pl.received_qty, pl.uom, p.name
+             FROM po_lines pl JOIN products p ON p.id = pl.product_id
+            WHERE pl.id = $1`, [l.poLineId]);
+        const pol = po[0];
+        if (pol) {
+          const open = round(Number(pol.qty) - Number(pol.received_qty), 3);
+          const allowed = round(open * (1 + qtyTolPct / 100), 3);
+          if (l.receivedQty > allowed + 0.001 && !mayOverReceive) {
+            throw ApiError.rule(
+              `The order has ${open} ${pol.uom} of ${pol.name} still to come, and you are `
+              + `receiving ${l.receivedQty}. Check the unit — the order is in ${pol.uom}. `
+              + `A supervisor can accept more than was ordered.`,
+              { orderedUom: pol.uom, openQty: open, receivingQty: l.receivedQty,
+                tolerancePct: qtyTolPct });
+          }
+        }
       }
 
       const { rows: prod } = await tx.query(

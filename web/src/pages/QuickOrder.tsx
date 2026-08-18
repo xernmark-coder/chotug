@@ -111,6 +111,9 @@ export function QuickOrderPage() {
     return s ? (s.trade_name ?? s.legal_name) : 'supplier';
   };
 
+  /** Quantities are decimal; keep the arithmetic off floating-point dust. */
+  const round3 = (n: number) => Math.round(n * 1000) / 1000;
+
   /** Rows for a line, seeded with one row covering the whole quantity. */
   const rowsFor = (l: Pick): Alloc[] =>
     allocs[l.productId] ?? [{ supplierId: '', qty: l.qty, rate: Number(l.lastRate ?? 0) }];
@@ -118,14 +121,44 @@ export function QuickOrderPage() {
   const setRows = (productId: string, rows: Alloc[]) =>
     setAllocs((s) => ({ ...s, [productId]: rows }));
 
+  /**
+   * Editing one slice re-balances the others so the split always adds up to
+   * what was decided to buy. Type 5 against a second supplier and the first
+   * drops from 20 to 15 — rather than quietly ordering 25 because two boxes
+   * on the same screen were each filled in on their own.
+   *
+   * Surplus comes off the largest other slice first, which is the one the
+   * person is most likely to have meant to take it from, and never below zero.
+   */
   const patchRow = (l: Pick, i: number, p: Partial<Alloc>) => {
-    const rows = rowsFor(l).map((r, j) => (j === i ? { ...r, ...p } : r));
+    let rows = rowsFor(l).map((r, j) => (j === i ? { ...r, ...p } : r));
+
+    if (p.qty !== undefined && rows.length > 1) {
+      // The edited slice can never exceed the whole line on its own.
+      const capped = Math.min(Math.max(Number(p.qty) || 0, 0), l.qty);
+      rows = rows.map((r, j) => (j === i ? { ...r, qty: capped } : r));
+
+      let surplus = round3(rows.reduce((a, r) => a + (Number(r.qty) || 0), 0) - l.qty);
+      while (surplus > 0.0005) {
+        const victim = rows
+          .map((r, j) => ({ j, qty: Number(r.qty) || 0 }))
+          .filter((r) => r.j !== i && r.qty > 0)
+          .sort((a, b) => b.qty - a.qty)[0];
+        if (!victim) break;                       // nothing left to take from
+        const take = Math.min(victim.qty, surplus);
+        rows = rows.map((r, j) => (j === victim.j ? { ...r, qty: round3(victim.qty - take) } : r));
+        surplus = round3(surplus - take);
+      }
+    }
+
     setRows(l.productId, rows);
   };
 
   const addRow = (l: Pick) => {
     const rows = rowsFor(l);
-    const left = l.qty - rows.reduce((a, r) => a + (Number(r.qty) || 0), 0);
+    const left = round3(l.qty - rows.reduce((a, r) => a + (Number(r.qty) || 0), 0));
+    // Usually zero, because the first slice already holds the whole line —
+    // so the new row starts empty and takes what you type off the others.
     setRows(l.productId, [...rows, {
       supplierId: '', qty: Math.max(0, left), rate: Number(l.lastRate ?? 0),
     }]);

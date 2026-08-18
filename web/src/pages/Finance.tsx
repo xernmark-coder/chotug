@@ -394,8 +394,11 @@ export function PaymentsPage() {
 /* ===================================================== SUPPLIERS ======== */
 export function SuppliersPage() {
   const toast = useToast();
+  const { can } = useAuth();
+  const [tab, setTab] = useState<'scores' | 'manage'>('scores');
   const { data, loading, error, reload } = useApi<any[]>('/insights/supplier-performance');
   const [busy, setBusy] = useState(false);
+  const mayManage = can('master.supplier.manage');
 
   const recompute = async () => {
     setBusy(true);
@@ -407,10 +410,25 @@ export function SuppliersPage() {
   };
 
   return (
-    <Layout title="Suppliers" subtitle="Scored on delivery, quality and honesty of weight"
-      actions={<button className="btn primary" disabled={busy} onClick={recompute}>
-        {busy ? 'Computing…' : 'Recompute scores'}</button>}>
+    <Layout title="Suppliers" subtitle="Who you buy from, and how well they deliver"
+      actions={tab === 'scores'
+        ? <button className="btn primary" disabled={busy} onClick={recompute}>
+            {busy ? 'Computing…' : 'Recompute scores'}</button>
+        : null}>
       <ErrorBanner error={error} />
+
+      {mayManage ? (
+        <div className="tabs">
+          <button className={`tab ${tab === 'scores' ? 'active' : ''}`} onClick={() => setTab('scores')}>
+            Performance
+          </button>
+          <button className={`tab ${tab === 'manage' ? 'active' : ''}`} onClick={() => setTab('manage')}>
+            Manage suppliers
+          </button>
+        </div>
+      ) : null}
+
+      {tab === 'manage' && mayManage ? <SupplierManager /> : <>
       <div className="banner info mb">
         <span><Icon name="scale" size={16} /></span>
         <div>
@@ -447,10 +465,239 @@ export function SuppliersPage() {
             { key: 'r', head: 'Receipts 90d', num: true, render: (s: any) => s.receipts_90d },
             { key: 'v', head: 'Value 90d', num: true, render: (s: any) => inr(s.value_90d, 0) },
           ]}
-          empty={<Empty icon="🤝" title="No suppliers yet" />}
+          empty={<Empty icon="🤝" title="No suppliers yet"
+            action={mayManage
+              ? <button className="btn primary" onClick={() => setTab('manage')}>Add a supplier</button>
+              : undefined} />}
         />
       </div></div>
+      </>}
     </Layout>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ *  Managing the list itself: add, edit, and take one out.
+ *
+ *  Suppliers used to be created only from People & Access, as a side effect of
+ *  inviting somebody — so the master list could only grow, and a farmer who
+ *  stopped selling stayed in every dropdown forever.
+ * ------------------------------------------------------------------------ */
+const SOURCE_TYPES = [
+  { v: 'FARMER', label: 'Farmer — buying direct from the grower' },
+  { v: 'AADHTI', label: 'Aadhti — commission agent at a mandi' },
+  { v: 'MANDI', label: 'Mandi trader' },
+  { v: 'WHOLESALER', label: 'Wholesaler' },
+];
+
+function SupplierManager() {
+  const toast = useToast();
+  const [showBlocked, setShowBlocked] = useState(false);
+  const { data, loading, error, reload } = useApi<any[]>(
+    `/masters/suppliers?includeBlocked=${showBlocked ? 1 : 0}`, [showBlocked]);
+  const [editing, setEditing] = useState<any>(null);
+  const [blocking, setBlocking] = useState<any>(null);
+
+  return (
+    <>
+      <ErrorBanner error={error} />
+      <div className="search-bar">
+        <label className="row" style={{ gap: 7 }}>
+          <input type="checkbox" style={{ width: 'auto' }} checked={showBlocked}
+            onChange={(e) => setShowBlocked(e.target.checked)} />
+          <span className="small">Show removed suppliers</span>
+        </label>
+        <span className="spacer" />
+        <button className="btn primary" onClick={() => setEditing({})}>Add supplier</button>
+      </div>
+
+      <div className="card"><div className="card-body tight">
+        <DataTable rows={data ?? []} loading={loading}
+          rowTone={(s: any) => (s.status === 'BLOCKED' ? 'crit' : undefined)}
+          cols={[
+            { key: 'n', head: 'Supplier', render: (s: any) => (
+              <div><b>{s.trade_name ?? s.legal_name}</b>
+                <div className="small muted">{s.code}{s.district ? ` · ${s.district}` : ''}</div></div>) },
+            { key: 't', head: 'Type', render: (s: any) => <Chip tone="neutral">{s.source_type}</Chip> },
+            { key: 'c', head: 'Contact', render: (s: any) => (
+              <div className="small">{s.phone ?? '—'}
+                {s.email ? <div className="muted">{s.email}</div> : null}</div>) },
+            { key: 'g', head: 'GSTIN', render: (s: any) => (
+              <span className="mono small">{s.gstin ?? (s.is_unregistered ? 'unregistered' : '—')}</span>) },
+            { key: 'p', head: 'Terms', num: true, render: (s: any) =>
+              s.payment_terms_days ? `${s.payment_terms_days}d` : 'on delivery' },
+            { key: 'o', head: 'Orders', num: true, render: (s: any) => s.order_count ?? 0 },
+            { key: 'l', head: 'Portal login', render: (s: any) =>
+              Number(s.login_count) > 0
+                ? <Chip tone="ok">{s.login_count}</Chip>
+                : <span className="small muted">none</span> },
+            { key: 'st', head: 'Status', render: (s: any) => (
+              <div><Chip value={s.status} />
+                {s.status_reason ? <div className="small muted">{s.status_reason}</div> : null}</div>) },
+            { key: 'a', head: '', width: 150, render: (s: any) => (
+              <div className="btn-row">
+                {s.status === 'BLOCKED' ? (
+                  <button className="btn sm" onClick={async () => {
+                    try {
+                      await api.post(`/masters/suppliers/${s.id}/restore`);
+                      toast('Supplier restored', 'ok'); reload();
+                    } catch (e: any) { toast(e.message, 'err'); }
+                  }}>Restore</button>
+                ) : (
+                  <>
+                    <button className="btn sm" onClick={() => setEditing(s)}>Edit</button>
+                    <button className="btn sm danger" onClick={() => setBlocking(s)}>Remove</button>
+                  </>
+                )}
+              </div>) },
+          ]}
+          empty={<Empty icon="🤝" title="No suppliers on the list"
+            hint="Add the farmers, aadhtis and wholesalers you buy from."
+            action={<button className="btn primary" onClick={() => setEditing({})}>Add supplier</button>} />}
+        />
+      </div></div>
+
+      {editing ? (
+        <SupplierModal supplier={editing} onClose={() => setEditing(null)}
+          onDone={() => { setEditing(null); reload(); }} />
+      ) : null}
+      {blocking ? (
+        <BlockSupplierModal supplier={blocking} onClose={() => setBlocking(null)}
+          onDone={() => { setBlocking(null); reload(); }} />
+      ) : null}
+    </>
+  );
+}
+
+function SupplierModal({ supplier, onClose, onDone }: {
+  supplier: any; onClose: () => void; onDone: () => void;
+}) {
+  const toast = useToast();
+  const isNew = !supplier.id;
+  const [f, setF] = useState({
+    code: supplier.code ?? '',
+    legalName: supplier.legal_name ?? '',
+    tradeName: supplier.trade_name ?? '',
+    sourceType: supplier.source_type ?? 'FARMER',
+    gstin: supplier.gstin ?? '',
+    phone: supplier.phone ?? '',
+    email: supplier.email ?? '',
+    district: supplier.district ?? '',
+    paymentTermsDays: String(supplier.payment_terms_days ?? 0),
+    isUnregistered: supplier.is_unregistered ?? false,
+  });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<any>(null);
+
+  // Most farmers are not GST-registered, which changes how the bill is treated.
+  const needsGstin = !f.isUnregistered && f.sourceType !== 'FARMER';
+
+  const save = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const payload = {
+        legalName: f.legalName, tradeName: f.tradeName || undefined,
+        sourceType: f.sourceType, gstin: f.gstin || undefined,
+        phone: f.phone || undefined, email: f.email || undefined,
+        district: f.district || undefined,
+        paymentTermsDays: Number(f.paymentTermsDays) || 0,
+        isUnregistered: f.isUnregistered,
+      };
+      if (isNew) await api.post('/masters/suppliers', { ...payload, code: f.code });
+      else await api.put(`/masters/suppliers/${supplier.id}`, payload);
+      toast(isNew ? 'Supplier added' : 'Supplier updated', 'ok');
+      onDone();
+    } catch (e) { setErr(e); } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal title={isNew ? 'Add a supplier' : `Edit ${supplier.trade_name ?? supplier.legal_name}`}
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy || !f.legalName || (isNew && !f.code)}
+          onClick={save}>{busy ? 'Saving…' : isNew ? 'Add supplier' : 'Save changes'}</button>
+      </>}>
+      <ErrorBanner error={err} />
+      <div className="grid c2">
+        {isNew ? (
+          <Field label="Short code" hint="Appears on orders. Cannot be changed later.">
+            <input value={f.code} onChange={(e) => setF({ ...f, code: e.target.value.toUpperCase() })}
+              placeholder="SUP-F002" />
+          </Field>
+        ) : (
+          <Field label="Short code"><input readOnly value={supplier.code} /></Field>
+        )}
+        <Field label="Type">
+          <select value={f.sourceType} onChange={(e) => setF({ ...f, sourceType: e.target.value })}>
+            {SOURCE_TYPES.map((t) => <option key={t.v} value={t.v}>{t.label}</option>)}
+          </select>
+        </Field>
+        <Field label="Registered name"><input value={f.legalName}
+          onChange={(e) => setF({ ...f, legalName: e.target.value })} /></Field>
+        <Field label="Trading name" hint="What everyone actually calls them">
+          <input value={f.tradeName} onChange={(e) => setF({ ...f, tradeName: e.target.value })} /></Field>
+        <Field label="Phone"><input value={f.phone}
+          onChange={(e) => setF({ ...f, phone: e.target.value })} placeholder="+9190…" /></Field>
+        <Field label="Email" hint="Needed later if you give them a portal login">
+          <input value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} /></Field>
+        <Field label="District"><input value={f.district}
+          onChange={(e) => setF({ ...f, district: e.target.value })} /></Field>
+        <Field label="Payment terms (days)" hint="0 means paid on delivery">
+          <input type="number" value={f.paymentTermsDays}
+            onChange={(e) => setF({ ...f, paymentTermsDays: e.target.value })} /></Field>
+      </div>
+
+      <label className="row mb" style={{ gap: 8 }}>
+        <input type="checkbox" style={{ width: 'auto' }} checked={f.isUnregistered}
+          onChange={(e) => setF({ ...f, isUnregistered: e.target.checked })} />
+        <span>Not GST-registered <span className="muted small">— usual for a farmer; the bill is treated under reverse charge</span></span>
+      </label>
+
+      {needsGstin ? (
+        <Field label="GSTIN" hint="Checked for format; leave blank if you do not have it yet">
+          <input value={f.gstin} onChange={(e) => setF({ ...f, gstin: e.target.value.toUpperCase() })}
+            placeholder="27AAAAA0000A1Z5" />
+        </Field>
+      ) : null}
+    </Modal>
+  );
+}
+
+function BlockSupplierModal({ supplier, onClose, onDone }: {
+  supplier: any; onClose: () => void; onDone: () => void;
+}) {
+  const toast = useToast();
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<any>(null);
+
+  return (
+    <Modal title={`Remove ${supplier.trade_name ?? supplier.legal_name}?`} onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn danger" disabled={busy || reason.trim().length < 4}
+          onClick={async () => {
+            setBusy(true); setErr(null);
+            try {
+              await api.post(`/masters/suppliers/${supplier.id}/block`, { reason });
+              toast('Supplier removed from the list', 'ok');
+              onDone();
+            } catch (e) { setErr(e); } finally { setBusy(false); }
+          }}>Remove supplier</button>
+      </>}>
+      <ErrorBanner error={err} />
+      <p className="small muted mb">
+        They disappear from every picker, so nobody can raise a new order against them.
+        Their past orders, receipts and score stay exactly as they are — nothing is deleted,
+        and you can put them back at any time.
+      </p>
+      <Field label="Why are they being removed?"
+        hint="Kept on the record, and shown next to their name if they are restored.">
+        <input value={reason} autoFocus onChange={(e) => setReason(e.target.value)}
+          placeholder="Stopped supplying / quality problems / duplicate record" />
+      </Field>
+    </Modal>
   );
 }
 

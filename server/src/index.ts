@@ -12,6 +12,7 @@ import { costingRouter } from './modules/costing.js';
 import { insightsRouter } from './modules/insights.js';
 import { farmingRouter } from './modules/farming.js';
 import { inventoryRouter } from './modules/inventory.js';
+import { devicesRouter } from './modules/devices.js';
 import { publicRouter } from './modules/public.js';
 import { supplierRouter } from './modules/supplier.js';
 import { driverRouter } from './modules/driver.js';
@@ -44,6 +45,7 @@ app.use('/api/costing', costingRouter);
 app.use('/api/insights', insightsRouter);
 app.use('/api/farming', farmingRouter);
 app.use('/api/inventory', inventoryRouter);
+app.use('/api/devices', devicesRouter);
 app.use('/api/supplier', supplierRouter);
 app.use('/api/driver', driverRouter);
 

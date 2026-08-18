@@ -743,6 +743,9 @@ function QcModal({ gate, line, onClose, onDone }: {
 
   const [answers, setAnswers] = useState<Record<string, any>>({});
   const [aiMeta, setAiMeta] = useState<Record<string, boolean>>({});
+  /** The order's own unit — every quantity on this screen is counted in it. */
+  const orderUom: string = line.uom ?? 'KG';
+  const orderedQty = Number(line.qty ?? 0);
   const [received, setReceived] = useState<number>(Number(line.qty ?? 0));
   const [accepted, setAccepted] = useState<number>(Number(line.qty ?? 0));
   const [rejected, setRejected] = useState(0);
@@ -1030,15 +1033,30 @@ function QcModal({ gate, line, onClose, onDone }: {
           <div className="card">
             <div className="card-head"><h3>Decision</h3></div>
             <div className="card-body">
+              {/* Every one of these is a quantity in the ORDER's unit. Without
+                  the unit on the label, "10 BOX" got checked in as "100" and
+                  the receipt came out at ten times the order. */}
               <div className="grid c4">
-                <Field label="Received"><input type="number" value={received}
-                  onChange={(e) => setReceived(Number(e.target.value))} /></Field>
-                <Field label="Rejected"><input type="number" value={rejected}
+                <Field label={`Received (${orderUom})`}
+                  hint={orderedQty ? `Order says ${num(orderedQty, 0)} ${orderUom}` : undefined}>
+                  <input type="number" value={received}
+                    onChange={(e) => setReceived(Number(e.target.value))} /></Field>
+                <Field label={`Rejected (${orderUom})`}><input type="number" value={rejected}
                   onChange={(e) => setRejected(Number(e.target.value))} /></Field>
-                <Field label="On hold"><input type="number" value={hold}
+                <Field label={`On hold (${orderUom})`}><input type="number" value={hold}
                   onChange={(e) => setHold(Number(e.target.value))} /></Field>
-                <Field label="Accepted"><input type="number" readOnly value={accepted} /></Field>
+                <Field label={`Accepted (${orderUom})`}><input type="number" readOnly value={accepted} /></Field>
               </div>
+              {orderedQty > 0 && Math.abs(received - orderedQty) > orderedQty * 0.05 ? (
+                <div className="banner warn">
+                  <span>⚠</span>
+                  <div className="small">
+                    The order is for <b>{num(orderedQty, 0)} {orderUom}</b> but you have entered
+                    {' '}<b>{num(received, 0)}</b>. If you are counting in a different unit, convert
+                    it first — the receipt and the supplier's bill are both settled in {orderUom}.
+                  </div>
+                </div>
+              ) : null}
               <div className="grid c2">
                 <Field label="Grade given">
                   <select value={grade} onChange={(e) => setGrade(e.target.value)}>
@@ -1095,6 +1113,10 @@ function GrnTab({ gate, onDone }: { gate: any; onDone: () => void }) {
         qcInspectionId: ins?.id ?? null,
         productId: l.product_id, name: l.product_name, sku: l.sku,
         uom: l.uom ?? 'KG',
+        // What the order asked for, kept beside what is being received so a
+        // unit mix-up is visible on the row rather than only in the total.
+        orderedQty: Number(l.qty ?? 0),
+        alreadyReceived: Number(l.received_qty ?? 0),
         receivedQty: Number(ins?.received_qty ?? l.qty ?? 0),
         acceptedQty: Number(ins?.accepted_qty ?? l.qty ?? 0),
         rejectedQty: Number(ins?.rejected_qty ?? 0),
@@ -1164,15 +1186,26 @@ function GrnTab({ gate, onDone }: { gate: any; onDone: () => void }) {
           <div className="table-wrap">
             <table className="data">
               <thead><tr>
-                <th>Product</th><th className="num">Received</th><th className="num">Accepted</th>
-                <th className="num">Rejected</th><th className="num">Net kg</th><th className="num">Rate</th>
+                <th>Product</th>
+                <th className="num">Received<div className="small muted">in the order's unit</div></th>
+                <th className="num">Accepted</th>
+                <th className="num">Rejected</th><th className="num">Net kg</th>
+                <th className="num">Rate<div className="small muted">per unit</div></th>
                 <th>Grade</th><th className="num">Crate labels</th><th className="num">Value</th>
               </tr></thead>
               <tbody>
                 {lines.map((l, i) => (
                   <tr key={l.productId}>
                     <td><b>{l.name}</b><div className="small muted">{l.sku}</div></td>
-                    <td className="num mono">{num(l.receivedQty, 0)}</td>
+                    <td className="num mono">
+                      {num(l.receivedQty, 0)} <span className="muted">{l.uom}</span>
+                      {l.orderedQty > 0 ? (
+                        <div className={l.receivedQty > (l.orderedQty - l.alreadyReceived) * 1.05
+                          ? 'chip danger' : 'small muted'}>
+                          order: {num(l.orderedQty - l.alreadyReceived, 0)} {l.uom}
+                        </div>
+                      ) : null}
+                    </td>
                     <td className="num"><input className="inline num" style={{ width: 74 }} type="number"
                       value={l.acceptedQty}
                       onChange={(e) => setLines((s) => s.map((x, j) => j === i ? { ...x, acceptedQty: Number(e.target.value) } : x))} /></td>

@@ -360,7 +360,8 @@ export function Layout({ children, title, subtitle, actions, touch }: {
       items: [
         { to: '/', label: 'Dashboard', icon: 'dashboard' },
         { to: '/my-work', label: 'My Work', icon: 'target', badge: queueCount },
-        { to: '/alerts', label: 'Alerts', icon: 'bell', badge: alertCount },
+        { to: '/alerts', label: 'Alerts', icon: 'bell', badge: alertCount,
+          perms: ['reports.purchase.view', 'admin.settings.manage', 'quality.inspection.approve', 'farming.report.view'] },
       ],
     },
     {
@@ -383,12 +384,12 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         // is the entire product.
         { to: '/farm', label: 'Farm Today', icon: 'sun', perms: ['farming.task.complete'], badge: farmTasks },
         { to: '/farm/dashboard', label: 'Farm Control', icon: 'home', perms: ['farming.report.view'] },
-        { to: '/farm/crops', label: 'Crops', icon: 'sprout', perms: ['farming.crop.start', 'farming.report.view'] },
+        { to: '/farm/crops', label: 'Crops', icon: 'sprout', perms: ['farming.crop.start'] },
         { to: '/farm/harvest', label: 'Harvest', icon: 'basket', perms: ['farming.harvest.record'] },
         { to: '/farm/dispatch', label: 'Farm → Warehouse', icon: 'tractor', perms: ['farming.dispatch.create', 'farming.dispatch.receive'] },
         { to: '/farm/expenses', label: 'Farm Expenses', icon: 'receipt', perms: ['farming.expense.create', 'farming.cost.view'] },
-        { to: '/farm/planning', label: 'Crop Planning', icon: 'compass', perms: ['farming.report.view'] },
-        { to: '/farm/setup', label: 'Farms & Plots', icon: 'pin', perms: ['farming.farm.manage', 'farming.report.view'] },
+        { to: '/farm/planning', label: 'Crop Planning', icon: 'compass', perms: ['farming.crop.start', 'farming.farm.manage'] },
+        { to: '/farm/setup', label: 'Farms & Plots', icon: 'pin', perms: ['farming.farm.manage'] },
       ],
     },
     {
@@ -400,11 +401,13 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         { to: '/gate', label: 'Gate & Receiving', icon: 'gate', perms: ['receiving.gate.create', 'receiving.weighment.create', 'quality.inspection.create', 'receiving.grn.submit'] },
         { to: '/grns', label: 'Goods Receipts', icon: 'inbox', perms: ['receiving.grn.create', 'receiving.grn.submit'] },
         { to: '/putaway', label: 'Put-away', icon: 'shelf', perms: ['receiving.putaway.confirm'] },
-        { to: '/stock', label: 'Stock & Batches', icon: 'crates' },
+        { to: '/stock', label: 'Stock & Batches', icon: 'crates',
+          perms: ['receiving.grn.create', 'receiving.putaway.confirm', 'inventory.stock.issue', 'reports.purchase.view'] },
         // Selling is where stock stops being cost and becomes revenue, so it
         // sits with the money, not with the warehouse shelves.
         { to: '/packing', label: 'Packing & Labels', icon: 'tag', perms: ['inventory.stock.issue'] },
-        { to: '/sales', label: 'Sell & Profit', icon: 'coins' },
+        { to: '/sales', label: 'Sell & Profit', icon: 'coins',
+          perms: ['inventory.stock.issue', 'data.margin.view'] },
         { to: '/dispatch', label: 'Dispatch', icon: 'route', perms: ['logistics.pickup.manage', 'receiving.gate.create'] },
         { to: '/fleet', label: 'Vehicles & Drivers', icon: 'truck', perms: ['master.vehicle.manage', 'receiving.gate.create'] },
       ],
@@ -414,14 +417,16 @@ export function Layout({ children, title, subtitle, actions, touch }: {
       items: [
         { to: '/invoices', label: 'Invoices & Match', icon: 'invoice', perms: ['finance.invoice.create', 'finance.invoice.match'] },
         { to: '/payments', label: 'Payment Status', icon: 'card', perms: ['finance.payment.view'] },
-        { to: '/suppliers', label: 'Suppliers', icon: 'handshake' },
+        { to: '/suppliers', label: 'Suppliers', icon: 'handshake',
+          perms: ['reports.supplier.view', 'master.supplier.manage'] },
       ],
     },
     {
       label: 'Insight',
       items: [
         { to: '/reports', label: 'Reports', icon: 'chart', perms: ['reports.purchase.view'] },
-        { to: '/ai', label: 'AI Centre', icon: 'sparkle' },
+        { to: '/ai', label: 'AI Centre', icon: 'sparkle',
+          perms: ['ai.feature.manage', 'ai.suggestion.accept'] },
         { to: '/people', label: 'People & Access', icon: 'people', perms: ['admin.rbac.manage'] },
         { to: '/settings', label: 'Settings', icon: 'gear', perms: ['admin.settings.manage'] },
       ],
