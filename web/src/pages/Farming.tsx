@@ -24,6 +24,7 @@ import {
   Chip, Col, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal,
   Steps, useApi, useToast,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 import { CHART, compact, Meter, TrendArea } from '../components/charts';
 
 /* ----------------------------------------------------------- primitives -- */
@@ -139,7 +140,7 @@ export function FarmTodayPage() {
       touch
       actions={
         <div className="btn-row">
-          <button className="btn sm" onClick={() => nav('/farm/harvest')}>🧺 Harvest</button>
+          <button className="btn sm" onClick={() => nav('/farm/harvest')}><Icon name="crates" size={15} /> Harvest</button>
           <button className="btn sm" onClick={reload}>Refresh</button>
         </div>
       }
@@ -195,10 +196,10 @@ export function FarmTodayPage() {
             ) : null}
             <div className="acts">
               <button className="btn primary" disabled={busy === t.id} onClick={() => onDone(t)}>
-                ✓ DONE
+                <Icon name="check" size={15} /> DONE
               </button>
               <button className="btn danger" disabled={busy === t.id} onClick={() => setProblemFor(t)}>
-                ⚠ PROBLEM
+                <Icon name="alert" size={15} /> PROBLEM
               </button>
               <button className="btn" disabled={busy === t.id} onClick={() => act(t, 'SKIP')}>
                 SKIP
@@ -206,7 +207,7 @@ export function FarmTodayPage() {
               {t.task_type === 'HARVEST' ? (
                 <button className="btn accent"
                   onClick={() => nav(`/farm/harvest?cycleId=${t.cycle_id}`)}>
-                  🧺 Weigh &amp; grade
+                  <Icon name="crates" size={15} /> Weigh &amp; grade
                 </button>
               ) : null}
               {t.task_type === 'INSPECTION' && t.cycle_id ? (
@@ -427,7 +428,7 @@ export function PlotScanPage() {
             <div className="btn-row">
               <button className="btn primary lg" onClick={() => nav('/farm')}>Open FARM TODAY</button>
               <button className="btn lg" onClick={() => nav(`/farm/harvest?cycleId=${cycle.id}`)}>
-                🧺 Harvest
+                <Icon name="crates" size={15} /> Harvest
               </button>
               <button className="btn lg" onClick={() => nav(`/farm/crops/${cycle.id}`)}>
                 Report a problem
@@ -573,7 +574,7 @@ export function CropStartPage() {
                   </dl>
                   {preview.usedHistory ? (
                     <div className="banner info mt">
-                      <span>📈</span>
+                      <span><Icon name="chart" size={16} /></span>
                       <div className="small">
                         The yield estimate is blended with what this crop actually
                         gave you last time, not just the book figure.
@@ -591,7 +592,7 @@ export function CropStartPage() {
               <div className="card-body">
                 <dl className="kv">
                   <dt>💧 Irrigation</dt><dd>{preview.taskSummary.irrigation}</dd>
-                  <dt>🧪 Fertiliser</dt><dd>{preview.taskSummary.fertilizer}</dd>
+                  <dt><Icon name="scale" size={15} /> Fertiliser</dt><dd>{preview.taskSummary.fertilizer}</dd>
                   <dt>🌫️ Spray checks</dt><dd>{preview.taskSummary.spray}</dd>
                   <dt>🔍 Inspections</dt><dd>{preview.taskSummary.inspection}</dd>
                 </dl>
@@ -690,7 +691,7 @@ export function CropDetailPage() {
           <button className="btn sm" onClick={() => setChecking(true)}>🔍 Crop check</button>
           <button className="btn sm" onClick={() => setExpensing(true)}>₹ Expense</button>
           <button className="btn sm accent" onClick={() => nav(`/farm/harvest?cycleId=${c.id}`)}>
-            🧺 Harvest
+            <Icon name="crates" size={15} /> Harvest
           </button>
           {can('farming.crop.close') && !['CLOSED', 'FAILED'].includes(c.status) ? (
             <button className="btn sm primary" onClick={() => setClosing(true)}>Close crop</button>
@@ -1107,7 +1108,7 @@ export function HarvestPage() {
           </div>
         </div>
         <div className="btn-row">
-          <button className="btn primary lg" onClick={() => window.print()}>🖨 Print label</button>
+          <button className="btn primary lg" onClick={() => window.print()}><Icon name="inbox" size={15} /> Print label</button>
           <button className="btn lg accent" onClick={() => nav('/farm/dispatch')}>
             Send to warehouse →
           </button>
@@ -1217,7 +1218,7 @@ export function HarvestPage() {
           </button>
           {!gradesMatch ? (
             <div className="banner danger">
-              <span>⚠</span>
+              <span><Icon name="alert" size={16} /></span>
               <div>The grades add up to {num(gradedTotal, 1)} kg but the net weight is
                 {' '}{num(net, 1)} kg. They must match.</div>
             </div>
@@ -1443,7 +1444,7 @@ function ReceiveModal({ dispatch, onClose, onDone }: {
 
       <div className={`banner ${Math.abs(variancePct) > 3 ? 'danger'
         : Math.abs(variancePct) > 1 ? 'warn' : 'ok'} mt`}>
-        <span>⚖</span>
+        <span><Icon name="scale" size={16} /></span>
         <div>
           <b>Farm dispatch {num(sent, 1)} kg · Warehouse received {num(received, 1)} kg
             {' '}· Variance {num(varianceKg, 1)} kg ({num(variancePct, 2)}%)</b>

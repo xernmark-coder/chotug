@@ -757,3 +757,22 @@ label.check input { width: auto; }
   .flow-step { transition: none; }
   .flow-step.crit { animation: none; }
 }
+
+/* --- empty & loading ---------------------------------------------------- */
+.empty-ic {
+  width: 46px; height: 46px; margin: 0 auto 10px;
+  display: grid; place-items: center;
+  border-radius: 50%; background: var(--surface-2);
+  border: 1px solid var(--border); color: var(--muted-2);
+}
+.spinner {
+  width: 26px; height: 26px; margin: 0 auto;
+  border: 2.5px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 2.4s; }
+}

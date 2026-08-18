@@ -200,7 +200,7 @@ export function Modal({ title, onClose, children, footer, wide }: {
       <div className={`modal ${wide ? 'wide' : ''}`}>
         <div className="modal-head">
           <h2 style={{ flex: 1 }}>{title}</h2>
-          <button className="btn ghost sm" onClick={onClose}>✕</button>
+          <button className="btn ghost sm" onClick={onClose}><Icon name="alert" size={15} /></button>
         </div>
         <div className="modal-body">{children}</div>
         {footer ? <div className="modal-foot">{footer}</div> : null}
@@ -210,12 +210,31 @@ export function Modal({ title, onClose, children, footer, wide }: {
 }
 
 /* ------------------------------------------------------------- states ---- */
+/**
+ * Empty and loading states.
+ *
+ * Call sites still pass an emoji as `icon` — forty of them — and rather than
+ * touch every one, that string is mapped onto the stroked set. An emoji with
+ * no mapping falls back to the neutral glyph instead of rendering somebody
+ * else's artwork at three times the weight of the text beside it.
+ */
+const EMPTY_ICON: Record<string, string> = {
+  '✅': 'checkDoc', '👍': 'checkDoc', '🤝': 'handshake', '📦': 'box',
+  '🏷️': 'tag', '🏷': 'tag', '🧾': 'receipt', '🚜': 'tractor', '🚛': 'truckIn',
+  '🚚': 'truck', '📈': 'chart', '🌾': 'sprout', '🌱': 'sprout', '🧪': 'scale',
+  '₹': 'coins', '🛃': 'gate', '🔕': 'bell', '🔒': 'gear', '📥': 'inbox',
+  '📤': 'inbox', '📝': 'clipboard', '📄': 'doc', '📊': 'dashboard',
+  '🧺': 'crates', '📦️': 'box', '📅': 'clipboard', '🗓': 'clipboard',
+  '💰': 'coins', '🧮': 'calculator', '⏳': 'target', '📭': 'inbox',
+  '🌤️': 'sun', '🏡': 'home', '🧭': 'compass', '📍': 'pin', '👥': 'people',
+};
+
 export function Empty({ icon = '📭', title, hint, action }: {
   icon?: string; title: string; hint?: string; action?: React.ReactNode;
 }) {
   return (
     <div className="empty">
-      <div className="big">{icon}</div>
+      <div className="empty-ic"><Icon name={EMPTY_ICON[icon] ?? 'inbox'} size={26} /></div>
       <div style={{ fontWeight: 600, color: 'var(--text-2)' }}>{title}</div>
       {hint ? <div className="small mt">{hint}</div> : null}
       {action ? <div className="mt">{action}</div> : null}
@@ -224,7 +243,12 @@ export function Empty({ icon = '📭', title, hint, action }: {
 }
 
 export function Loading({ label = 'Loading…' }: { label?: string }) {
-  return <div className="empty"><div className="big">⏳</div>{label}</div>;
+  return (
+    <div className="empty">
+      <div className="spinner" role="status" aria-label={label} />
+      <div className="mt">{label}</div>
+    </div>
+  );
 }
 
 export function ErrorBanner({ error }: { error: any }) {
@@ -233,7 +257,7 @@ export function ErrorBanner({ error }: { error: any }) {
     ? Object.values(error.detail).join(' · ') : null;
   return (
     <div className="banner danger mb">
-      <span>⚠</span>
+      <span><Icon name="alert" size={16} /></span>
       <div><b>{error.message ?? String(error)}</b>{detail ? <div className="small">{detail}</div> : null}</div>
     </div>
   );
@@ -414,7 +438,7 @@ export function Layout({ children, title, subtitle, actions, touch }: {
             <b>ChotuG</b>
             <span>Purchase &amp; Receiving</span>
           </div>
-          <button className="nav-close" onClick={() => setNavOpen(false)} aria-label="Close menu">✕</button>
+          <button className="nav-close" onClick={() => setNavOpen(false)} aria-label="Close menu"><Icon name="alert" size={15} /></button>
         </div>
         {groups.map((g) => {
           const items = g.items.filter((i) => !i.perms || can(...i.perms));

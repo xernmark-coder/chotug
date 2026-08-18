@@ -3,6 +3,7 @@ import { api, useAuth, inr, num, date } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 import { Barcode } from '../components/barcode';
 
 /* ===========================================================================
@@ -116,11 +117,11 @@ export function PackingPage() {
                   <button className="btn sm primary" onClick={() => setSelling(chosen)}>
                     Sell {chosen.length} pack(s)
                   </button>
-                  <button className="btn sm" onClick={() => setPrinting(chosen)}>🖨 Labels</button>
+                  <button className="btn sm" onClick={() => setPrinting(chosen)}><Icon name="inbox" size={15} /> Labels</button>
                 </>
               ) : inStock.length ? (
                 <button className="btn sm" onClick={() => setPrinting(inStock)}>
-                  🖨 Print all labels
+                  <Icon name="inbox" size={15} /> Print all labels
                 </button>
               ) : null}
             </div>
@@ -320,7 +321,7 @@ function PackModal({ batch, onClose, onDone }: {
                   <td>
                     {groups.length > 1 ? (
                       <button className="btn sm ghost"
-                        onClick={() => setGroups((s) => s.filter((_, j) => j !== i))}>✕</button>
+                        onClick={() => setGroups((s) => s.filter((_, j) => j !== i))}><Icon name="alert" size={15} /></button>
                     ) : null}
                   </td>
                 </tr>
@@ -394,7 +395,7 @@ function LabelSheet({ packs, onClose }: { packs: any[]; onClose: () => void }) {
       footer={
         <>
           <button className="btn" onClick={onClose}>Close</button>
-          <button className="btn primary" onClick={print}>🖨 Print</button>
+          <button className="btn primary" onClick={print}><Icon name="inbox" size={15} /> Print</button>
         </>
       }
     >

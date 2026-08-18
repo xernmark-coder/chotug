@@ -3,6 +3,7 @@ import { api, useAuth, inr, num, date } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 
 /* ===========================================================================
  * THE SUPPLIER'S OWN SCREEN
@@ -97,7 +98,7 @@ export function SupplierPortalPage() {
       {tab === 'bill' ? (
         <>
           <div className="banner info mb">
-            <span>💡</span>
+            <span><Icon name="info" size={16} /></span>
             <div>
               Bill against what was <b>accepted</b>, not what was ordered. The quantities below
               are what the warehouse booked in; you set the rate.

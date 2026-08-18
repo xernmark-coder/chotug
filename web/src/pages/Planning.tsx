@@ -6,6 +6,7 @@ import {
   AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, ReasonPicker,
   useApi, useReasonBank, useToast,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 import { CHART } from '../components/charts';
 
 /* ===========================================================================
@@ -169,7 +170,7 @@ export function BuyListPage() {
     >
       <ErrorBanner error={error} />
       <div className="banner info mb">
-        <span>💡</span>
+        <span><Icon name="info" size={16} /></span>
         <div>
           These quantities come from your own stock, the last 28 days of sales, open purchase
           orders, lead time and expected wastage. Change any number you disagree with — the system
@@ -258,7 +259,7 @@ function InsightModal({ item, onClose }: { item: any; onClose: () => void }) {
               </div>
               {data.suggestion.narrative ? <p className="small">{data.suggestion.narrative}</p> : null}
               {data.suggestion.risk ? (
-                <div className="banner warn small"><span>⚠</span><div>{data.suggestion.risk}</div></div>
+                <div className="banner warn small"><span><Icon name="alert" size={16} /></span><div>{data.suggestion.risk}</div></div>
               ) : null}
               <ul className="reasons">
                 {data.suggestion.reasons.map((r: any) => (
@@ -311,7 +312,7 @@ function InsightModal({ item, onClose }: { item: any; onClose: () => void }) {
                   </LineChart>
                 </ResponsiveContainer>
                 {data.price.recommendation ? (
-                  <div className="banner info small mt"><span>💡</span><div>{data.price.recommendation}</div></div>
+                  <div className="banner info small mt"><span><Icon name="info" size={16} /></span><div>{data.price.recommendation}</div></div>
                 ) : null}
               </div>
             </div>
@@ -424,7 +425,7 @@ export function RequirementDetailPage() {
 
       {data.lines?.some((l: any) => l.duplicate_warning) ? (
         <div className="banner warn mt">
-          <span>⚠</span>
+          <span><Icon name="alert" size={16} /></span>
           <div>Some of these products already have an open requirement. Check before ordering twice.</div>
         </div>
       ) : null}

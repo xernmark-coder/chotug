@@ -5,6 +5,7 @@ import {
   Chip, Empty, ErrorBanner, Field, Layout, Loading, ReasonPicker, Steps,
   useApi, useReasonBank, useToast,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 import { CompareModal } from './Purchase';
 
 /* ===========================================================================
@@ -298,7 +299,7 @@ export function QuickOrderPage() {
     return (
       <Layout title="Guided order">
         <div className="banner warn">
-          <span>🔒</span>
+          <span><Icon name="lock" size={16} /></span>
           <div>This flow places orders end to end, so it needs both the raising and
             the ordering permission. Ask your owner.</div>
         </div>
@@ -318,7 +319,7 @@ export function QuickOrderPage() {
       {step === 0 ? (
         <>
           <div className="banner info mb">
-            <span>💡</span>
+            <span><Icon name="info" size={16} /></span>
             <div>
               Quantities are calculated from your stock, the last 28 days of sales, open
               orders and lead time. Change anything you disagree with — you will be asked why.
@@ -524,7 +525,7 @@ export function QuickOrderPage() {
       {step === 2 ? (
         <>
           <div className="banner info mb">
-            <span>💡</span>
+            <span><Icon name="info" size={16} /></span>
             <div>
               You can split a product across more than one source — 30 kg from the mandi
               and 20 from a farmer. Each supplier gets its own purchase order, all of them
@@ -607,11 +608,11 @@ export function QuickOrderPage() {
                                 <div className="btn-row">
                                   {canCompare ? (
                                     <button className="btn sm ghost" title="Compare sources"
-                                      onClick={() => setCompareFor({ line: l, index: i })}>⚖</button>
+                                      onClick={() => setCompareFor({ line: l, index: i })}><Icon name="scale" size={15} /></button>
                                   ) : null}
                                   {rows.length > 1 ? (
                                     <button className="btn sm ghost" title="Remove this source"
-                                      onClick={() => removeRow(l, i)}>✕</button>
+                                      onClick={() => removeRow(l, i)}><Icon name="alert" size={15} /></button>
                                   ) : null}
                                 </div>
                               </td>
@@ -678,7 +679,7 @@ export function QuickOrderPage() {
 
           {overLimit ? (
             <div className="banner warn mb">
-              <span>⚠</span>
+              <span><Icon name="alert" size={16} /></span>
               <div>
                 At least one of these orders is above your own PO limit of
                 {' '}{inr(me?.limits.maxPoValue, 0)}. It will go for approval instead of

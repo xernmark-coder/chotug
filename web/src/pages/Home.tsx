@@ -143,7 +143,7 @@ export function WorkQueuePage() {
       <ErrorBanner error={error} />
       {breached > 0 ? (
         <div className="banner danger mb">
-          <span>⏰</span>
+          <span><Icon name="clock" size={16} /></span>
           <div><b>{breached} task{breached === 1 ? ' is' : 's are'} past the agreed time.</b> They are at the top of the list.</div>
         </div>
       ) : null}

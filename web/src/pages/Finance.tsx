@@ -4,6 +4,7 @@ import { api, useAuth, inr, num, date, dateTime, ago, today, addDays } from '../
 import {
   AiBox, Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 import { EmailSettingsCard } from './People';
 
 /* ====================================================== INVOICES ======== */
@@ -154,7 +155,7 @@ export function InvoiceCreatePage() {
                       }} /></td>
                     <td className="num"><input className="inline num" style={{ width: 96 }} type="number" value={l.amount || ''}
                       onChange={(e) => setLines((s) => s.map((x, j) => j === i ? { ...x, amount: Number(e.target.value) } : x))} /></td>
-                    <td><button className="btn sm ghost" onClick={() => setLines((s) => s.filter((_, j) => j !== i))}>✕</button></td>
+                    <td><button className="btn sm ghost" onClick={() => setLines((s) => s.filter((_, j) => j !== i))}><Icon name="alert" size={15} /></button></td>
                   </tr>
                 ))}
               </tbody>
@@ -218,11 +219,11 @@ export function InvoiceDetailPage() {
       }>
       <ErrorBanner error={error} />
       {data.duplicate_of_id ? (
-        <div className="banner danger mb"><span>⚠</span>
+        <div className="banner danger mb"><span><Icon name="alert" size={16} /></span>
           <div><b>This looks like a duplicate invoice.</b> Verify with the supplier before paying.</div></div>
       ) : null}
       {data.ocr_arithmetic_ok === false ? (
-        <div className="banner warn mb"><span>🧮</span>
+        <div className="banner warn mb"><span><Icon name="calculator" size={16} /></span>
           <div>The line amounts on this invoice do not add up to the stated subtotal.</div></div>
       ) : null}
 
@@ -279,7 +280,7 @@ export function InvoiceDetailPage() {
                       { key: 'a', head: 'On invoice', num: true, render: (f: any) => f.actual },
                     ]}
                   />
-                ) : <div className="banner ok"><span>✓</span><div>Everything matched within tolerance.</div></div>}
+                ) : <div className="banner ok"><span><Icon name="check" size={16} /></span><div>Everything matched within tolerance.</div></div>}
               </div>
             </div>
           ) : null}
@@ -411,7 +412,7 @@ export function SuppliersPage() {
         {busy ? 'Computing…' : 'Recompute scores'}</button>}>
       <ErrorBanner error={error} />
       <div className="banner info mb">
-        <span>📐</span>
+        <span><Icon name="scale" size={16} /></span>
         <div>
           Performance blends on-time delivery, fill rate, rejection rate and quality score.
           Trust weighs weight variance and document compliance most heavily. A supplier with very

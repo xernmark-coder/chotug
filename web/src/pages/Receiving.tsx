@@ -4,6 +4,7 @@ import { api, useAuth, inr, num, date, dateTime, ago, idempotencyKey, today } fr
 import {
   AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, Steps, useApi, useToast,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 import { DriverModal, VehicleModal } from './Fleet';
 
 /* ================================================= EXPECTED ARRIVALS ===== */
@@ -218,7 +219,7 @@ export function GateEntryPage() {
               {isUnplanned ? (
                 <>
                   <div className="banner warn mb">
-                    <span>⚠</span>
+                    <span><Icon name="alert" size={16} /></span>
                     <div>
                       An arrival without a purchase order is an exception. It needs a reason and a
                       supervisor's approval, and it is flagged in the audit trail.
@@ -244,7 +245,7 @@ export function GateEntryPage() {
                   </div>
                   {!can('receiving.exception.approve') ? (
                     <div className="banner danger">
-                      <span>🔒</span>
+                      <span><Icon name="lock" size={16} /></span>
                       <div>You cannot approve an unplanned arrival. Call a manager to the gate —
                         what you type here is kept.</div>
                     </div>
@@ -288,7 +289,7 @@ export function GateEntryPage() {
               {/* Unknown registration and the rights to fix that — offer it. */}
               {form.vehicleRegCaptured && !form.vehicleId && can('master.vehicle.manage') ? (
                 <div className="banner info mb">
-                  <span>➕</span>
+                  <span><Icon name="plus" size={16} /></span>
                   <div style={{ flex: 1 }}>
                     <b>{form.vehicleRegCaptured} is not on our list.</b>{' '}
                     You can receive it as it is. Add it and its fitness, insurance and
@@ -303,7 +304,7 @@ export function GateEntryPage() {
 
               {vehicle?.compliance_expired ? (
                 <div className="banner warn mb">
-                  <span>⚠</span>
+                  <span><Icon name="alert" size={16} /></span>
                   <div>
                     <b>This vehicle has expired documents.</b>{' '}
                     {vehicle.fitness_expiry < today() ? 'Fitness. ' : ''}
@@ -331,7 +332,7 @@ export function GateEntryPage() {
 
               {form.driverName && !form.driverId && can('master.vehicle.manage') ? (
                 <div className="banner info">
-                  <span>➕</span>
+                  <span><Icon name="plus" size={16} /></span>
                   <div style={{ flex: 1 }}>
                     <b>{form.driverName} is not on our list.</b>{' '}
                     Add him once and the gate can pick the name next time.
@@ -481,13 +482,13 @@ export function GateDetailPage() {
 
       {data.critical_fail ? (
         <div className="banner danger mb">
-          <span>🛑</span>
+          <span><Icon name="alert" size={16} /></span>
           <div><b>Hygiene check failed on a critical item.</b> Do not unload until the QC head clears it.</div>
         </div>
       ) : null}
       {!data.locked_at ? (
         <div className="banner warn mb">
-          <span>🔓</span>
+          <span><Icon name="unlock" size={16} /></span>
           <div>This entry is not locked yet. Weighment cannot start until you submit and lock it.</div>
         </div>
       ) : null}
@@ -923,7 +924,7 @@ function QcModal({ gate, line, onClose, onDone }: {
                       </td>
                       <td>
                         <button className="btn sm ghost"
-                          onClick={() => setGroups((s2) => s2.filter((_, j) => j !== i))}>✕</button>
+                          onClick={() => setGroups((s2) => s2.filter((_, j) => j !== i))}><Icon name="alert" size={15} /></button>
                       </td>
                     </tr>
                   );
@@ -933,7 +934,7 @@ function QcModal({ gate, line, onClose, onDone }: {
           </div>
           {!groupsBalance ? (
             <div className="banner danger" style={{ margin: 12 }}>
-              <span>⚠</span>
+              <span><Icon name="alert" size={16} /></span>
               <div>
                 <b>The groups do not add up to the totals above.</b>
                 <div className="small">
@@ -964,7 +965,7 @@ function QcModal({ gate, line, onClose, onDone }: {
       {loading ? <Loading /> : !plan ? <Empty title="No QC template for this product" /> : (
         <div className="stack">
           <div className="banner info">
-            <span>🔬</span>
+            <span><Icon name="scale" size={16} /></span>
             <div>{plan.samplingNote}</div>
           </div>
 
@@ -1020,7 +1021,7 @@ function QcModal({ gate, line, onClose, onDone }: {
 
           {criticalFailed.length ? (
             <div className="banner danger">
-              <span>🛑</span>
+              <span><Icon name="alert" size={16} /></span>
               <div><b>A critical parameter failed.</b> Accepting any quantity needs a written reason
                 and goes to the QC head for approval.</div>
             </div>
@@ -1152,7 +1153,7 @@ function GrnTab({ gate, onDone }: { gate: any; onDone: () => void }) {
     <div className="stack">
       {!ready ? (
         <div className="banner warn">
-          <span>⚠</span>
+          <span><Icon name="alert" size={16} /></span>
           <div>Quality check is not complete for this vehicle. Posting now needs an authorised exception.</div>
         </div>
       ) : null}
@@ -1215,7 +1216,7 @@ function GrnTab({ gate, onDone }: { gate: any; onDone: () => void }) {
                 {busy ? 'Posting…' : 'Post receipt to stock'}
               </button>
             ) : (
-              <div className="banner warn"><span>🔒</span><div>Your role cannot post stock.</div></div>
+              <div className="banner warn"><span><Icon name="lock" size={16} /></span><div>Your role cannot post stock.</div></div>
             )}
           </div>
           <p className="small muted mt">

@@ -4,6 +4,7 @@ import { api, useAuth, inr, num, date, ago } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 
 /* NOTE ON FIELD NAMES
  * /receiving/pipeline reads from v_receiving_pipeline, whose key is
@@ -84,9 +85,13 @@ export function WarehouseIntakePage() {
               ) },
               { key: 'r', head: 'Readings', render: (g: any) => (
                 <div className="small">
-                  <Chip tone={g.has_gross ? 'ok' : 'neutral'}>{g.has_gross ? '✓ gross' : 'no gross'}</Chip>
+                  <Chip tone={g.has_gross ? 'ok' : 'neutral'}>
+                    {g.has_gross ? <Icon name="check" size={12} /> : null} gross
+                  </Chip>
                   {' '}
-                  <Chip tone={g.has_tare ? 'ok' : 'neutral'}>{g.has_tare ? '✓ tare' : 'no tare'}</Chip>
+                  <Chip tone={g.has_tare ? 'ok' : 'neutral'}>
+                    {g.has_tare ? <Icon name="check" size={12} /> : null} tare
+                  </Chip>
                 </div>
               ) },
               { key: 's', head: 'Stage', render: (g: any) => {
@@ -280,7 +285,7 @@ function WeighInModal({ gate, onClose, onDone }: {
 
       {kind === 'GROSS' && weight ? (
         <div className="banner info">
-          <span>⚖</span>
+          <span><Icon name="scale" size={16} /></span>
           <div>
             {/* Deliberately NOT called "goods". The final net also has the
                 vehicle's own weight taken off it, which comes from the TARE

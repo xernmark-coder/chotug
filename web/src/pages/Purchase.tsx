@@ -4,6 +4,7 @@ import { api, useAuth, inr, num, date, dateTime, addDays, ago, pctText } from '.
 import {
   AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, Steps, useApi, useToast,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 
 /* ========================================================= PO LIST ======= */
 export function PoListPage() {
@@ -252,13 +253,13 @@ export function PoCreatePage() {
                                 <button className="btn sm ghost" title="Compare sources"
                                   onClick={() => setCompareFor(l)}>⚖️</button>
                                 <button className="btn sm ghost"
-                                  onClick={() => setLines((s) => s.filter((_, j) => j !== i))}>✕</button>
+                                  onClick={() => setLines((s) => s.filter((_, j) => j !== i))}><Icon name="alert" size={15} /></button>
                               </div>
                             </td>
                           </tr>
                           {rateWarnings[l.productId] ? (
                             <tr><td colSpan={6} style={{ paddingTop: 0 }}>
-                              <div className="banner warn small"><span>⚠</span><div>{rateWarnings[l.productId]}</div></div>
+                              <div className="banner warn small"><span><Icon name="alert" size={16} /></span><div>{rateWarnings[l.productId]}</div></div>
                             </td></tr>
                           ) : null}
                         </React.Fragment>
@@ -296,7 +297,7 @@ export function PoCreatePage() {
                   <input style={{ flex: 1 }} type="number" placeholder="Amount" value={c.amount || ''}
                     onChange={(e) => setCharges((s) => s.map((x, j) => j === i ? { ...x, amount: Number(e.target.value) } : x))} />
                   <span className="small muted" style={{ width: 90 }}>by {c.allocationBasis.toLowerCase()}</span>
-                  <button className="btn sm ghost" onClick={() => setCharges((s) => s.filter((_, j) => j !== i))}>✕</button>
+                  <button className="btn sm ghost" onClick={() => setCharges((s) => s.filter((_, j) => j !== i))}><Icon name="alert" size={15} /></button>
                 </div>
               ))}
             </div>
@@ -316,7 +317,7 @@ export function PoCreatePage() {
               </dl>
               {overLimit ? (
                 <div className="banner warn mt small">
-                  <span>⚠</span>
+                  <span><Icon name="alert" size={16} /></span>
                   <div>This is above your approval limit of {inr(me?.limits.maxPoValue, 0)}. It will go to
                     a higher approver after you submit.</div>
                 </div>
@@ -539,7 +540,7 @@ export function PoDetailPage() {
 
       {data.approvals?.filter((a: any) => a.status === 'PENDING').length ? (
         <div className="banner warn mb">
-          <span>⏳</span>
+          <span><Icon name="clock" size={16} /></span>
           <div>
             <b>Waiting for approval.</b>{' '}
             {data.approvals.filter((a: any) => a.status === 'PENDING')
@@ -695,7 +696,7 @@ function ReviseModal({ po, onClose, onDone }: { po: any; onClose: () => void; on
         <button className="btn primary" disabled={busy || reason.length < 4} onClick={save}>Save revision</button>
       </>}>
       <div className="banner warn mb">
-        <span>⚠</span>
+        <span><Icon name="alert" size={16} /></span>
         <div>A revision re-opens approval and is recorded with the old and new values.
           You cannot reduce a line below what has already been received.</div>
       </div>

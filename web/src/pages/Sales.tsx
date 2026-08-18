@@ -3,6 +3,7 @@ import { api, useAuth, inr, num, date, idempotencyKey } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 import {
   CHART, ChartCard, compact, inrCompact, Meter, StackedStatus,
 } from '../components/charts';
@@ -86,7 +87,7 @@ export function SalesPage() {
 
       {Number(risk.value) > 0 ? (
         <div className="banner warn mb">
-          <span>⏳</span>
+          <span><Icon name="clock" size={16} /></span>
           <div>
             <b>{inr(risk.value, 0)} of stock is close to the end of its shelf life.</b>
             <div className="small">

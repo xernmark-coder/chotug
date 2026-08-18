@@ -4,6 +4,7 @@ import { api, useAuth, idempotencyKey, inr, num, date, dateTime, pctText } from 
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, useApi, useToast,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 
 /* ====================================================== GRN LIST ========= */
 export function GrnListPage() {
@@ -78,12 +79,12 @@ export function GrnDetailPage() {
       }>
       <ErrorBanner error={error} />
       {data.is_backdated ? (
-        <div className="banner warn mb"><span>📅</span>
+        <div className="banner warn mb"><span><Icon name="clipboard" size={16} /></span>
           <div>This receipt was back-dated to {date(data.posting_date)}.</div></div>
       ) : null}
       {actual?.is_abnormal ? (
         <div className="banner danger mb">
-          <span>💸</span>
+          <span><Icon name="coins" size={16} /></span>
           <div><b>The landed cost moved sharply on this receipt.</b> Check selling prices before
             this stock goes out.</div>
         </div>
@@ -250,7 +251,7 @@ function CostingModal({ grn, chargeTypes, onClose, onDone }: {
           </select>
           <input style={{ flex: 1 }} type="number" placeholder="Amount ₹" value={c.amount || ''}
             onChange={(e) => setCharges((s) => s.map((x, j) => j === i ? { ...x, amount: Number(e.target.value) } : x))} />
-          <button className="btn sm ghost" onClick={() => setCharges((s) => s.filter((_, j) => j !== i))}>✕</button>
+          <button className="btn sm ghost" onClick={() => setCharges((s) => s.filter((_, j) => j !== i))}><Icon name="alert" size={15} /></button>
         </div>
       ))}
       <button className="btn sm" onClick={() => setCharges((s) => [...s, { chargeTypeId: '', amount: 0 }])}>
@@ -310,7 +311,7 @@ function ReverseModal({ grnId, grnNo, onClose, onDone }: {
         </button>
       </>}>
       <div className="banner danger mb">
-        <span>⚠</span>
+        <span><Icon name="alert" size={16} /></span>
         <div>
           This removes the stock again and reopens the purchase order lines. It only works if the
           stock has not already moved out. The original receipt stays in the records.

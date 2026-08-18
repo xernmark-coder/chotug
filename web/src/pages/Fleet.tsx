@@ -3,6 +3,7 @@ import { api, useAuth, date, num } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Layout, Modal, useApi, useToast,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 
 /* ===========================================================================
  * FLEET — the vehicles and drivers the gate picks from.
@@ -37,7 +38,7 @@ export function FleetPage() {
         </div>
       }>
       <div className="banner info mb">
-        <span>🚛</span>
+        <span><Icon name="truckIn" size={16} /></span>
         <div>
           A truck that is on this list is checked for expired fitness, insurance and PUC
           every time it reaches the gate. One that is not can still be received — the gate
