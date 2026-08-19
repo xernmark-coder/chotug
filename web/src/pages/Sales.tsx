@@ -4,6 +4,7 @@ import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
 } from '../components/ui';
 import { Icon } from '../components/icons';
+import { SellPacksModal } from './Packing';
 import {
   CHART, ChartCard, compact, inrCompact, Meter, StackedStatus,
 } from '../components/charts';
@@ -29,11 +30,17 @@ export function SalesPage() {
   const { warehouseId, can } = useAuth();
   const [days, setDays] = useState(30);
   const [selling, setSelling] = useState<any>(null);
+  // Selling a ready-made pack is the common case: somebody already decided the
+  // size and the price, so the sale is a tick and a name — not a weight and a
+  // rate typed again at the counter.
+  const [pickedPacks, setPickedPacks] = useState<Record<string, boolean>>({});
+  const [sellingPacks, setSellingPacks] = useState<any[] | null>(null);
 
   const wh = warehouseId ?? '';
   const summary = useApi<any>(`/inventory/sales-summary?days=${days}&warehouseId=${wh}`, [days, wh]);
   const sugg = useApi<any>(`/inventory/sell-suggestions?warehouseId=${wh}`, [wh]);
   const recent = useApi<any[]>(`/inventory/issues?warehouseId=${wh}&reason=SALE`, [wh]);
+  const packs = useApi<any[]>(`/inventory/packs?status=IN_STOCK&warehouseId=${wh}`, [wh]);
 
   const t = summary.data?.totals ?? {};
   const w = summary.data?.writeOffs ?? {};
@@ -45,7 +52,9 @@ export function SalesPage() {
   const onHandValue = (summary.data?.byProduct ?? [])
     .reduce((a: number, p: any) => a + Number(p.value_left ?? 0), 0);
 
-  const reloadAll = () => { summary.reload(); sugg.reload(); recent.reload(); };
+  const reloadAll = () => { summary.reload(); sugg.reload(); recent.reload(); packs.reload(); };
+  const inStockPacks = packs.data ?? [];
+  const chosenPacks = inStockPacks.filter((p: any) => pickedPacks[p.id]);
 
   return (
     <Layout
@@ -78,6 +87,59 @@ export function SalesPage() {
               tone={Number(w.cost) > 0 ? 'warn' : 'good'}
               foot={Number(w.cost) > 0
                 ? `${num(w.qty, 0)} units written off` : 'nothing written off'} />
+          </div>
+        </>
+      ) : null}
+
+      {/* --------------------------------------------- ready-made packs ---
+          Packs are made and priced on the Packing screen; this is where they
+          are sold. Selling one posts a stock issue for what is inside it, so
+          the pack count and the kilos on the shelf both come down together. */}
+      {canSell ? (
+        <>
+          <div className="section-head"><h2>Sell ready-made packs</h2><span className="rule" /></div>
+          <div className="card mb">
+            <div className="card-head">
+              <h2>{inStockPacks.length} pack(s) on the shelf</h2>
+              {chosenPacks.length ? (
+                <>
+                  <Chip tone="primary">
+                    {chosenPacks.length} selected ·{' '}
+                    {inr(chosenPacks.reduce((a: number, p: any) => a + Number(p.price), 0), 0)}
+                  </Chip>
+                  <button className="btn sm" onClick={() => setPickedPacks({})}>Clear</button>
+                  <button className="btn sm primary" onClick={() => setSellingPacks(chosenPacks)}>
+                    Sell {chosenPacks.length} pack(s)
+                  </button>
+                </>
+              ) : null}
+            </div>
+            <div className="card-body tight">
+              <DataTable
+                loading={packs.loading}
+                rows={inStockPacks}
+                onRowClick={(p: any) =>
+                  setPickedPacks((s2) => ({ ...s2, [p.id]: !s2[p.id] }))}
+                cols={[
+                  { key: 'sel', head: '', width: 34, render: (p: any) => (
+                    <input type="checkbox" style={{ width: 17, height: 17 }}
+                      checked={!!pickedPacks[p.id]} readOnly />
+                  ) },
+                  { key: 'c', head: 'Barcode', render: (p: any) => (
+                    <div><b className="mono">{p.code}</b>
+                      <div className="small muted">{p.group_label ?? `pack ${p.pack_no}`}</div></div>
+                  ) },
+                  { key: 'p', head: 'Product', render: (p: any) => (
+                    <div>{p.product_name}<div className="small muted mono">{p.batch_no}</div></div>
+                  ) },
+                  { key: 'q', head: 'Contains', num: true, render: (p: any) =>
+                    <span>{num(p.qty, 2)} <span className="small muted">{p.uom}</span></span> },
+                  { key: 'r', head: 'Sells for', num: true, render: (p: any) => <b>{inr(p.price)}</b> },
+                ]}
+                empty={<Empty icon="📦" title="No packs made up yet"
+                  hint="Make packs on the Packing screen and they appear here to sell." />}
+              />
+            </div>
           </div>
         </>
       ) : null}
@@ -271,6 +333,11 @@ export function SalesPage() {
           ) : null}
         </div>
       </div>
+
+      {sellingPacks ? (
+        <SellPacksModal packs={sellingPacks} onClose={() => setSellingPacks(null)}
+          onDone={() => { setSellingPacks(null); setPickedPacks({}); reloadAll(); }} />
+      ) : null}
 
       {selling ? (
         <SellModal row={selling} onClose={() => setSelling(null)}

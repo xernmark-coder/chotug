@@ -178,7 +178,6 @@ export function DashboardPage() {
   const q = data?.quality ?? {};
   const prev = data?.prev ?? {};
   const trend = data?.trend ?? [];
-  const showMoney = can('data.cost.view', 'reports.purchase.view');
 
   /* Which parts of the business this person actually owns. A quality inspector
    * has no use for outstanding payables and a gate clerk has none for the
@@ -189,6 +188,9 @@ export function DashboardPage() {
   const isQc       = can('quality.inspection.create', 'quality.inspection.approve');
   const isStore    = can('receiving.grn.submit', 'receiving.putaway.confirm', 'inventory.stock.issue');
   const isBuyer    = can('purchase.po.create', 'purchase.requirement.create');
+  const isFinance  = can('finance.invoice.match', 'finance.invoice.create', 'finance.payment.view');
+  // Confirming an order is now an approver's act, so it is their tile.
+  const canConfirm = can('purchase.po.approve');
   const seesReports = can('reports.purchase.view');
   // The pipeline strip is only meaningful to someone who works somewhere in it.
   const seesFlow   = isBuyer || isGate || isStore || seesReports;
@@ -196,7 +198,21 @@ export function DashboardPage() {
                          'quality.inspection.approve', 'farming.report.view');
   // Everyone gets at least one tile; if none of the above fired, the work
   // queue is the whole dashboard rather than an empty page.
-  const seesNeedsPerson = isApprover || isGate || isQc || isStore || seesAlerts;
+  /* isGate / isStore are deliberately broad — a purchase manager holds
+   * receiving.gate.create and inventory.stock.issue so they can handle an
+   * exception, and they should still see the pipeline. But an exception power
+   * is not a day job: gating the sections on those made a purchase manager's
+   * dashboard eighteen tiles across five teams. These two narrower checks are
+   * the permissions only the gate and the store actually hold. */
+  const worksGate  = can('receiving.gate.submit');
+  const worksStore = can('receiving.putaway.confirm', 'receiving.grn.submit');
+  const seesNeedsPerson = isApprover || canConfirm || seesAlerts;
+  /* Spend and payables are a manager's, an owner's and finance's business.
+   * A buyer holds reports.purchase.view, which used to be enough to show them
+   * the payables ledger — so they get their own spend figure in "Your buying"
+   * instead, and this block stays with the people who act on it. */
+  const showMoney = can('data.cost.view') || isFinance;
+
 
   const day = (d: string) => date(d).slice(0, 6);
 
@@ -208,6 +224,7 @@ export function DashboardPage() {
   const rejected = Number(prev.rejected_30d ?? 0);
   const acceptPct = accepted + rejected > 0 ? (accepted / (accepted + rejected)) * 100 : null;
 
+  const flow = data?.flow ?? {};
   const gateTotal = (k.awaiting_weighment ?? 0) + (k.awaiting_qc ?? 0) + (k.awaiting_grn ?? 0);
 
   const mix = (data?.sourceMix ?? []).map((m: any) => ({
@@ -224,6 +241,7 @@ export function DashboardPage() {
     <Layout title={isQc && !isBuyer ? 'Quality dashboard'
       : isStore && !isBuyer ? 'Warehouse dashboard'
       : isGate && !isBuyer && !isStore ? 'Gate dashboard'
+      : isFinance && !isBuyer ? 'Finance dashboard'
       : 'Purchase dashboard'} subtitle="Today at a glance">
       <ErrorBanner error={error} />
 
@@ -257,6 +275,7 @@ export function DashboardPage() {
         </>
       ) : null}
 
+      {/* Shared across roles: a decision to make, or something broken. */}
       {seesNeedsPerson ? (
         <>
           <div className="section-head"><h2>Needs a person</h2><span className="rule" /></div>
@@ -267,26 +286,95 @@ export function DashboardPage() {
                 foot={k.overdue_approvals > 0 ? `${k.overdue_approvals} past the agreed time` : 'all within time'}
                 onClick={() => nav('/approvals')} />
             ) : null}
-            {isGate ? (
-              <Kpi label="Arriving today" value={k.arrivals_today ?? 0}
-                foot="expected vehicles" onClick={() => nav('/arrivals')} />
-            ) : null}
-            {isGate || isQc || isStore ? (
-              <Kpi label="At the gate" value={gateTotal}
-                tone={(k.awaiting_qc ?? 0) > 0 ? 'warn' : undefined}
-                foot={`${k.awaiting_weighment ?? 0} to weigh · ${k.awaiting_qc ?? 0} QC · ${k.awaiting_grn ?? 0} to post`}
-                onClick={() => nav('/gate')} />
-            ) : null}
-            {isStore ? (
-              <Kpi label="Waiting for put-away" value={k.awaiting_putaway ?? 0}
-                tone={(k.awaiting_putaway ?? 0) > 0 ? 'warn' : 'good'}
-                foot="posted, not yet on a shelf" onClick={() => nav('/putaway')} />
+            {canConfirm ? (
+              <Kpi label="To confirm with supplier" value={flow.to_confirm ?? 0}
+                tone={(flow.to_confirm ?? 0) > 0 ? 'warn' : 'good'}
+                foot="approved, supplier not yet told"
+                onClick={() => nav('/purchase-orders?status=APPROVED')} />
             ) : null}
             {seesAlerts ? (
               <Kpi label="Open alerts" value={k.open_alerts ?? 0}
                 tone={(k.open_alerts ?? 0) > 0 ? 'crit' : 'good'}
                 foot="high or critical" onClick={() => nav('/alerts')} />
             ) : null}
+          </div>
+        </>
+      ) : null}
+
+      {/* --- One section per job. -------------------------------------------
+          Every role used to land on the same page and simply have the parts
+          that were not theirs removed, which left a gate clerk with two tiles
+          and a buyer with a payables figure they cannot act on. Each block
+          below is the numbers that person can do something about today, and
+          each tile links to the screen where they do it. */}
+
+      {isBuyer ? (
+        <>
+          <div className="section-head"><h2>Your buying</h2><span className="rule" /></div>
+          <div className="grid c4 mb">
+            <Kpi label="Below reorder point" value={(data?.criticalStock ?? []).length}
+              tone={(data?.criticalStock ?? []).length > 0 ? 'warn' : 'good'}
+              foot="products to buy today" onClick={() => nav('/buy-list')} />
+            <Kpi label="Open requirements" value={k.open_requirements ?? 0}
+              foot="raised, not yet ordered" onClick={() => nav('/requirements')} />
+            <Kpi label="Orders in progress" value={k.pending_pos ?? 0}
+              foot="draft or waiting for approval" onClick={() => nav('/purchase-orders')} />
+            <Kpi label="Bought today" value={inr(k.purchase_value_today, 0)}
+              foot={`${inr(k.purchase_value_mtd, 0)} this month`} />
+          </div>
+        </>
+      ) : null}
+
+      {worksGate ? (
+        <>
+          <div className="section-head"><h2>Your gate</h2><span className="rule" /></div>
+          <div className="grid c4 mb">
+            <Kpi label="Arriving today" value={k.arrivals_today ?? 0}
+              tone={(k.arrivals_today ?? 0) > 0 ? 'warn' : undefined}
+              foot="expected vehicles" onClick={() => nav('/arrivals')} />
+            <Kpi label="Waiting to be weighed" value={k.awaiting_weighment ?? 0}
+              tone={(k.awaiting_weighment ?? 0) > 0 ? 'warn' : 'good'}
+              foot="in the yard, not on the weighbridge" onClick={() => nav('/gate')} />
+            <Kpi label="At the gate now" value={gateTotal}
+              foot={`${k.awaiting_qc ?? 0} at QC · ${k.awaiting_grn ?? 0} to post`}
+              onClick={() => nav('/gate')} />
+          </div>
+        </>
+      ) : null}
+
+      {worksStore ? (
+        <>
+          <div className="section-head"><h2>Your warehouse</h2><span className="rule" /></div>
+          <div className="grid c4 mb">
+            <Kpi label="To post as receipt" value={k.awaiting_grn ?? 0}
+              tone={(k.awaiting_grn ?? 0) > 0 ? 'warn' : 'good'}
+              foot="quality checked, not yet stock" onClick={() => nav('/gate')} />
+            <Kpi label="Waiting for put-away" value={k.awaiting_putaway ?? 0}
+              tone={(k.awaiting_putaway ?? 0) > 0 ? 'warn' : 'good'}
+              foot="posted, not yet on a shelf" onClick={() => nav('/putaway')} />
+            <Kpi label="Posted today" value={k.receipts_today ?? 0}
+              foot="receipts booked into stock" onClick={() => nav('/grns')} />
+            <Kpi label="Expiring within 7 days" value={k.expiring_7d ?? 0}
+              tone={(k.expiring_7d ?? 0) > 0 ? 'crit' : 'good'}
+              foot="batches to move first" onClick={() => nav('/stock')} />
+          </div>
+        </>
+      ) : null}
+
+      {isFinance ? (
+        <>
+          <div className="section-head"><h2>Your desk</h2><span className="rule" /></div>
+          <div className="grid c4 mb">
+            <Kpi label="Invoices to match" value={k.invoices_to_match ?? 0}
+              tone={(k.invoices_to_match ?? 0) > 0 ? 'warn' : 'good'}
+              foot="captured, not yet matched" onClick={() => nav('/invoices')} />
+            <Kpi label="Waiting to be paid" value={flow.to_pay ?? 0}
+              foot="matched and approved" onClick={() => nav('/payments')} />
+            <Kpi label="Overdue payable" value={inr(k.overdue_payable, 0)}
+              tone={Number(k.overdue_payable) > 0 ? 'crit' : 'good'}
+              foot="past the due date" onClick={() => nav('/payments')} />
+            <Kpi label="Outstanding payable" value={inr(k.outstanding_payable, 0)}
+              foot="everything still owed" onClick={() => nav('/payments')} />
           </div>
         </>
       ) : null}
@@ -321,11 +409,15 @@ export function DashboardPage() {
               spark={<Spark data={trend} y="value" />} />
             <Kpi label="Purchased today" value={inr(k.purchase_value_today, 0)}
               foot={`${inr(k.purchase_value_mtd, 0)} this month`} />
-            <Kpi label="Outstanding payable" value={inr(k.outstanding_payable, 0)}
-              tone={Number(k.overdue_payable) > 0 ? 'warn' : undefined}
-              foot={Number(k.overdue_payable) > 0
-                ? `${inr(k.overdue_payable, 0)} overdue` : 'nothing overdue'}
-              onClick={() => nav('/payments')} />
+            {/* Finance already has payables on their own desk above — showing it
+                twice on one page makes the reader check whether the two agree. */}
+            {!isFinance ? (
+              <Kpi label="Outstanding payable" value={inr(k.outstanding_payable, 0)}
+                tone={Number(k.overdue_payable) > 0 ? 'warn' : undefined}
+                foot={Number(k.overdue_payable) > 0
+                  ? `${inr(k.overdue_payable, 0)} overdue` : 'nothing overdue'}
+                onClick={() => nav('/payments')} />
+            ) : null}
             <Kpi label="Accepted on arrival"
               value={acceptPct == null ? '—' : `${num(acceptPct, 1)}%`}
               tone={Number(q.rejection_pct_30d) > 8 ? 'crit'

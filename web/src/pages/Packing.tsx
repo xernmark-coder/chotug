@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api, useAuth, inr, num, date } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
@@ -23,6 +24,7 @@ type Group = { label: string; count: string; qtyPerPack: string; price: string }
 const emptyGroup = (): Group => ({ label: '', count: '10', qtyPerPack: '5', price: '' });
 
 export function PackingPage() {
+  const nav = useNavigate();
   const toast = useToast();
   const { warehouseId, can } = useAuth();
   const wh = warehouseId ?? '';
@@ -33,7 +35,6 @@ export function PackingPage() {
 
   const [packing, setPacking] = useState<any>(null);
   const [printing, setPrinting] = useState<any[] | null>(null);
-  const [selling, setSelling] = useState<any[] | null>(null);
   const [picked, setPicked] = useState<Record<string, boolean>>({});
 
   const chosen = inStockChosen();
@@ -114,10 +115,14 @@ export function PackingPage() {
               {chosen.length ? (
                 <>
                   <Chip tone="primary">{chosen.length} selected</Chip>
-                  <button className="btn sm primary" onClick={() => setSelling(chosen)}>
-                    Sell {chosen.length} pack(s)
-                  </button>
                   <button className="btn sm" onClick={() => setPrinting(chosen)}><Icon name="inbox" size={15} /> Labels</button>
+                  {/* Selling used to live here as well as on Sell & Profit. Two
+                      screens that both take money is one more than anybody can
+                      keep straight — this page makes and labels packs, and
+                      selling happens in the one place that reports on it. */}
+                  <button className="btn sm primary" onClick={() => nav('/sales')}>
+                    Sell them →
+                  </button>
                 </>
               ) : inStock.length ? (
                 <button className="btn sm" onClick={() => setPrinting(inStock)}>
@@ -191,11 +196,6 @@ export function PackingPage() {
 
       {printing ? (
         <LabelSheet packs={printing} onClose={() => { setPrinting(null); packs.reload(); }} />
-      ) : null}
-
-      {selling ? (
-        <SellPacksModal packs={selling} onClose={() => setSelling(null)}
-          onDone={() => { setSelling(null); setPicked({}); reloadAll(); }} />
       ) : null}
     </Layout>
   );
@@ -434,7 +434,7 @@ function LabelSheet({ packs, onClose }: { packs: any[]; onClose: () => void }) {
  * packs sold inside a single transaction, so there is no state where the stock
  * has gone but the pack still looks sellable.
  */
-function SellPacksModal({ packs, onClose, onDone }: {
+export function SellPacksModal({ packs, onClose, onDone }: {
   packs: any[]; onClose: () => void; onDone: () => void;
 }) {
   const toast = useToast();

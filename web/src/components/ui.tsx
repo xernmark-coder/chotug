@@ -370,7 +370,12 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         // The whole raise → approve → order → confirm chain in one page, for
         // whoever owns the decision end to end. The separate screens below are
         // unchanged and remain the path when the work is split across people.
-        { to: '/order-flow', label: 'Order in one flow', icon: 'bolt', perms: ['purchase.po.create'] },
+        // The one-page flow raises, approves and confirms in a single sweep, so it
+        // hands whoever opens it the whole chain of authority at once. That is
+        // only ever the owner's shortcut — everyone else uses the staged pages,
+        // where raising, approving and confirming are separate acts by separate
+        // people. Gated on admin.override, which only the Owner role holds.
+        { to: '/order-flow', label: 'Order in one flow', icon: 'bolt', perms: ['admin.override'] },
         { to: '/buy-list', label: 'What to Buy', icon: 'calculator', perms: ['purchase.requirement.create'] },
         { to: '/requirements', label: 'Requirements', icon: 'clipboard', perms: ['purchase.requirement.create'] },
         { to: '/purchase-orders', label: 'Purchase Orders', icon: 'box', perms: ['purchase.po.create', 'purchase.po.approve'] },

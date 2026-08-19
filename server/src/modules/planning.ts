@@ -697,7 +697,9 @@ async function pushPoConfirmTask(tx: any, actor: any, poId: string) {
     subtitle: `${inrText(Number(po.grand_total))} · expected ${po.expected_date}`
       + (po.phone ? ` · ${po.phone}` : ''),
     severity: po.is_urgent ? 'warn' : 'normal',
-    requiredPermission: 'purchase.po.submit',
+    // Confirming now needs approval authority, so the task must land in an
+    // approver's queue — otherwise it sits with a buyer who cannot clear it.
+    requiredPermission: 'purchase.po.approve',
     slaMinutes: po.is_urgent ? 120 : 480,
   });
 }
@@ -901,7 +903,7 @@ planningRouter.post('/approvals/:id/decide', h(async (req) => {
 }));
 
 /** §8 — Confirm an approved PO with the supplier and open an arrival slot. */
-planningRouter.post('/purchase-orders/:id/confirm', requires('purchase.po.submit'), h(async (req) => {
+planningRouter.post('/purchase-orders/:id/confirm', requires('purchase.po.approve'), h(async (req) => {
   const input = body(z.object({
     expectedDate: z.string().optional(),
     windowStart: z.string().nullable().optional(),

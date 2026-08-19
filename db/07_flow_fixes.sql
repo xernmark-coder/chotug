@@ -29,9 +29,10 @@ DO $$
 DECLARE c record;
 BEGIN
     FOR c IN SELECT id FROM companies LOOP
+        -- Only the weighment grant: see 17_role_scope.sql for why gate.create
+        -- was a mistake here.
         PERFORM grant_role_perms(c.id, 'PURCHASE_MGR', ARRAY[
-            'receiving.weighment.create',
-            'receiving.gate.create']);
+            'receiving.weighment.create']);
         -- QC_HEAD approves overrides but could not record the inspection being
         -- overridden — the same shape of gap one step further down the chain.
         PERFORM grant_role_perms(c.id, 'QC_HEAD', ARRAY['quality.inspection.create']);

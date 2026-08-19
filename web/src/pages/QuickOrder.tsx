@@ -47,6 +47,22 @@ export function QuickOrderPage() {
   const toast = useToast();
   const { branchId, me, can } = useAuth();
 
+  /* This page raises, approves and confirms in one sweep, so opening it is the
+   * same as holding every step's authority at once. The sidebar hides it from
+   * everyone but the Owner; this refuses the URL as well, because a hidden link
+   * is not a permission check. The server still guards each call underneath. */
+  if (!can('admin.override')) {
+    return (
+      <Layout title="Order in one flow">
+        <Empty icon="lock" title="This shortcut is for the owner only"
+          hint="Raising an order, approving it and confirming it with the supplier are
+                separate jobs for separate people. Use What to Buy, then Requirements,
+                then Purchase Orders." />
+      </Layout>
+    );
+  }
+
+
   const [step, setStep] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);

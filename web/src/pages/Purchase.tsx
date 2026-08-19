@@ -522,7 +522,9 @@ export function PoDetailPage() {
             <button className="btn primary" disabled={busy}
               onClick={() => act(`/planning/purchase-orders/${id}/submit`, 'Submitted')}>Submit</button>
           ) : null}
-          {data.status === 'APPROVED' && can('purchase.po.submit') ? (
+          {/* Confirming is the moment the company commits to the supplier, so it
+              takes approval authority — not merely the right to raise an order. */}
+          {data.status === 'APPROVED' && can('purchase.po.approve') ? (
             <button className="btn primary" disabled={busy}
               onClick={() => act(`/planning/purchase-orders/${id}/confirm`, 'Confirmed with supplier')}>
               Confirm with supplier

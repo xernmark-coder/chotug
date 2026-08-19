@@ -76,6 +76,19 @@ insightsRouter.get('/dashboard', h(async (req) => {
        (SELECT count(*) FROM supplier_invoices i
          WHERE i.company_id=$1 AND i.status IN ('PENDING','MISMATCH','HOLD')
            AND ($2::uuid IS NULL OR i.branch_id=$2))                        AS invoices_to_match,
+       /* Two numbers a warehouse actually watches. Without them a store login
+          saw a dashboard about spend and approvals and nothing about the shelf
+          it is responsible for. */
+       (SELECT count(*) FROM grns g
+         WHERE g.company_id=$1 AND g.status='POSTED' AND g.posting_date=CURRENT_DATE
+           AND ($2::uuid IS NULL OR g.branch_id=$2))                        AS receipts_today,
+       (SELECT count(*) FROM stock_balances sb
+          JOIN batches b ON b.id=sb.batch_id
+          JOIN warehouses w ON w.id=sb.warehouse_id
+         WHERE sb.company_id=$1 AND sb.qty > 0 AND b.status='ACTIVE'
+           AND COALESCE(b.predicted_expiry_date, b.expiry_date) IS NOT NULL
+           AND COALESCE(b.predicted_expiry_date, b.expiry_date) <= CURRENT_DATE + 7
+           AND ($2::uuid IS NULL OR w.branch_id=$2))                        AS expiring_7d,
        (SELECT COALESCE(SUM(g.total_value),0) FROM grns g
          WHERE g.company_id=$1 AND g.status='POSTED' AND g.posting_date = CURRENT_DATE
            AND ($2::uuid IS NULL OR g.branch_id=$2))                        AS purchase_value_today,

@@ -75,6 +75,7 @@ async function main() {
     await run('14_qc_lot_grades.sql');
     await run('15_driver_portal.sql');
     await run('16_device_bridge.sql');
+    await run('17_role_scope.sql');
     // Last, so the FORCE that 04 and 06 re-apply is lifted again.
     await run('11_rls_managed_host.sql');
     console.log('\nSchema and master data are in place.');
