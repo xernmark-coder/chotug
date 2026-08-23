@@ -185,10 +185,261 @@ mastersRouter.use(authenticate);
 // Outside supplier logins never reach staff data — see staffOnly().
 mastersRouter.use(staffOnly);
 
+/* ===========================================================================
+ * PRODUCT IDENTITY (client update, phase 1)
+ *
+ * A thing needs one name before anything about it can be tracked. Three
+ * screens' worth of master data lives here:
+ *
+ *   the category tree     Fruits → Mango → (breeds are products)
+ *   the product itself    with the icon the staff recognise it by
+ *   the supplier's code   what THEY call it, and the code WE track it by
+ * ======================================================================== */
+
+/** The category tree, each node carrying how many products hang off it. */
+mastersRouter.get('/categories', h(async (req) => {
+  const rows = await query(req.actor,
+    `SELECT c.id, c.code, c.name, c.name_hi, c.segment, c.parent_id, c.icon,
+            c.sort_order, c.is_active,
+            (SELECT count(*) FROM products p
+              WHERE p.category_id = c.id AND p.is_active)::int AS product_count
+       FROM product_categories c
+      WHERE c.company_id = $1
+      ORDER BY c.sort_order, c.name`,
+    [req.actor.companyId]);
+
+  // Returned as a tree as well as a flat list: the flat one feeds dropdowns,
+  // the tree feeds the management screen without it rebuilding the shape.
+  const byId = new Map(rows.map((c: any) => [c.id, { ...c, children: [] as any[] }]));
+  const roots: any[] = [];
+  for (const c of byId.values()) {
+    if (c.parent_id && byId.has(c.parent_id)) byId.get(c.parent_id)!.children.push(c);
+    else roots.push(c);
+  }
+  return { tree: roots, flat: rows };
+}));
+
+mastersRouter.post('/categories', requires('master.category.manage'), h(async (req) => {
+  const input = body(z.object({
+    code: z.string().trim().min(2, 'Give it a short code'),
+    name: z.string().trim().min(2, 'Name it'),
+    nameHi: z.string().trim().optional(),
+    // A breed group like Mango sits under Fruits; a top-level group has none.
+    parentId: z.string().uuid().nullable().optional(),
+    segment: z.enum(['FRUIT','VEGETABLE','GROCERY','DAIRY','SPICE','GRAIN','OTHER']).optional(),
+    icon: z.string().trim().optional(),
+    sortOrder: z.number().int().optional(),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    // A child inherits its parent's segment unless told otherwise, so nobody
+    // has to remember that Mango is a FRUIT when adding it under Fruits.
+    let segment = input.segment ?? null;
+    if (!segment && input.parentId) {
+      const { rows } = await tx.query(
+        `SELECT segment FROM product_categories WHERE id=$1 AND company_id=$2`,
+        [input.parentId, req.actor.companyId]);
+      segment = rows[0]?.segment ?? null;
+    }
+    if (!segment) throw ApiError.badRequest('Choose what kind of produce this is');
+
+    const { rows } = await tx.query(
+      `INSERT INTO product_categories (company_id, parent_id, code, name, name_hi,
+              segment, icon, sort_order, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9) RETURNING *`,
+      [req.actor.companyId, input.parentId ?? null, input.code.toUpperCase(),
+       input.name, input.nameHi ?? null, segment, input.icon ?? null,
+       input.sortOrder ?? 0, req.actor.userId]);
+    return rows[0];
+  });
+}));
+
+mastersRouter.put('/categories/:id', requires('master.category.manage'), h(async (req) => {
+  const input = body(z.object({
+    name: z.string().trim().min(2).optional(),
+    nameHi: z.string().trim().nullable().optional(),
+    icon: z.string().trim().nullable().optional(),
+    parentId: z.string().uuid().nullable().optional(),
+    sortOrder: z.number().int().optional(),
+    isActive: z.boolean().optional(),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    if (input.parentId === req.params.id) {
+      throw ApiError.rule('A category cannot sit inside itself.');
+    }
+    const { rows } = await tx.query(
+      `UPDATE product_categories
+          SET name = COALESCE($3, name), name_hi = COALESCE($4, name_hi),
+              icon = COALESCE($5, icon), parent_id = COALESCE($6, parent_id),
+              sort_order = COALESCE($7, sort_order),
+              is_active = COALESCE($8, is_active), updated_by = $9
+        WHERE id = $1 AND company_id = $2 RETURNING *`,
+      [req.params.id, req.actor.companyId, input.name ?? null, input.nameHi ?? null,
+       input.icon ?? null, input.parentId ?? null, input.sortOrder ?? null,
+       input.isActive ?? null, req.actor.userId]);
+    if (!rows[0]) throw ApiError.notFound('Category not found');
+    return rows[0];
+  });
+}));
+
+/**
+ * Add a product — which is also how a BREED is added, because a breed is a
+ * product. "Alphonso" under the category "Mango" holds its own stock, its own
+ * price and its own supplier codes, and rolls up to Mango in every report.
+ */
+mastersRouter.post('/products', requires('master.product.manage'), h(async (req) => {
+  const input = body(z.object({
+    categoryId: z.string().uuid(),
+    sku: z.string().trim().min(2, 'Give it a code').optional(),
+    name: z.string().trim().min(2, 'Name it'),
+    nameHi: z.string().trim().optional(),
+    variety: z.string().trim().optional(),
+    icon: z.string().trim().optional(),
+    baseUom: z.string().default('KG'),
+    purchaseUom: z.string().optional(),
+    shelfLifeDays: z.number().int().positive().optional(),
+    storageType: z.enum(['AMBIENT','CHILLED','COLD','FROZEN','RIPENING']).default('AMBIENT'),
+    reorderPoint: z.number().nonnegative().optional(),
+    minStock: z.number().nonnegative().optional(),
+    maxStock: z.number().nonnegative().optional(),
+    defaultWastagePct: z.number().min(0).max(100).default(0),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows: cat } = await tx.query(
+      `SELECT c.id, c.code, c.default_qc_template_id, c.name FROM product_categories c
+        WHERE c.id=$1 AND c.company_id=$2`, [input.categoryId, req.actor.companyId]);
+    if (!cat[0]) throw ApiError.notFound('Category not found');
+
+    /* A SKU nobody typed is better than a SKU somebody mistyped: build it from
+     * the category and the name, and only fall back to asking if that clashes. */
+    const sku = input.sku?.toUpperCase()
+      ?? `${cat[0].code}-${input.name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)}`;
+
+    const { rows: dupe } = await tx.query(
+      `SELECT 1 FROM products WHERE company_id=$1 AND sku=$2`, [req.actor.companyId, sku]);
+    if (dupe[0]) throw ApiError.conflict(`The code ${sku} is already used. Give this one its own code.`);
+
+    const { rows } = await tx.query(
+      `INSERT INTO products (company_id, category_id, sku, name, name_hi, variety, icon,
+              base_uom, purchase_uom, storage_type, shelf_life_days,
+              reorder_point, min_stock, max_stock, default_wastage_pct,
+              qc_template_id, is_active, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+               (SELECT default_qc_template_id FROM product_categories WHERE id=$2),
+               true,$16,$16)
+       RETURNING *`,
+      [req.actor.companyId, input.categoryId, sku, input.name, input.nameHi ?? null,
+       input.variety ?? null, input.icon ?? null, input.baseUom,
+       input.purchaseUom ?? input.baseUom, input.storageType,
+       input.shelfLifeDays ?? null, input.reorderPoint ?? null,
+       input.minStock ?? null, input.maxStock ?? null, input.defaultWastagePct,
+       req.actor.userId]);
+
+    await emit(tx, req.actor, 'product', rows[0].id, 'product.created',
+      { sku, name: input.name, category: cat[0].name });
+    return rows[0];
+  });
+}));
+
+mastersRouter.put('/products/:id', requires('master.product.manage'), h(async (req) => {
+  const input = body(z.object({
+    name: z.string().trim().min(2).optional(),
+    nameHi: z.string().trim().nullable().optional(),
+    variety: z.string().trim().nullable().optional(),
+    icon: z.string().trim().nullable().optional(),
+    categoryId: z.string().uuid().optional(),
+    reorderPoint: z.number().nonnegative().nullable().optional(),
+    minStock: z.number().nonnegative().nullable().optional(),
+    maxStock: z.number().nonnegative().nullable().optional(),
+    shelfLifeDays: z.number().int().positive().nullable().optional(),
+    isActive: z.boolean().optional(),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE products SET
+          name = COALESCE($3, name), name_hi = COALESCE($4, name_hi),
+          variety = COALESCE($5, variety), icon = COALESCE($6, icon),
+          category_id = COALESCE($7, category_id),
+          reorder_point = COALESCE($8, reorder_point),
+          min_stock = COALESCE($9, min_stock), max_stock = COALESCE($10, max_stock),
+          shelf_life_days = COALESCE($11, shelf_life_days),
+          is_active = COALESCE($12, is_active), updated_by = $13
+        WHERE id=$1 AND company_id=$2 RETURNING *`,
+      [req.params.id, req.actor.companyId, input.name ?? null, input.nameHi ?? null,
+       input.variety ?? null, input.icon ?? null, input.categoryId ?? null,
+       input.reorderPoint ?? null, input.minStock ?? null, input.maxStock ?? null,
+       input.shelfLifeDays ?? null, input.isActive ?? null, req.actor.userId]);
+    if (!rows[0]) throw ApiError.notFound('Product not found');
+    return rows[0];
+  });
+}));
+
+/* --------------------------------------------------------------------------
+ * The supplier's own code for our product.
+ *
+ * The same Alphonso is "MNG-A1" to one aadhti and "AH-04" to the next. Both are
+ * recorded against our product, so their delivery note can be read without
+ * anybody translating it in their head — and the tracking code we print is
+ * generated from the pair.
+ * ----------------------------------------------------------------------- */
+mastersRouter.get('/supplier-products', h(async (req) =>
+  query(req.actor,
+    `SELECT sp.id, sp.supplier_id, sp.product_id, sp.supplier_code,
+            sp.supplier_name_for_product, sp.tracking_code, sp.typical_grade,
+            sp.last_rate, sp.last_purchase_at, sp.is_preferred, sp.is_active,
+            s.code AS supplier_short_code, COALESCE(s.trade_name, s.legal_name) AS supplier_name,
+            p.sku, p.name AS product_name, p.variety, COALESCE(p.icon, c.icon) AS icon,
+            c.name AS category_name
+       FROM supplier_products sp
+       JOIN suppliers s ON s.id = sp.supplier_id
+       JOIN products  p ON p.id = sp.product_id
+       JOIN product_categories c ON c.id = p.category_id
+      WHERE sp.company_id = $1
+        AND ($2::uuid IS NULL OR sp.supplier_id = $2)
+        AND ($3::uuid IS NULL OR sp.product_id  = $3)
+      ORDER BY supplier_name, p.name`,
+    [req.actor.companyId, req.query.supplierId ?? null, req.query.productId ?? null])));
+
+mastersRouter.post('/supplier-products', requires('master.product.manage'), h(async (req) => {
+  const input = body(z.object({
+    supplierId: z.string().uuid(),
+    productId: z.string().uuid(),
+    supplierCode: z.string().trim().optional(),
+    supplierNameForProduct: z.string().trim().optional(),
+    typicalGrade: z.string().trim().optional(),
+    isPreferred: z.boolean().default(false),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    // One link per supplier-product pair: re-adding updates rather than
+    // duplicating, because the second row would silently split the history.
+    const { rows } = await tx.query(
+      `INSERT INTO supplier_products (company_id, supplier_id, product_id, supplier_code,
+              supplier_name_for_product, typical_grade, is_preferred, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
+       ON CONFLICT (supplier_id, product_id) DO UPDATE
+          SET supplier_code = EXCLUDED.supplier_code,
+              supplier_name_for_product = EXCLUDED.supplier_name_for_product,
+              typical_grade = EXCLUDED.typical_grade,
+              is_preferred  = EXCLUDED.is_preferred,
+              is_active = true, updated_by = EXCLUDED.updated_by
+       RETURNING *`,
+      [req.actor.companyId, input.supplierId, input.productId,
+       input.supplierCode?.toUpperCase() ?? null, input.supplierNameForProduct ?? null,
+       input.typicalGrade ?? null, input.isPreferred, req.actor.userId]);
+    return rows[0];
+  });
+}));
+
 mastersRouter.get('/products', h(async (req) => {
   const search = String(req.query.search ?? '').trim();
   return query(req.actor,
     `SELECT p.id, p.sku, p.name, p.name_hi, p.variety, p.base_uom, p.purchase_uom,
+            p.icon, p.category_id, COALESCE(p.icon, c.icon) AS effective_icon,
+            parent.name AS parent_category_name,
             p.is_variable_weight, p.is_perishable, p.shelf_life_days, p.storage_type,
             p.rotation_rule, p.min_stock, p.max_stock, p.reorder_point,
             p.safety_stock_days, p.lead_time_days, p.moq, p.order_multiple,
@@ -197,6 +448,7 @@ mastersRouter.get('/products', h(async (req) => {
             COALESCE(sb.qty, 0) AS current_stock
        FROM products p
        JOIN product_categories c ON c.id = p.category_id
+       LEFT JOIN product_categories parent ON parent.id = c.parent_id
        LEFT JOIN (SELECT product_id, SUM(qty) qty FROM stock_balances GROUP BY product_id) sb
               ON sb.product_id = p.id
       WHERE p.company_id = $1 AND p.is_active
@@ -705,6 +957,51 @@ mastersRouter.put('/settings/:key', requires('admin.settings.manage'), h(async (
   });
 }));
 
+/* ---------------------------------------------------------------------------
+ * THE COMPANY'S UPI CODE
+ *
+ * Two levels: the company's, which every shop prints by default, and a centre's
+ * own where it has one. Having only the per-centre code meant a new shop had
+ * nothing to print until somebody remembered to set it.
+ * ------------------------------------------------------------------------ */
+mastersRouter.get('/company', h(async (req) => {
+  const [c] = await query(req.actor,
+    `SELECT id, legal_name, trade_name, gstin, upi_id, upi_payee_name,
+            default_margin_pct, overhead_window_days
+       FROM companies WHERE id = $1`, [req.actor.companyId]);
+  const places = await query(req.actor,
+    `SELECT warehouse_id, place_name, upi_id, payee_name, is_own_code
+       FROM v_effective_upi WHERE company_id = $1 ORDER BY place_name`,
+    [req.actor.companyId]);
+  return { ...c, places };
+}));
+
+mastersRouter.patch('/company', requires('admin.settings.manage'), h(async (req) => {
+  const i = body(z.object({
+    upiId: z.string().trim().max(80).optional(),
+    upiPayeeName: z.string().trim().max(80).optional(),
+    defaultMarginPct: z.coerce.number().min(0).max(500).optional(),
+    overheadWindowDays: z.coerce.number().int().min(7).max(365).optional(),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE companies SET
+          upi_id               = COALESCE($2, upi_id),
+          upi_payee_name       = COALESCE($3, upi_payee_name),
+          default_margin_pct   = COALESCE($4, default_margin_pct),
+          overhead_window_days = COALESCE($5, overhead_window_days)
+        WHERE id = $1
+        RETURNING upi_id, upi_payee_name, default_margin_pct, overhead_window_days`,
+      [req.actor.companyId, i.upiId ?? null, i.upiPayeeName ?? null,
+       i.defaultMarginPct ?? null, i.overheadWindowDays ?? null]);
+    await emit(tx, req.actor, 'company', req.actor.companyId, 'company.settings.changed', i);
+    return { ...rows[0],
+      message: i.upiId ? 'UPI code saved — every centre without its own will print this.'
+        : 'Saved.' };
+  });
+}));
+
 mastersRouter.get('/qc-templates', h(async (req) =>
   query(req.actor,
     `SELECT t.id, t.code, t.name, t.version, t.sampling_rule, t.scoring_rule,
@@ -766,6 +1063,137 @@ mastersRouter.get('/users', requires('admin.rbac.manage'), h(async (req) =>
       GROUP BY u.id, sup.trade_name, drv.full_name
       ORDER BY u.full_name`,
     [req.actor.companyId])));
+
+/* ---------------------------------------------------------------------------
+ * ONE PERSON'S PANEL
+ *
+ * Roles stay the sane thing to manage — twelve roles, not sixty people. This is
+ * the layer on top: two purchase executives on the same role, one of whom may
+ * confirm orders with suppliers and one of whom may not.
+ *
+ *     what they see = (their roles' permissions + GRANTs) − REVOKEs
+ *
+ * Every override carries a reason, because "why can Sunil approve and Ganesh
+ * cannot" is asked six months later, usually by an auditor.
+ * ------------------------------------------------------------------------ */
+mastersRouter.get('/users/:id/permissions', requires('admin.rbac.manage'), h(async (req) => {
+  const [u] = await query(req.actor,
+    `SELECT u.id, u.full_name, u.email,
+            COALESCE(array_agg(r.name ORDER BY r.name)
+                     FILTER (WHERE r.name IS NOT NULL), '{}') AS roles
+       FROM users u
+       LEFT JOIN user_role_assignments ura ON ura.user_id = u.id
+       LEFT JOIN roles r ON r.id = ura.role_id
+      WHERE u.id = $1 AND u.company_id = $2 GROUP BY u.id`,
+    [req.params.id, req.actor.companyId]);
+  if (!u) throw ApiError.notFound('No such person.');
+
+  /* Every permission in the system, with where this person's answer comes
+   * from. Showing only what they have would make "why can't they do X" an
+   * unanswerable question — the admin needs to see the ones that are off. */
+  const permissions = await query(req.actor,
+    `SELECT p.code, p.module, p.entity, p.action, p.description, p.risk_level,
+            (fr.permission_code IS NOT NULL)              AS from_role,
+            o.effect, o.reason, o.expires_on,
+            gb.full_name                                  AS set_by,
+            (vp.permission_code IS NOT NULL)              AS effective
+       FROM permissions p
+       LEFT JOIN (SELECT DISTINCT rp.permission_code
+                    FROM user_role_assignments ura
+                    JOIN role_permissions rp ON rp.role_id = ura.role_id
+                   WHERE ura.user_id = $1
+                     AND ura.valid_from <= CURRENT_DATE
+                     AND (ura.valid_to IS NULL OR ura.valid_to >= CURRENT_DATE)
+                 ) fr ON fr.permission_code = p.code
+       LEFT JOIN user_permission_overrides o
+              ON o.user_id = $1 AND o.permission_code = p.code
+             AND (o.expires_on IS NULL OR o.expires_on >= CURRENT_DATE)
+       LEFT JOIN users gb ON gb.id = o.granted_by
+       LEFT JOIN v_user_permissions vp
+              ON vp.user_id = $1 AND vp.permission_code = p.code
+      ORDER BY p.module, p.entity, p.action`,
+    [u.id]);
+
+  return { user: u, permissions };
+}));
+
+mastersRouter.post('/users/:id/permissions', requires('admin.permission.override'), h(async (req) => {
+  const i = body(z.object({
+    permissionCode: z.string().min(3),
+    /* DEFAULT removes the override and puts the person back on their role —
+     * "can be reset also". */
+    effect: z.enum(['GRANT', 'REVOKE', 'DEFAULT']),
+    reason: z.string().trim().max(300).optional(),
+    expiresOn: z.string().optional(),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows: u } = await tx.query(
+      `SELECT id, full_name FROM users WHERE id=$1 AND company_id=$2`,
+      [req.params.id, req.actor.companyId]);
+    if (!u[0]) throw ApiError.notFound('No such person.');
+
+    if (req.params.id === req.actor.userId) {
+      /* Nobody edits their own access. It is the one change with no second
+       * pair of eyes anywhere in the system. */
+      throw ApiError.rule('You cannot change your own permissions. Ask another admin.');
+    }
+
+    if (i.effect === 'DEFAULT') {
+      const { rows } = await tx.query(
+        `DELETE FROM user_permission_overrides
+          WHERE user_id=$1 AND permission_code=$2 RETURNING effect`,
+        [req.params.id, i.permissionCode]);
+      if (!rows[0]) return { ok: true, message: 'That was already on the role default.' };
+      await emit(tx, req.actor, 'user', req.params.id, 'permission.reset',
+        { permissionCode: i.permissionCode, was: rows[0].effect });
+      return { ok: true, effect: 'DEFAULT',
+        message: `${u[0].full_name} is back on their role for ${i.permissionCode}.` };
+    }
+
+    if (!i.reason) throw ApiError.rule('Say why — this is read back months later.');
+
+    const { rows } = await tx.query(
+      `INSERT INTO user_permission_overrides (company_id, user_id, permission_code,
+              effect, reason, expires_on, granted_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (user_id, permission_code) DO UPDATE
+         SET effect=EXCLUDED.effect, reason=EXCLUDED.reason,
+             expires_on=EXCLUDED.expires_on, granted_by=EXCLUDED.granted_by,
+             granted_at=now()
+       RETURNING *`,
+      [req.actor.companyId, req.params.id, i.permissionCode, i.effect,
+       i.reason, i.expiresOn ?? null, req.actor.userId]);
+
+    await emit(tx, req.actor, 'user', req.params.id, 'permission.overridden',
+      { permissionCode: i.permissionCode, effect: i.effect, reason: i.reason });
+
+    /* "Anita can now admin.audit.view" is a sentence for a developer. The
+     * permission already carries a description written for the person setting
+     * it; use that. */
+    const { rows: p } = await tx.query(
+      `SELECT description FROM permissions WHERE code=$1`, [i.permissionCode]);
+    const what = (p[0]?.description ?? i.permissionCode).toLowerCase();
+
+    return { ...rows[0],
+      message: i.effect === 'GRANT'
+        ? `${u[0].full_name} can now: ${what}.`
+        : `${u[0].full_name} can no longer: ${what}.` };
+  });
+}));
+
+mastersRouter.post('/users/:id/permissions/reset', requires('admin.permission.override'),
+  h(async (req) => withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `DELETE FROM user_permission_overrides WHERE user_id=$1 AND company_id=$2 RETURNING id`,
+      [req.params.id, req.actor.companyId]);
+    await emit(tx, req.actor, 'user', req.params.id, 'permission.reset_all',
+      { removed: rows.length });
+    return { ok: true, removed: rows.length,
+      message: rows.length
+        ? `${rows.length} override(s) removed — back on their role.`
+        : 'They were already on their role.' };
+  })));
 
 mastersRouter.post('/users/invite', requires('admin.rbac.manage'), h(async (req) => {
   const input = body(z.object({

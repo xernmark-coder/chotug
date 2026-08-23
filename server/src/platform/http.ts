@@ -90,8 +90,32 @@ export function errorHandler(
         code: 'already_posted',
       });
     }
+    /* Money constraints say what they mean. "That record already exists" next
+     * to a UPI reference is the difference between a clerk understanding they
+     * are about to pay twice, and them trying again. */
+    const dupes: Record<string, string> = {
+      uq_payment_txn_ref:
+        'That transaction reference has already been used on another payment. '
+        + 'Check whether this has been paid before paying it again.',
+      uq_receipt_txn_ref:
+        'That transaction reference is already on another receipt.',
+      uq_payreq_source:
+        'This document is already waiting in the Finance inbox.',
+      uq_supplier_product_code:
+        'This supplier already uses that code for a different product.',
+      uq_supplier_tracking_code:
+        'That tracking code is already in use.',
+      uq_customer_name:
+        'A customer with that name is already on this centre\'s list.',
+      uq_close_day:
+        'This centre has already been closed for that day. Edit that close instead.',
+      uq_box_no: 'That box number has already been used on this vehicle.',
+      uq_cycle_live_per_plot:
+        'That plot already has a crop growing on it. Close it before sowing again.',
+      uq_plot_qr: 'A plot with that QR code already exists.',
+    };
     return res.status(409).json({
-      error: 'That record already exists.',
+      error: dupes[constraint ?? ''] ?? 'That record already exists.',
       code: 'duplicate',
       detail: constraint,
     });
@@ -109,6 +133,18 @@ export function errorHandler(
       ck_qc_ai_override: 'Give a reason when overriding the AI grading suggestion.',
       ck_putaway_mismatch: 'Give a reason when putting stock in a different bin.',
       ck_grn_amend_reason: 'An amendment or reversal needs a reason.',
+      ck_payment_ref: 'A payment that is not cash needs its transaction reference.',
+      ck_receipt_ref: 'A receipt that is not cash needs its transaction reference.',
+      ck_payreq_reject: 'Say why the payment request is being turned down.',
+      ck_payreq_paid: 'That would pay more than the request is for.',
+      ck_payreq_expense_cat: 'Choose what kind of expense this is.',
+      ck_payment_reverse: 'Reversing a payment needs a reason.',
+      ck_receipt_dispute: 'A short or over collection needs a note explaining it.',
+      ck_audit_note: 'Say what you found — anything not in good condition needs a note.',
+      ck_close_variance:
+        'Your figure does not match the bills. Say what happened before closing the day.',
+      ck_audit_done: 'Write down what the audit found before closing it.',
+      ck_box_void: 'Give a reason for voiding the box.',
     };
     return res.status(422).json({
       error: map[constraint ?? ''] ?? 'That value breaks a business rule.',

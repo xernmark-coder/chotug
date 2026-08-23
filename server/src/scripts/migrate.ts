@@ -76,6 +76,23 @@ async function main() {
     await run('15_driver_portal.sql');
     await run('16_device_bridge.sql');
     await run('17_role_scope.sql');
+    await run('18_supplier_dispatch.sql');
+    await run('19_product_identity.sql');
+    await run('20_product_icons.sql');
+    await run('21_money_spine.sql');
+    await run('22_system_raised_requests.sql');
+    await run('23_money_access.sql');
+    await run('24_supplier_acceptance.sql');
+    await run('25_invoice_at_confirmation.sql');
+    await run('26_box_weighing.sql');
+    await run('27_pack_and_grade.sql');
+    await run('28_warehouse_map.sql');
+    await run('29_audit_team.sql');
+    await run('30_centres.sql');
+    await run('31_person_permissions.sql');
+    await run('32_min_sell_price.sql');
+    await run('33_hr.sql');
+    await run('34_company_upi.sql');
     // Last, so the FORCE that 04 and 06 re-apply is lifted again.
     await run('11_rls_managed_host.sql');
     console.log('\nSchema and master data are in place.');

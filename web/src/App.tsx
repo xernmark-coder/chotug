@@ -21,6 +21,15 @@ import {
   AiCentrePage, AlertsPage, InvoiceCreatePage, InvoiceDetailPage, InvoiceListPage,
   PaymentsPage, ProfilePage, ReportsPage, SettingsPage, SuppliersPage,
 } from './pages/Finance';
+import { CataloguePage } from './pages/Catalogue';
+import { FinanceDeskPage } from './pages/FinanceDesk';
+import { UnloadPage } from './pages/Unload';
+import { PackBenchPage } from './pages/PackBench';
+import { WarehouseMapPage } from './pages/WarehouseMap';
+import { AuditPage, AuditDetailPage } from './pages/Audit';
+import { CentresPage, CentreDayPage, CustomersPage } from './pages/Centres';
+import { PerformancePage } from './pages/Performance';
+import { HrPage } from './pages/Hr';
 import {
   CropDetailPage, CropListPage, CropStartPage, DispatchPage, FarmDashboardPage,
   FarmExpensePage, FarmPlanningPage, FarmSetupPage, FarmTodayPage, HarvestPage,
@@ -92,6 +101,16 @@ export default function App() {
 
       <Route path="/arrivals" element={<ArrivalsPage />} />
       <Route path="/intake" element={<WarehouseIntakePage />} />
+      <Route path="/unload/:id" element={<UnloadPage />} />
+      <Route path="/pack-bench/:batchId" element={<PackBenchPage />} />
+      <Route path="/warehouse-map" element={<WarehouseMapPage />} />
+      <Route path="/audit" element={<AuditPage />} />
+      <Route path="/audit/:id" element={<AuditDetailPage />} />
+      <Route path="/centres" element={<CentresPage />} />
+      <Route path="/centres/:id" element={<CentreDayPage />} />
+      <Route path="/customers" element={<CustomersPage />} />
+      <Route path="/performance" element={<PerformancePage />} />
+      <Route path="/hr" element={<HrPage />} />
       <Route path="/dispatch" element={<LogisticsDispatchPage />} />
       <Route path="/gate" element={<GatePipelinePage />} />
       <Route path="/gate/new" element={<GateEntryPage />} />
@@ -125,6 +144,8 @@ export default function App() {
       {/* What the QR on a plot gate resolves to. */}
       <Route path="/farm/plot/:qr" element={<PlotScanPage />} />
 
+      <Route path="/catalogue" element={<CataloguePage />} />
+      <Route path="/finance" element={<FinanceDeskPage />} />
       <Route path="/reports" element={<ReportsPage />} />
       <Route path="/ai" element={<AiCentrePage />} />
       <Route path="/people" element={<PeoplePage />} />

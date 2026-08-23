@@ -6,6 +6,7 @@ import {
 import { api, useAuth, inr, num, date, ago } from '../lib/api';
 import {
   Chip, Col, DataTable, Empty, ErrorBanner, Kpi, Layout, Loading, useApi, useToast,
+  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import {
   CHART, ChartCard, compact, inrCompact, Meter, RankedBars, Spark, StackedStatus, TrendArea,
@@ -116,6 +117,19 @@ export function WorkQueuePage() {
   const tasks = data ?? [];
   const breached = tasks.filter((t) => t.sla_breached).length;
 
+  const f = useFilters<any>(tasks, {
+    date: (t: any) => t.created_at,
+    search: (t: any) => [t.title, t.subtitle, t.reference_no, QUEUE_LABEL[t.queue_key]]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'q', label: 'kind', of: (t: any) => QUEUE_LABEL[t.queue_key] ?? t.queue_key },
+      { key: 'sv', label: 'urgency', of: (t: any) => t.severity },
+      { key: 'sla', label: 'timing', of: (t: any) =>
+        (t.sla_breached ? 'past the agreed time' : 'in time') },
+    ],
+    totals: [{ label: 'Tasks', of: () => 1 }],
+  });
+
   const cols: Col<any>[] = [
     { key: 'k', head: 'What', width: 150, render: (t) => <Chip tone={t.severity === 'critical' ? 'danger' : t.severity === 'warn' ? 'warn' : 'primary'}>{QUEUE_LABEL[t.queue_key] ?? t.queue_key}</Chip> },
     { key: 't', head: 'Task', render: (t) => (
@@ -151,12 +165,16 @@ export function WorkQueuePage() {
       <div className="card">
         <div className="card-head"><h2>Your queue</h2></div>
         <div className="card-body tight">
+          <FilterBar f={f} placeholder="Search the queue" />
+          <FilterTotals f={f} noun="task" />
           <DataTable
-            rows={tasks} cols={cols} loading={loading}
+            rows={f.rows} cols={cols} loading={loading}
             rowTone={(t) => (t.sla_breached || t.severity === 'critical' ? 'crit' : t.severity === 'warn' ? 'warn' : undefined)}
             onRowClick={(t) => nav((QUEUE_ROUTE[t.queue_key] ?? (() => '/dashboard'))(t))}
-            empty={<Empty icon="✅" title="You are all caught up"
-              hint="New work appears here the moment someone hands it to you." />}
+            empty={<Empty icon="✅"
+              title={f.active > 0 ? 'Nothing matches those filters' : 'You are all caught up'}
+              hint={f.active > 0 ? 'Clear a filter to widen the search.'
+                : 'New work appears here the moment someone hands it to you.'} />}
           />
         </div>
       </div>
@@ -188,7 +206,8 @@ export function DashboardPage() {
   const isQc       = can('quality.inspection.create', 'quality.inspection.approve');
   const isStore    = can('receiving.grn.submit', 'receiving.putaway.confirm', 'inventory.stock.issue');
   const isBuyer    = can('purchase.po.create', 'purchase.requirement.create');
-  const isFinance  = can('finance.invoice.match', 'finance.invoice.create', 'finance.payment.view');
+  const isFinance  = can('finance.invoice.match', 'finance.invoice.create', 'finance.payment.view',
+                         'finance.request.verify', 'finance.payment.make');
   // Confirming an order is now an approver's act, so it is their tile.
   const canConfirm = can('purchase.po.approve');
   const seesReports = can('reports.purchase.view');
@@ -260,7 +279,12 @@ export function DashboardPage() {
           My work
           {queueCount > 0 ? <span className="hero-badge">{queueCount}</span> : null}
         </button>
-        {can('purchase.po.create') ? (
+        {/* The one-flow screen skips every checkpoint between requirement and
+            confirmed order, so it is an owner's shortcut, not a buyer's tool.
+            The sidebar has always gated it on admin.override; this button was
+            gated on purchase.po.create, which every buyer holds — so the
+            shortcut was one click away from the people it exists to bypass. */}
+        {can('admin.override') ? (
           <button className="btn lg" onClick={() => nav('/order-flow')}>
             <Icon name="bolt" />
             Order in one flow
@@ -311,7 +335,7 @@ export function DashboardPage() {
       {isBuyer ? (
         <>
           <div className="section-head"><h2>Your buying</h2><span className="rule" /></div>
-          <div className="grid c4 mb">
+          <div className="grid c5 mb">
             <Kpi label="Below reorder point" value={(data?.criticalStock ?? []).length}
               tone={(data?.criticalStock ?? []).length > 0 ? 'warn' : 'good'}
               foot="products to buy today" onClick={() => nav('/buy-list')} />
@@ -319,6 +343,17 @@ export function DashboardPage() {
               foot="raised, not yet ordered" onClick={() => nav('/requirements')} />
             <Kpi label="Orders in progress" value={k.pending_pos ?? 0}
               foot="draft or waiting for approval" onClick={() => nav('/purchase-orders')} />
+            {/* An order placed is not an order agreed. Until the supplier
+                answers, the buyer is planning against a promise nobody made —
+                and a decline is worth knowing today, not on delivery day. */}
+            <Kpi label="Suppliers not answered"
+              value={(k.po_unanswered ?? 0) + (k.po_declined ?? 0)}
+              tone={(k.po_declined ?? 0) > 0 ? 'crit'
+                : (k.po_unanswered ?? 0) > 0 ? 'warn' : 'good'}
+              foot={(k.po_declined ?? 0) > 0
+                ? `${k.po_declined} declined — buy elsewhere`
+                : (k.po_unanswered ?? 0) > 0 ? 'waiting for their yes' : 'all confirmed both ways'}
+              onClick={() => nav('/purchase-orders')} />
             <Kpi label="Bought today" value={inr(k.purchase_value_today, 0)}
               foot={`${inr(k.purchase_value_mtd, 0)} this month`} />
           </div>
@@ -365,16 +400,22 @@ export function DashboardPage() {
         <>
           <div className="section-head"><h2>Your desk</h2><span className="rule" /></div>
           <div className="grid c4 mb">
-            <Kpi label="Invoices to match" value={k.invoices_to_match ?? 0}
-              tone={(k.invoices_to_match ?? 0) > 0 ? 'warn' : 'good'}
-              foot="captured, not yet matched" onClick={() => nav('/invoices')} />
-            <Kpi label="Waiting to be paid" value={flow.to_pay ?? 0}
-              foot="matched and approved" onClick={() => nav('/payments')} />
-            <Kpi label="Overdue payable" value={inr(k.overdue_payable, 0)}
+            {/* Leads with what is waiting on this person, not with the payables
+                total — a number nobody can do anything about at 9am. */}
+            <Kpi label="Waiting to be checked" value={k.money_to_verify ?? 0}
+              tone={(k.money_to_verify ?? 0) > 0 ? 'warn' : 'good'}
+              foot="requests for money" onClick={() => nav('/finance')} />
+            <Kpi label="Verified, to pay" value={inr(k.money_to_pay_value, 0)}
               tone={Number(k.overdue_payable) > 0 ? 'crit' : 'good'}
-              foot="past the due date" onClick={() => nav('/payments')} />
+              foot={`${k.money_to_pay ?? 0} request(s)`} onClick={() => nav('/finance')} />
+            <Kpi label="Money to confirm" value={k.money_to_confirm ?? 0}
+              tone={(k.money_to_confirm ?? 0) > 0 ? 'warn' : 'good'}
+              foot="collected, not yet in the bank" onClick={() => nav('/finance')} />
             <Kpi label="Outstanding payable" value={inr(k.outstanding_payable, 0)}
-              foot="everything still owed" onClick={() => nav('/payments')} />
+              tone={Number(k.overdue_payable) > 0 ? 'warn' : undefined}
+              foot={Number(k.overdue_payable) > 0
+                ? `${inr(k.overdue_payable, 0)} overdue` : 'nothing overdue'}
+              onClick={() => nav('/payments')} />
           </div>
         </>
       ) : null}
@@ -548,7 +589,11 @@ const FLOW_STEPS: {
   /** Sitting here is normal up to this many; past it, it is a queue. */
   hot?: number;
 }[] = [
-  { key: 'need',       label: 'To buy',      icon: 'calculator', to: '/buy-list' },
+  /* Counts requirements raised, so it says requirements and goes to them.
+   * Labelled "To buy" and pointed at the buy list, it invited the same
+   * complaint as the low-stock panel: a 10 here, a 1 on the page it opened.
+   * The buy list is reached from "Below reorder point" and from Running low. */
+  { key: 'need',       label: 'Requirements', icon: 'clipboard', to: '/requirements' },
   { key: 'approve',    label: 'Approve',     icon: 'checkDoc',   to: '/approvals', hot: 1 },
   { key: 'to_confirm', label: 'Confirm',     icon: 'box',        to: '/purchase-orders', hot: 1 },
   { key: 'in_transit', label: 'On the road', icon: 'route',      to: '/dispatch' },

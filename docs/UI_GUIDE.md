@@ -673,3 +673,292 @@ and problems reported from the field with who reported them.
 
 Filled in once. Farms with their water source, plots with auto-generated QR codes to print and
 stick on gates, and machines with a three-colour status and a service date.
+
+## Finance desk — `/finance`
+
+One route, two screens, decided by `finance.expense.view`.
+
+**Finance, the owner, the purchase manager** get the desk. Eight tiles across
+the top — what is waiting to be checked, what is verified and unpaid, what has
+been collected but not confirmed, what is owed to suppliers, then the flow:
+paid out, collected, net movement, and how much of the spend was cash. Under
+them four tabs, and every one of them is a queue you can act on:
+
+- **To verify** — somebody asked for money. *Check it* opens the claim next to
+  who raised it and what it is for. Finance can approve a smaller number than
+  was asked for; turning it down needs a reason.
+- **To pay** — verified claims and the outstanding balance on part-paid ones.
+  Anything that is not cash demands a transaction reference, and the same
+  reference cannot be used twice.
+- **Coming in** — money a centre or customer says it has paid. Confirming asks
+  what *actually landed*; a gap forces a note and flags the receipt as
+  disputed.
+- **Where it went** — spend by category, cash versus online, and the daily in
+  and out.
+
+**Everybody else** — the gate clerk, the QC hand, the warehouse, the farm — get
+*Money Requests*: what they have asked Finance to pay and where each one stands,
+in words rather than statuses ("with Finance to check", "approved, payment due",
+"turned down — …"). The nav item renames itself to match.
+
+The split exists so that nobody is shown an inbox they have no right to act on,
+and nobody who spends money in the field is left with no way to claim it back.
+
+## Supplier portal — the order is a conversation
+
+The orders tab used to show a status and one button. It now shows where the
+order is in a four-step conversation, and offers only the step that is
+actually next:
+
+| What the supplier sees | What they can do |
+|---|---|
+| *being placed* | nothing — we have not given it to them yet |
+| **answer this** | **Accept or decline** |
+| *you declined — <reason>* | nothing |
+| *to send* (no payment asked for) | **Ask for payment** · **Send** |
+| *waiting for payment* / *part paid — ₹1,000 of ₹8,000* | nothing; it is with Finance |
+| *payment turned down — <reason>* | speak to the buyer |
+| *paid — send it* | **Mark as sent** |
+| *on the way* | **Update** |
+| *delivered* | bill it |
+
+`OrderState` and `OrderAction` read the same order object and derive the step
+the same way, so the chip and the button cannot contradict each other — the
+failure that makes a portal untrustworthy.
+
+Accepting is the most urgent thing on the screen, so it has its own KPI:
+**Waiting for your answer**, red while anything sits there.
+
+**On the buyer's side**, the purchase order list gained a *Supplier says*
+column — *no answer yet*, *accepted*, *accepted · wants ₹8,000*, or *declined —
+crop damaged by rain*. A confirmed order the supplier has refused used to look
+identical to one being loaded. The dashboard tile **Suppliers not answered**
+counts both, and turns red the moment one is declined.
+
+## Gate entry — one field, then corrections
+
+`/gate/new` now opens on **"Invoice number from the driver's papers"**. Type it,
+press Find, and the purchase order, supplier, vehicle, driver, phone,
+transporter and invoice reference fill themselves in — all of it recorded by the
+supplier days earlier when they accepted the order. Everything stays editable;
+the clerk corrects whatever the paperwork actually says.
+
+The banner underneath is the point of the exercise. It turns **red** if that
+invoice has already been through the gate ("do not let it in twice"), **amber**
+if the load has not been paid for, and notes when the supplier never marked it
+as sent. All three are things that cannot be undone once the lorry is inside.
+
+## Unloading — `/unload/:gateEntryId`
+
+Used standing next to a lorry, on a tablet, one-handed, by somebody holding a
+box. So the product is a **tile** and not a dropdown, the weight is a **number
+pad** and not a text field, and recording a box leaves the screen exactly where
+it was, ready for the next one.
+
+- **Which product** — big tiles with the produce icon, each showing its running
+  count and weight. A single-product load selects itself.
+- **Or scan the code printed on the box** — the supplier's own code, resolved
+  through `supplier_products`, falling back to our SKU.
+- **Running total** — boxes, kilos, average box weight and the spread
+  (`4 boxes · avg 12.20 kg (11.8–12.5)`), and the gap against what was ordered,
+  in red past 5%.
+- **Last boxes** — the most recent dozen, each voidable with a reason. A voided
+  box stays visible, struck through, with the reason on it.
+
+The weighbridge weighs the **lorry** — one number for a load carrying mango,
+tomato and onion together. This weighs what actually came off it, which is the
+only way to know how much of each product arrived. Those totals then prefill
+the goods receipt, and the receipt line shows where the number came from:
+*4 boxes weighed · 48.8 kg*.
+
+## Packing bench — `/pack-bench/:batchId`
+
+Reached from **Packing & labels → Grade & pack** (the old bulk run is still
+there, one button along, because "make me 40 crates of 5 kg" is also a real
+job).
+
+Same thumb-sized language as the unload screen: the grade is a **tile**, the
+quantity is a **number pad**, one tap packs the box.
+
+- **A · B · C · Reject** tiles, each showing how many boxes of that grade have
+  come off this batch already.
+- When the chosen grade differs from what the lot was graded off the vehicle,
+  an amber note says so: *"The lot was graded A and you are calling this box B.
+  That is allowed — you are holding it — and the difference is recorded against
+  your name."*
+- **Price** is remembered per grade, because it is per grade in practice.
+- **Shelf, if it goes now** — scan the bin and the box is graded, labelled and
+  stored in one action. Leave it blank and it waits on the bench.
+- **On the bench** lists everything not yet on a shelf, with a *Put on a shelf*
+  action that takes a scanned bin code and a tick list.
+
+The packs list on the main packing page now shows **grade** and **where** — the
+two things somebody sent to fetch a box actually needs — with *on the bench* in
+amber for anything not yet put away.
+
+## Warehouse map — `/warehouse-map`
+
+The floor plan as the client described it: **floor → section → rack → shelf**.
+Shelves are tiles — tinted when they hold something — so an aisle with space in
+it is visible from across the room. Clicking one prints its label.
+
+Racks and shelves are created in runs (*"six shelves on this rack"*). Laying a
+warehouse out one row at a time is how it never gets laid out.
+
+Sections that existed before floors did hang under **"Not on a floor yet"**.
+They work exactly as before; they are just waiting for somebody to say where
+they are.
+
+### The QR is real
+
+`components/qr.tsx` is a QR encoder written the same way as the Code 128 one
+next to it — drawn, not fetched. A label that only prints when a CDN is
+reachable is not a label, and a warehouse basement is where the signal dies.
+
+It is deliberately narrow: **version 1, EC level M, alphanumeric** — 20
+characters, where every code we print is ten. Anything that does not fit falls
+back to printing the text, which a human can still read and type in.
+
+It is verified rather than assumed: 800 random codes across every length from 1
+to 20 were rendered and decoded back with a real scanner library, and the first
+version failed all of them — the two copies of the format-information bits run
+in different directions, and mirroring one of them produces a code that looks
+perfectly plausible and scans as nothing.
+
+## Audit — `/audit`
+
+Four numbers at the top: waiting to be counted, shelves counted in 30 days, how
+many **did not match the books**, and what has been written off at landed cost.
+
+**Scan a shelf** is the whole job. Point the phone at the sticker; the screen
+shows what the books think is there *before* asking what is actually there —
+the right order, because the auditor should see the claim they are checking.
+Then: how much is there, what state it is in, how much is a write-off, and what
+they saw. Anything not in good condition demands a note.
+
+Under it, in amber: *"Recording this does not change the stock figures. It
+records what you found; correcting the books is somebody else's decision, made
+against your finding."* That is not a disclaimer — it is the design. The
+`AUDITOR` role's sidebar contains Dashboard, My Work, Alerts, Stock, Audit,
+Reports and Catalogue, and nothing that can move a rupee or a crate.
+
+**What we keep losing** ranks products by written-off value over 90 days and
+breaks it down by condition — damaged, spoiled, expired, missing, on the wrong
+shelf.
+
+## Centres — `/centres`
+
+Two tabs. **Centres** lists each shop: what it is holding, what is on the way,
+what it sold in 30 days, and whether it has closed today. **How they compare**
+ranks them — but the column that matters is *net after costs*, and the page
+says so: revenue flatters a shop with high rent, a long delivery run and heavy
+wastage.
+
+### One centre — `/centres/:id`
+
+The shop's own screen, in the order the day happens:
+
+- **Coming to you** — loads on a lorry, with the vehicle and driver. *It
+  arrived* opens a count sheet; only what is confirmed becomes their stock, and
+  a shortfall demands an explanation and tells the buyer.
+- **On the shelves** — with expiry called in plain terms: *2d — sell first*,
+  and past the date *2d past — write it off*, because "−2d" is not advice
+  anybody can act on.
+- **Today's bills** and **Last two weeks** of closes, with the gap between the
+  bills and the declaration in red.
+- **Ask for stock** — goes to the purchase manager with the person's own
+  reasoning, because *"Ganpati this weekend"* gets a different answer from
+  *"ran out"*.
+- **Close the day** — shows what the bills say first, then asks what was
+  actually taken, split cash and online. Any gap demands a note and is flagged
+  to the owner and Finance. Closing again corrects the same day.
+
+## Customers — `/customers`
+
+Who buys, from which shop, how often and how much. At the till the buyer is a
+**dropdown with a + New beside it** rather than a free-text box: a name typed
+by hand is a different spelling every time, and "who buys from us" stops being
+an answerable question.
+
+## One person's panel — People & Access → *Their panel*
+
+Roles stay the sane thing to manage: twelve roles, not sixty people. This is the
+layer on top, for the client's own example — two purchase executives, one of
+whom may confirm orders with suppliers and one of whom may not.
+
+Every permission in the system is listed by module with **can / cannot** against
+it, the ones that differ from the role tinted and shown first when you tick
+*Only what is different from the role*. Giving or taking one asks for a reason
+and, on a grant, an optional expiry — a permission that outlives its reason is
+how access creeps. **Put them back on their role** clears the lot.
+
+## The price ladder, at the till
+
+The sell dialog now reads as an argument rather than four numbers:
+
+| | |
+|---|---|
+| Bought for | ₹24.00 |
+| Running costs | + ₹7.63 — wages, power, cold store, per KG |
+| **Really cost** | **₹31.63** |
+| **Do not sell below** | **₹39.97** — 9% goes to waste · 15% margin |
+
+And the warning below it now distinguishes three different mistakes: below what
+it cost, covering the purchase but not the running costs, and under the intended
+margin.
+
+## Product performance — `/performance`
+
+One row per product, opening into its own card. The collapsed row carries
+**after waste** and **sell-through** deliberately: a revenue-sorted table puts
+the loss-makers at the top looking successful, and a product with good revenue,
+40% wastage and 30% sell-through is losing money. Cards for those are tinted red
+down the left edge.
+
+Opened, each product shows who it is **bought from**, where it is **sold**,
+where it **stands** (bought, still on the shelf, thrown away or short, kept
+after waste), and a daily revenue chart — with an honest note instead of a
+chart when there is only one day of sales.
+
+The **Categories** tab has revenue by category, margin against waste side by
+side, and a card per category. Those totals are summed from the products, so
+the two tabs cannot disagree.
+
+## Workers & wages — `/hr`
+
+Three tabs because they happen at different times of day.
+
+**Today** is the one that has to be fast — a row per person, five big buttons
+(In · Half · Absent · Leave · Off) and an overtime box, no dialog. Anyone not
+yet marked is left visibly pale, and **Everyone in** fills the common case in
+one tap. Anything slower and attendance stops being taken.
+
+**People** carries the record behind those taps: what they are paid and how,
+the last 30 days of attendance, what they actually did (boxes weighed, boxes
+packed, shelves counted — measured, not rated), and what they have been paid.
+
+**Wages** works a period out from the attendance rather than asking anyone to
+type it, shows the arithmetic per person, takes a bonus with a reason, and sends
+one request per person to Finance. A period already sent shows as *sent* and
+cannot be run twice.
+
+## Filters, everywhere, with the numbers under them
+
+One hook and one bar (`useFilters`, `FilterBar`, `FilterTotals` in `ui.tsx`),
+used by every list, so a filter behaves the same on the order list as on the
+requirement list. Six hand-rolled filter bars would be six sets of slightly
+different behaviour and five of them would be subtly wrong.
+
+Every bar has **a time window** (the client's must-have), facet dropdowns built
+from the data itself — a supplier never ordered from does not appear, one added
+this morning does — a search box, and a **Clear N filters** button that only
+shows when something is on.
+
+Under every filtered table is the strip that is the point of the exercise:
+
+```
+9 orders of 53                    ORDERED ₹58,086      RECEIVED 1,210
+```
+
+A filtered list without it answers "which ones" but not "how much", and "how
+much" is the question somebody filtered in order to ask.

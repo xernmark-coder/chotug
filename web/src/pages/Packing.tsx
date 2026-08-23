@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, useAuth, inr, num, date } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
+  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
 import { Barcode } from '../components/barcode';
@@ -44,6 +45,47 @@ export function PackingPage() {
   const inStock = packs.data ?? [];
   const stockValue = inStock.reduce((a: number, p: any) => a + Number(p.price), 0);
 
+  const fPackable = useFilters<any>(packable.data, {
+    search: (b: any) => [b.product_name, b.batch_no, b.grade].filter(Boolean).join(' '),
+    facets: [
+      { key: 'p', label: 'product', of: (b: any) => b.product_name },
+      { key: 'g', label: 'grade', of: (b: any) => b.grade },
+      { key: 'e', label: 'shelf life', of: (b: any) =>
+        b.days_left == null ? null
+          : b.days_left <= 2 ? 'pack today'
+          : b.days_left <= 5 ? 'this week' : 'plenty of time' },
+    ],
+    totals: [
+      { label: 'On hand', of: (b: any) => Number(b.available_qty) || 0 },
+      { label: 'Still loose', of: (b: any) =>
+        (Number(b.available_qty) || 0) - (Number(b.packed_qty) || 0) },
+    ],
+  });
+  const fStock = useFilters<any>(inStock, {
+    search: (p2: any) => [p2.code, p2.product_name, p2.batch_no, p2.bin_code, p2.group_label]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'p', label: 'product', of: (p2: any) => p2.product_name },
+      { key: 'g', label: 'grade', of: (p2: any) => p2.grade },
+      { key: 'b', label: 'shelf', of: (p2: any) => p2.bin_code ?? 'on the bench' },
+    ],
+    totals: [
+      { label: 'Packs', of: () => 1 },
+      { label: 'Worth', of: (p2: any) => Number(p2.price) || 0, money: true },
+    ],
+  });
+  const fRuns = useFilters<any>(runs.data, {
+    date: (r: any) => r.packed_on,
+    search: (r: any) => [r.run_no, r.product_name].filter(Boolean).join(' '),
+    facets: [
+      { key: 'p', label: 'product', of: (r: any) => r.product_name },
+    ],
+    totals: [
+      { label: 'Packs made', of: (r: any) => Number(r.pack_count) || 0 },
+      { label: 'Sold', of: (r: any) => Number(r.sold) || 0 },
+    ],
+  });
+
   const reloadAll = () => { packable.reload(); runs.reload(); packs.reload(); };
 
   return (
@@ -68,9 +110,11 @@ export function PackingPage() {
       <div className="section-head"><h2>Pack a batch</h2><span className="rule" /></div>
       <div className="card mb">
         <div className="card-body tight">
+          <FilterBar f={fPackable} placeholder="Search product, batch, grade" />
+          <FilterTotals f={fPackable} noun="batch" />
           <DataTable
             loading={packable.loading}
-            rows={packable.data ?? []}
+            rows={fPackable.rows}
             rowTone={(b: any) => (b.days_left != null && b.days_left <= 2 ? 'crit'
               : b.days_left != null && b.days_left <= 5 ? 'warn' : undefined)}
             cols={[
@@ -97,11 +141,22 @@ export function PackingPage() {
                     </Chip> },
               { key: 'c', head: 'Cost', num: true, render: (b: any) => inr(b.landed_rate) },
               { key: 'a2', head: '', width: 90, render: (b: any) => canPack
-                ? <button className="btn sm primary" onClick={() => setPacking(b)}>Pack</button>
+                ? (
+                  <div className="btn-row">
+                    {/* Two ways to pack, because both happen. Bulk is "make me
+                        40 crates of 5 kg"; the bench is one box at a time with
+                        its own grade, which is what the floor actually does. */}
+                    <button className="btn sm primary"
+                      onClick={() => nav(`/pack-bench/${b.batch_id}`)}>Grade &amp; pack</button>
+                    <button className="btn sm" onClick={() => setPacking(b)}>Bulk</button>
+                  </div>
+                )
                 : null },
             ]}
-            empty={<Empty icon="📦" title="Nothing in stock to pack"
-              hint="Post a goods receipt and the batch shows up here." />}
+            empty={<Empty icon="📦"
+              title={fPackable.active > 0 ? 'No batch matches those filters' : 'Nothing in stock to pack'}
+              hint={fPackable.active > 0 ? 'Clear a filter to widen the search.'
+                : 'Post a goods receipt and the batch shows up here.'} />}
           />
         </div>
       </div>
@@ -124,16 +179,19 @@ export function PackingPage() {
                     Sell them →
                   </button>
                 </>
-              ) : inStock.length ? (
-                <button className="btn sm" onClick={() => setPrinting(inStock)}>
-                  <Icon name="inbox" size={15} /> Print all labels
+              ) : fStock.rows.length ? (
+                <button className="btn sm" onClick={() => setPrinting(fStock.rows)}>
+                  <Icon name="inbox" size={15} />{' '}
+                  {fStock.active > 0 ? `Print these ${fStock.rows.length} labels` : 'Print all labels'}
                 </button>
               ) : null}
             </div>
             <div className="card-body tight">
+              <FilterBar f={fStock} placeholder="Search barcode, product, shelf" />
+              <FilterTotals f={fStock} noun="pack" />
               <DataTable
                 loading={packs.loading}
-                rows={inStock}
+                rows={fStock.rows}
                 cols={[
                   { key: 'sel', head: '', width: 34, render: (p: any) => (
                     <input type="checkbox" style={{ width: 17, height: 17 }}
@@ -149,6 +207,18 @@ export function PackingPage() {
                   { key: 'p', head: 'Product', render: (p: any) => (
                     <div>{p.product_name}<div className="small muted mono">{p.batch_no}</div></div>
                   ) },
+                  /* Grade and shelf together: the two things somebody sent to
+                     fetch a box actually needs. */
+                  { key: 'g', head: 'Grade', render: (p: any) => (
+                    p.grade ? <Chip tone={p.grade === 'A' ? 'ok' : p.grade === 'B' ? 'primary'
+                      : p.grade === 'C' ? 'warn' : 'danger'}>{p.grade}</Chip>
+                      : <span className="muted small">—</span>
+                  ) },
+                  { key: 'b', head: 'Where', render: (p: any) => (
+                    p.bin_code
+                      ? <div><b>{p.bin_code}</b><div className="small muted">rack {p.rack_code}</div></div>
+                      : <span className="chip warn">on the bench</span>
+                  ) },
                   { key: 'q', head: 'Contains', num: true, render: (p: any) =>
                     <span>{num(p.qty, 2)} <span className="small muted">{p.uom}</span></span> },
                   { key: 'r', head: 'Price', num: true, render: (p: any) => <b>{inr(p.price)}</b> },
@@ -156,8 +226,10 @@ export function PackingPage() {
                     <button className="btn sm ghost" onClick={() => setPrinting([p])}>Label</button>
                   ) },
                 ]}
-                empty={<Empty icon="🏷️" title="No packs made yet"
-                  hint="Pack a batch above and every pack gets its own barcode." />}
+                empty={<Empty icon="🏷️"
+                  title={fStock.active > 0 ? 'No pack matches those filters' : 'No packs made yet'}
+                  hint={fStock.active > 0 ? 'Clear a filter to widen the search.'
+                    : 'Pack a batch above and every pack gets its own barcode.'} />}
               />
             </div>
           </div>
@@ -167,8 +239,10 @@ export function PackingPage() {
           <div className="card">
             <div className="card-head"><h2>Recent runs</h2></div>
             <div className="card-body tight">
+              <FilterBar f={fRuns} placeholder="Search run or product" />
+              <FilterTotals f={fRuns} noun="run" />
               <DataTable
-                rows={runs.data ?? []}
+                rows={fRuns.rows}
                 cols={[
                   { key: 'r', head: 'Run', render: (r: any) => (
                     <div>
@@ -182,7 +256,8 @@ export function PackingPage() {
                     </div>
                   ) },
                 ]}
-                empty={<Empty icon="🧾" title="No packing runs yet" />}
+                empty={<Empty icon="🧾" title={fRuns.active > 0
+                  ? 'No run matches those filters' : 'No packing runs yet'} />}
               />
             </div>
           </div>

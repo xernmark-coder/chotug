@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { api, useAuth, dateTime, ago } from '../lib/api';
+import { api, useAuth, dateTime, date, ago } from '../lib/api';
 import {
-  Chip, DataTable, ErrorBanner, Field, Layout, Loading, Modal, useApi, useToast,
+  Chip, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, useApi, useToast,
+  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 
 type Person = {
@@ -58,8 +59,9 @@ function InviteLink({ url, email, sent, error }: {
 
 /* ================================================== PEOPLE & ACCESS ===== */
 export function PeoplePage() {
+  const [tuning, setTuning] = useState<any>(null);
   const toast = useToast();
-  const { me } = useAuth();
+  const { me, can } = useAuth();
   const { data, loading, error, reload } = useApi<Person[]>('/masters/users');
   const roles = useApi<Role[]>('/masters/roles');
   const suppliers = useApi<any[]>('/masters/suppliers');
@@ -115,6 +117,20 @@ export function PeoplePage() {
     } catch (e: any) { toast(e.message, 'err'); }
   };
 
+  const f = useFilters<Person>(data, {
+    search: (p2) => [p2.full_name, p2.email, p2.phone, p2.supplier_name, p2.driver_name,
+      ...p2.roles].filter(Boolean).join(' '),
+    facets: [
+      { key: 'role', label: 'role', of: (p2) => p2.roles[0] ?? 'no role' },
+      { key: 'st', label: 'status', of: (p2) => p2.status },
+      { key: 'kind', label: 'kind', of: (p2) =>
+        p2.supplier_name ? 'supplier' : p2.driver_name ? 'driver' : 'staff' },
+      { key: 'seen', label: 'sign-in', of: (p2) =>
+        (p2.last_login_at ? 'has signed in' : 'never signed in') },
+    ],
+    totals: [{ label: 'People', of: () => 1 }],
+  });
+
   return (
     <Layout
       title="People & Access"
@@ -126,10 +142,12 @@ export function PeoplePage() {
         <div className="mb"><InviteLink {...link} /></div>
       ) : null}
 
+      <FilterBar f={f} placeholder="Search name, email, role" />
+      <FilterTotals f={f} noun="person" />
       <div className="card">
         <DataTable<Person>
           loading={loading}
-          rows={data ?? []}
+          rows={f.rows}
           cols={[
             {
               key: 'name',
@@ -174,12 +192,21 @@ export function PeoplePage() {
                   {p.status === 'SUSPENDED' ? (
                     <button className="btn sm" onClick={() => setStatus(p, 'ACTIVE')}>Restore</button>
                   ) : null}
+                  {/* Two people on one role do not always do the same job. */}
+                  {p.id !== me?.id && can('admin.permission.override') ? (
+                    <button className="btn sm" onClick={() => setTuning(p)}>Their panel</button>
+                  ) : null}
                 </div>
               ),
             },
           ]}
         />
       </div>
+
+      {tuning ? (
+        <PersonPanelModal person={tuning} onClose={() => setTuning(null)}
+          onChanged={reload} />
+      ) : null}
 
       {open ? (
         <Modal
@@ -459,5 +486,189 @@ export function AcceptInvitePage() {
         )}
       </div>
     </div>
+  );
+}
+
+
+/* ===========================================================================
+ * ONE PERSON'S PANEL
+ *
+ *   "there are two purchase executives, admin can set different things on
+ *    their panels … person centric will override position and can be reset."
+ *
+ * The role is still the default and still where most of the thinking belongs.
+ * This screen shows every permission in the system, where this person's answer
+ * comes from, and lets the admin move one of them — with a reason, because the
+ * question asked six months later is never "what" but "why".
+ * ======================================================================== */
+function PersonPanelModal({ person, onClose, onChanged }: {
+  person: any; onClose: () => void; onChanged: () => void;
+}) {
+  const toast = useToast();
+  const { data, loading, reload } = useApi<any>(`/masters/users/${person.id}/permissions`, [person.id]);
+  const [q, setQ] = useState('');
+  const [onlyChanged, setOnlyChanged] = useState(false);
+  const [asking, setAsking] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+
+  const perms = (data?.permissions ?? []).filter((p: any) => {
+    if (onlyChanged && !p.effect) return false;
+    if (!q.trim()) return true;
+    const t = q.toLowerCase();
+    return p.code.toLowerCase().includes(t) || (p.description ?? '').toLowerCase().includes(t);
+  });
+
+  const byModule = perms.reduce((acc: Record<string, any[]>, p: any) => {
+    (acc[p.module] ??= []).push(p);
+    return acc;
+  }, {});
+
+  const overrides = (data?.permissions ?? []).filter((p: any) => p.effect);
+
+  const apply = async (code: string, effect: string, reason?: string, expiresOn?: string) => {
+    setBusy(true);
+    try {
+      const r = await api.post<any>(`/masters/users/${person.id}/permissions`,
+        { permissionCode: code, effect, reason, expiresOn });
+      toast(r.message, 'ok');
+      reload(); onChanged();
+    } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(false); setAsking(null); }
+  };
+
+  return (
+    <>
+      <Modal
+        title={`What ${person.full_name} can do`}
+        onClose={onClose}
+        wide
+        footer={<>
+          <button className="btn" onClick={onClose}>Done</button>
+          {overrides.length ? (
+            <button className="btn danger" disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  const r = await api.post<any>(`/masters/users/${person.id}/permissions/reset`, {});
+                  toast(r.message, 'ok'); reload(); onChanged();
+                } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(false); }
+              }}>
+              Put them back on their role
+            </button>
+          ) : null}
+        </>}
+      >
+        <p className="small muted mb">
+          They are on <b>{(data?.user?.roles ?? []).join(', ') || 'no role'}</b>. Everything
+          below follows that role unless you change it here — and anything you
+          change can be put back.
+        </p>
+
+        <div className="search-bar">
+          <input value={q} onChange={(e) => setQ(e.target.value)}
+            placeholder="Search permissions" />
+          <label className="row small" style={{ gap: 6, whiteSpace: 'nowrap' }}>
+            <input type="checkbox" checked={onlyChanged}
+              onChange={(e) => setOnlyChanged(e.target.checked)} />
+            Only what is different from the role
+          </label>
+        </div>
+
+        {loading ? <Loading /> : null}
+        {!loading && !perms.length ? (
+          <p className="small muted">
+            {onlyChanged ? 'Nothing is different from their role.' : 'No permissions match that.'}
+          </p>
+        ) : null}
+
+        <div className="perm-list">
+          {Object.entries(byModule).map(([mod, list]) => (
+            <div key={mod}>
+              <div className="section-head sm"><h3>{mod}</h3><span className="rule" /></div>
+              {(list as any[]).map((p) => (
+                <div className={`perm-row ${p.effect ? 'changed' : ''}`} key={p.code}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <b>{p.description ?? p.code}</b>
+                    <div className="small muted mono">{p.code}</div>
+                    {p.effect ? (
+                      <div className="small">
+                        <Chip tone={p.effect === 'GRANT' ? 'ok' : 'danger'}>
+                          {p.effect === 'GRANT' ? 'given to them' : 'taken away'}
+                        </Chip>{' '}
+                        {p.reason}
+                        {p.expires_on ? ` · until ${date(p.expires_on)}` : ''}
+                        {p.set_by ? ` · by ${p.set_by}` : ''}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="btn-row">
+                    {p.risk_level === 'CRITICAL' ? <Chip tone="danger">critical</Chip> : null}
+                    <Chip tone={p.effective ? 'ok' : 'neutral'}>
+                      {p.effective ? 'can' : 'cannot'}
+                    </Chip>
+                    {p.effect ? (
+                      <button className="btn sm" disabled={busy}
+                        onClick={() => apply(p.code, 'DEFAULT')}>Reset</button>
+                    ) : p.from_role ? (
+                      <button className="btn sm danger" disabled={busy}
+                        onClick={() => setAsking({ code: p.code, effect: 'REVOKE', label: p.description })}>
+                        Take away
+                      </button>
+                    ) : (
+                      <button className="btn sm" disabled={busy}
+                        onClick={() => setAsking({ code: p.code, effect: 'GRANT', label: p.description })}>
+                        Give
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </Modal>
+      {/* After the list, not before it. Two modals share one z-index, so the
+          later one in the DOM is the one on top — rendering the reason dialog
+          first put it behind the permission list, where the button was visible,
+          enabled, and unclickable. */}
+      {asking ? (
+        <ReasonModal spec={asking} busy={busy}
+          onClose={() => setAsking(null)}
+          onGo={(reason, expiresOn) => apply(asking.code, asking.effect, reason, expiresOn)} />
+      ) : null}
+    </>
+  );
+}
+
+function ReasonModal({ spec, busy, onClose, onGo }: {
+  spec: any; busy: boolean; onClose: () => void;
+  onGo: (reason: string, expiresOn?: string) => void;
+}) {
+  const [reason, setReason] = useState('');
+  const [expires, setExpires] = useState('');
+  return (
+    <Modal
+      title={spec.effect === 'GRANT' ? 'Give this permission' : 'Take this permission away'}
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className={`btn ${spec.effect === 'GRANT' ? 'primary' : 'danger'}`}
+          disabled={busy || reason.trim().length < 3}
+          onClick={() => onGo(reason.trim(), expires || undefined)}>
+          {spec.effect === 'GRANT' ? 'Give it' : 'Take it away'}
+        </button>
+      </>}
+    >
+      <p className="small muted mb"><b>{spec.label ?? spec.code}</b></p>
+      <Field label="Why" hint="Read back months later, usually by somebody checking.">
+        <input value={reason} autoFocus onChange={(e) => setReason(e.target.value)}
+          placeholder="Covering Meera while she is on leave" />
+      </Field>
+      {spec.effect === 'GRANT' ? (
+        <Field label="Until (optional)"
+          hint="A permission that outlives its reason is how access creeps.">
+          <input type="date" value={expires} onChange={(e) => setExpires(e.target.value)} />
+        </Field>
+      ) : null}
+    </Modal>
   );
 }

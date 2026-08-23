@@ -164,13 +164,14 @@ a:hover { text-decoration: underline; }
 .grid.c2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .grid.c3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid.c4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.grid.c5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .grid.sidebar-right { grid-template-columns: minmax(0, 1fr) 340px; }
 @media (max-width: 1100px) {
-  .grid.c4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.c4, .grid.c5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .grid.c3, .grid.sidebar-right { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 720px) {
-  .grid.c2, .grid.c4 { grid-template-columns: minmax(0, 1fr); }
+  .grid.c2, .grid.c4, .grid.c5 { grid-template-columns: minmax(0, 1fr); }
   .content { padding: 14px 14px 72px; }
 }
 
@@ -334,6 +335,11 @@ body.nav-lock { overflow: hidden; }
 }
 .section-head:first-child { margin-top: 0; }
 .section-head h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+/* A smaller rule for grouping fields inside a dialog, where an h2-sized
+   heading would compete with the dialog's own title. */
+.section-head.sm { margin: 14px 0 8px; }
+.section-head.sm h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); font-weight: 700; margin: 0; }
 .section-head .rule { flex: 1; height: 1px; background: var(--border); }
 
 /* --- tables ------------------------------------------------------------- */
@@ -776,3 +782,164 @@ label.check input { width: auto; }
 @media (prefers-reduced-motion: reduce) {
   .spinner { animation-duration: 2.4s; }
 }
+
+/* ===========================================================================
+   CATALOGUE — the category tree and the icon picker
+   ======================================================================== */
+.cat-tree { padding: 6px 0; }
+.cat-row, .prod-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px; border-bottom: 1px solid var(--border);
+}
+.cat-row { background: var(--surface-2); font-size: 14.5px; }
+.prod-row { font-size: 13.5px; color: var(--text-2); }
+.cat-row:last-child, .prod-row:last-child { border-bottom: none; }
+.cat-toggle {
+  width: 20px; height: 20px; flex: 0 0 auto; border: 1px solid var(--border-strong);
+  background: var(--surface); border-radius: 5px; cursor: pointer;
+  font-size: 13px; line-height: 1; color: var(--muted);
+}
+.cat-toggle:disabled { opacity: .35; cursor: default; }
+
+.icon-picker { display: flex; flex-wrap: wrap; gap: 7px; }
+.icon-choice {
+  width: 40px; height: 40px; display: grid; place-items: center;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); cursor: pointer; color: var(--text-2);
+}
+.icon-choice:hover { border-color: var(--primary-border); background: var(--primary-soft); }
+.icon-choice.on { border-color: var(--primary); background: var(--primary-soft); color: var(--primary); }
+
+
+/* ---------------------------------------------------------------- unload --
+   Used standing beside a lorry on a tablet, one-handed. Everything here is
+   sized for a thumb, not a mouse. */
+.tile-grid { display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.product-tile { display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  padding: 12px; border: 1.5px solid var(--border); border-radius: var(--r);
+  background: var(--surface); text-align: left; cursor: pointer; min-height: 104px;
+  transition: border-color .12s, background .12s; }
+.product-tile:hover { border-color: var(--border-strong); }
+.product-tile.on { border-color: var(--primary); background: var(--primary-soft);
+  box-shadow: inset 0 0 0 1px var(--primary); }
+.product-tile b { font-size: 14px; }
+.product-tile .small { color: var(--text-2); }
+
+.weigh-readout { font-size: 44px; font-weight: 700; letter-spacing: -.02em;
+  text-align: right; padding: 6px 14px; border: 1.5px solid var(--border);
+  border-radius: var(--r); background: var(--surface-2); font-variant-numeric: tabular-nums; }
+.weigh-readout span { font-size: 16px; font-weight: 600; color: var(--muted); margin-left: 8px; }
+
+.keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.keypad .key { padding: 16px 0; font-size: 20px; font-weight: 600;
+  border: 1.5px solid var(--border); border-radius: var(--r);
+  background: var(--surface); cursor: pointer; }
+.keypad .key:active { background: var(--primary-soft); border-color: var(--primary); }
+
+table.mini { width: 100%; border-collapse: collapse; }
+table.mini td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.mini tr:last-child td { border-bottom: 0; }
+table.mini td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.mini tr.voided { opacity: .5; text-decoration: line-through; }
+
+/* ------------------------------------------------------------ pack bench --
+   Same thumb-sized language as the unload screen: the grade is a tile, the
+   quantity is a keypad. */
+.grade-mark { font-size: 30px; font-weight: 800; line-height: 1.05; letter-spacing: -.02em; }
+.lbl { display: block; font-size: 12px; font-weight: 600; color: var(--text-2);
+  margin: 0 0 4px; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip-row .chip { cursor: pointer; border: 1px solid var(--border-strong); }
+.chip-row .chip.primary { background: var(--primary-soft); color: var(--primary-hover);
+  border-color: var(--primary); }
+
+/* ------------------------------------------------------- warehouse map --
+   A shelf is a box you can point at. Full ones are tinted so an aisle with
+   space in it is visible from across the screen. */
+.loc-section { border: 1px solid var(--border); border-radius: var(--r);
+  padding: 10px 12px; margin-bottom: 10px; background: var(--surface-2); }
+.loc-head { display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 12px; margin-bottom: 8px; }
+.loc-rack { display: flex; gap: 12px; align-items: flex-start; padding: 8px 0;
+  border-top: 1px dashed var(--border); }
+.loc-rack-name { min-width: 120px; }
+.shelf-row { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+.shelf { display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  min-width: 78px; padding: 6px 8px; border: 1px solid var(--border-strong);
+  border-radius: 6px; background: var(--surface); cursor: pointer; }
+.shelf .small { color: var(--muted); }
+.shelf.full { background: var(--ok-soft); border-color: var(--ok-border); }
+.shelf.full .small { color: #0E7490; }
+.shelf:hover { border-color: var(--primary); }
+
+.loc-label { display: flex; gap: 10px; align-items: center; padding: 8px;
+  border: 1px solid #000; border-radius: 4px; background: #fff; color: #000;
+  break-inside: avoid; }
+.loc-label .ll-text { display: flex; flex-direction: column; min-width: 0; }
+.loc-label .ll-text b { font-size: 17px; }
+
+/* --------------------------------------------------- one person's panel --
+   A long list of permissions is unreadable as a table; as rows with the
+   changed ones tinted, the exceptions are what you see first. */
+.perm-list { max-height: 52vh; overflow-y: auto; padding-right: 4px; }
+.perm-row { display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.perm-row:last-child { border-bottom: 0; }
+.perm-row.changed { background: var(--accent-soft); border-radius: 6px;
+  border-bottom-color: transparent; }
+.perm-row b { font-size: 13px; }
+
+/* ----------------------------------------------------------- the price ladder
+   Bought for → running costs → really cost → do not sell below. Read top to
+   bottom it is an argument, not four numbers. */
+.price-ladder { border: 1px solid var(--border); border-radius: var(--r);
+  overflow: hidden; font-size: 13px; }
+.price-ladder > div { display: flex; align-items: baseline; gap: 8px;
+  padding: 7px 12px; border-bottom: 1px solid var(--border); }
+.price-ladder > div:last-child { border-bottom: 0; }
+.price-ladder span { color: var(--text-2); min-width: 118px; }
+.price-ladder b { font-variant-numeric: tabular-nums; }
+.price-ladder em { color: var(--muted); font-size: 11px; font-style: normal;
+  margin-left: auto; text-align: right; }
+.price-ladder .tot { background: var(--surface-2); font-weight: 600; }
+.price-ladder .floor { background: var(--accent-soft); }
+.price-ladder .floor b { color: #B45309; font-size: 15px; }
+
+/* --------------------------------------------------------- performance --
+   One row per product, opening into its own card. Revenue-sorted tables put
+   the loss-makers at the top looking successful, so "after waste" is on the
+   collapsed row and a negative one tints the whole card. */
+.perf-card.bad { border-left: 3px solid var(--danger-border); }
+.perf-head { display: flex; align-items: center; gap: 16px; width: 100%;
+  padding: 12px 14px; background: none; border: 0; cursor: pointer; text-align: left; }
+.perf-head:hover { background: var(--surface-2); }
+.perf-nums { display: flex; flex: 1; flex-wrap: wrap; gap: 18px; justify-content: flex-end; }
+.perf-nums > span { display: flex; flex-direction: column; min-width: 86px;
+  font-variant-numeric: tabular-nums; font-size: 13px; }
+.perf-nums em { font-style: normal; font-size: 10px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--muted); }
+.perf-nums i { font-style: normal; font-size: 11px; color: var(--muted); }
+.perf-body { border-top: 1px solid var(--border); }
+.perf-line { display: flex; align-items: baseline; gap: 8px; padding: 5px 0;
+  font-size: 13px; border-bottom: 1px dashed var(--border); }
+.perf-line span:first-child { flex: 1; color: var(--text-2); min-width: 0; }
+.perf-line em { font-style: normal; color: var(--muted); font-size: 12px;
+  min-width: 74px; text-align: right; }
+.perf-line.tot { border-bottom: 0; font-weight: 600; }
+
+/* ------------------------------------------------------------ attendance --
+   Taken standing on the floor at 8am. One row per person, buttons big enough
+   for a thumb, and anything not yet marked left visibly pale. */
+.att-row { display: flex; align-items: center; gap: 12px; padding: 9px 12px;
+  border-bottom: 1px solid var(--border); }
+.att-row:last-child { border-bottom: 0; }
+.att-row.unmarked { background: var(--accent-soft); }
+.filter-total { display: flex; justify-content: space-between; align-items: baseline;
+  padding: 10px 14px; border-top: 2px solid var(--border-strong);
+  background: var(--surface-2); font-size: 14px; }
+.filter-total b { font-size: 17px; font-variant-numeric: tabular-nums; }
+
+.filter-total .ft-num { display: flex; flex-direction: column; align-items: flex-end; }
+.filter-total .ft-num em { font-style: normal; font-size: 10px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--muted); }

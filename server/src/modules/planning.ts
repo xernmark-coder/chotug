@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { query, withTx } from '../db.js';
+import { query, withTx, type Actor } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
 import { authenticate, staffOnly, requires } from '../platform/auth.js';
 import {
@@ -27,11 +27,18 @@ const inrText = (n: number) =>
  * open orders, min/max and forecast, and produces a ranked buy list. Nothing
  * is committed — the executive reviews and converts what they agree with.
  * ======================================================================== */
-planningRouter.get('/requirement-note', h(async (req) => {
-  const branchId = String(req.query.branchId ?? req.actor.branchId ?? '');
-  if (!branchId) throw ApiError.badRequest('Choose a branch first');
-
-  const rows = await query(req.actor,
+/* ===========================================================================
+ * THE BUY LIST — one implementation, two callers.
+ *
+ * The dashboard's "Running low" panel used to run its own SQL: stock on hand
+ * versus reorder point, and nothing else. That said Mango was low while 558 kg
+ * of it was already on an approved purchase order, and then the buy list this
+ * links to correctly said there was nothing to buy. Two screens disagreeing
+ * about the same question is precisely what domain/index.ts exists to prevent,
+ * so both now read this.
+ * ======================================================================== */
+export async function buyList(actor: Actor, branchId: string) {
+  const rows = await query(actor,
     `SELECT p.id AS product_id, p.sku, p.name, p.name_hi, p.base_uom, p.purchase_uom,
             p.min_stock, p.max_stock, p.reorder_point, p.safety_stock_days,
             p.lead_time_days, p.moq, p.order_multiple, p.default_wastage_pct,
@@ -77,10 +84,10 @@ planningRouter.get('/requirement-note', h(async (req) => {
              ORDER BY o.order_date DESC LIMIT 1) lp ON true
       WHERE p.company_id = $1 AND p.is_active
       ORDER BY p.name`,
-    [req.actor.companyId, branchId]);
+    [actor.companyId, branchId]);
 
-  const serviceLevelZ = Number(await withTx(req.actor, (tx) =>
-    getSetting(tx, req.actor, 'planning.service_level_z', 1.65)));
+  const serviceLevelZ = Number(await withTx(actor, (tx) =>
+    getSetting(tx, actor, 'planning.service_level_z', 1.65)));
 
   const items = rows.map((r: any) => {
     const plan = recommendedQty({
@@ -116,7 +123,7 @@ planningRouter.get('/requirement-note', h(async (req) => {
       currentStock: Number(r.current_stock), availableStock: plan.availableStock,
       reservedQty: Number(r.reserved_qty), openPoQty: Number(r.open_po_qty),
       avgDailySale: Number(r.avg_daily_sale), leadTimeDays: Number(r.lead_time_days ?? 1),
-      minStock: r.min_stock, maxStock: r.max_stock,
+      minStock: r.min_stock, maxStock: r.max_stock, reorderPoint: r.reorder_point,
       advanceOrderQty: Number(r.advance_order_qty),
       lastRate: r.last_rate,
       suggestedQty: plan.suggestedQty, daysOfCover: plan.daysOfCover,
@@ -136,6 +143,12 @@ planningRouter.get('/requirement-note', h(async (req) => {
     needsBuying: items.filter((i) => i.suggestedQty > 0).length,
     items,
   };
+}
+
+planningRouter.get('/requirement-note', h(async (req) => {
+  const branchId = String(req.query.branchId ?? req.actor.branchId ?? '');
+  if (!branchId) throw ApiError.badRequest('Choose a branch first');
+  return buyList(req.actor, branchId);
 }));
 
 /** Per-product deep dive: forecast curve + AI narrative + mandi price signal. */
@@ -222,6 +235,12 @@ planningRouter.post('/requirements', requires('purchase.requirement.create'), h(
       'WAREHOUSE_DEMAND', 'PENDING_ORDER', 'ADVANCE_ORDER', 'SEASONAL', 'AI_FORECAST',
       'SAFETY_STOCK']).default('MANUAL'),
     remarks: z.string().optional(),
+    /* A centre asking for stock is a requirement like any other — the purchase
+     * manager's review queue already exists. It only needed to know which shop
+     * asked, and why in their own words, because "festival on Friday" gets a
+     * different answer from "ran out". */
+    raisedForWarehouseId: z.string().uuid().nullable().optional(),
+    reasoning: z.string().trim().max(500).optional(),
     lines: z.array(RequirementLineIn).min(1, 'Add at least one product'),
   }), req.body);
 
@@ -238,10 +257,12 @@ planningRouter.post('/requirements', requires('purchase.requirement.create'), h(
     const reqNo = await nextDocNo(tx, req.actor, input.branchId, 'REQ');
     const { rows } = await tx.query(
       `INSERT INTO requirements (company_id, branch_id, warehouse_id, req_no, required_date,
-                                 priority, source, remarks, created_by, updated_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9) RETURNING *`,
+                                 priority, source, remarks, raised_for_warehouse_id,
+                                 reasoning, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11) RETURNING *`,
       [req.actor.companyId, input.branchId, input.warehouseId ?? null, reqNo,
-       input.requiredDate, input.priority, input.source, input.remarks ?? null, req.actor.userId]);
+       input.requiredDate, input.priority, input.source, input.remarks ?? null,
+       input.raisedForWarehouseId ?? null, input.reasoning ?? null, req.actor.userId]);
     const requirement = rows[0];
 
     // Duplicate warning (§5): another open requirement for the same product.
@@ -290,11 +311,13 @@ planningRouter.post('/requirements', requires('purchase.requirement.create'), h(
 planningRouter.get('/requirements', h(async (req) =>
   query(req.actor,
     `SELECT r.id, r.req_no, r.req_date, r.required_date, r.priority, r.source, r.status,
-            r.remarks, b.name AS branch_name,
+            r.remarks, r.reasoning, b.name AS branch_name,
+            cw.name AS raised_for_centre,
             (SELECT count(*) FROM requirement_lines l WHERE l.requirement_id = r.id) AS line_count,
             (SELECT COALESCE(SUM(l.final_qty),0) FROM requirement_lines l WHERE l.requirement_id = r.id) AS total_qty,
             u.full_name AS created_by_name
        FROM requirements r
+       LEFT JOIN warehouses cw ON cw.id = r.raised_for_warehouse_id
        JOIN branches b ON b.id = r.branch_id
        LEFT JOIN users u ON u.id = r.created_by
       WHERE r.company_id = $1
@@ -626,6 +649,12 @@ planningRouter.get('/purchase-orders', h(async (req) =>
             o.grand_total, o.is_urgent, o.revision_no,
             s.trade_name AS supplier_name, s.legal_name AS supplier_legal_name,
             b.name AS branch_name,
+            /* Whether the other side has actually agreed to this. A confirmed
+             * order the supplier has declined looks identical to one they are
+             * loading right now unless the buyer can see the answer. */
+            o.supplier_response, o.supplier_responded_at, o.supplier_response_note,
+            pay.request_no AS payment_request_no, pay.status AS payment_status,
+            pay.amount AS payment_amount, pay.paid_amount AS payment_paid,
             pr.received_qty, pr.ordered_qty, pr.fill_pct,
             (SELECT count(*) FROM approvals a
               WHERE a.doc_id = o.id AND a.doc_type='PO' AND a.status='PENDING') AS pending_approvals
@@ -633,6 +662,19 @@ planningRouter.get('/purchase-orders', h(async (req) =>
        JOIN suppliers s ON s.id = o.supplier_id
        JOIN branches  b ON b.id = o.branch_id
        LEFT JOIN v_po_progress pr ON pr.po_id = o.id
+       /* One claim per order, whichever document it hangs off — see
+        * orderPaymentRequest(). A join on source_type='purchase_order' alone
+        * would show "not asked for yet" on an order whose invoice is already
+        * with Finance. */
+       LEFT JOIN LATERAL (
+         SELECT x.request_no, x.status, x.amount, x.paid_amount, x.reject_reason
+           FROM payment_requests x
+          WHERE x.company_id = o.company_id AND x.status <> 'CANCELLED'
+            AND ((x.source_type = 'purchase_order' AND x.source_id = o.id)
+              OR (x.source_type = 'supplier_invoice' AND x.source_id IN (
+                    SELECT id FROM supplier_invoices
+                     WHERE po_id = o.id AND status <> 'CANCELLED')))
+          ORDER BY x.requested_at LIMIT 1) pay ON true
       WHERE o.company_id = $1
         AND ($2 = '' OR o.status = $2)
         AND ($3 = '' OR o.source_type = $3)
@@ -641,7 +683,10 @@ planningRouter.get('/purchase-orders', h(async (req) =>
 
 planningRouter.get('/purchase-orders/:id', h(async (req) => {
   const [po] = await query(req.actor,
-    `SELECT o.*, s.trade_name AS supplier_name, s.legal_name AS supplier_legal_name,
+    `SELECT o.*,
+            pay.request_no AS payment_request_no, pay.status AS payment_status,
+            pay.amount AS payment_amount, pay.paid_amount AS payment_paid,
+            s.trade_name AS supplier_name, s.legal_name AS supplier_legal_name,
             s.source_type AS supplier_source_type, s.phone AS supplier_phone,
             s.trust_score, s.performance_score, b.name AS branch_name,
             u.full_name AS created_by_name, ua.full_name AS approved_by_name
@@ -650,6 +695,19 @@ planningRouter.get('/purchase-orders/:id', h(async (req) => {
        JOIN branches  b ON b.id = o.branch_id
        LEFT JOIN users u  ON u.id  = o.created_by
        LEFT JOIN users ua ON ua.id = o.approved_by
+       /* One claim per order, whichever document it hangs off — see
+        * orderPaymentRequest(). A join on source_type='purchase_order' alone
+        * would show "not asked for yet" on an order whose invoice is already
+        * with Finance. */
+       LEFT JOIN LATERAL (
+         SELECT x.request_no, x.status, x.amount, x.paid_amount, x.reject_reason
+           FROM payment_requests x
+          WHERE x.company_id = o.company_id AND x.status <> 'CANCELLED'
+            AND ((x.source_type = 'purchase_order' AND x.source_id = o.id)
+              OR (x.source_type = 'supplier_invoice' AND x.source_id IN (
+                    SELECT id FROM supplier_invoices
+                     WHERE po_id = o.id AND status <> 'CANCELLED')))
+          ORDER BY x.requested_at LIMIT 1) pay ON true
       WHERE o.id = $1 AND o.company_id = $2`, [req.params.id, req.actor.companyId]);
   if (!po) throw ApiError.notFound('Purchase order not found');
 
@@ -1021,6 +1079,8 @@ planningRouter.get('/expected-arrivals', h(async (req) =>
   query(req.actor,
     `SELECT e.id, e.expected_date, e.window_start, e.window_end, e.status, e.vehicle_hint,
             o.po_no, o.id AS po_id, o.grand_total, o.source_type,
+            e.supplier_invoice_no, e.driver_name, e.driver_phone, e.transporter,
+            e.lr_no, e.eway_bill_no, e.supplier_marked_sent_at, e.supplier_note,
             s.trade_name AS supplier_name, w.name AS warehouse_name,
             (SELECT count(*) FROM po_lines pl WHERE pl.po_id = o.id) AS line_count,
             (e.expected_date < CURRENT_DATE AND e.status = 'EXPECTED') AS overdue

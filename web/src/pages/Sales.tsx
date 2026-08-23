@@ -2,9 +2,11 @@ import React, { useState } from 'react';
 import { api, useAuth, inr, num, date, idempotencyKey } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
+  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
 import { SellPacksModal } from './Packing';
+import { AddCustomerModal } from './Centres';
 import {
   CHART, ChartCard, compact, inrCompact, Meter, StackedStatus,
 } from '../components/charts';
@@ -54,6 +56,42 @@ export function SalesPage() {
 
   const reloadAll = () => { summary.reload(); sugg.reload(); recent.reload(); packs.reload(); };
   const inStockPacks = packs.data ?? [];
+
+  const fPacks = useFilters<any>(inStockPacks, {
+    search: (p: any) => [p.code, p.product_name, p.batch_no, p.group_label].filter(Boolean).join(' '),
+    facets: [
+      { key: 'prod', label: 'product', of: (p: any) => p.product_name },
+      { key: 'grade', label: 'grade', of: (p: any) => p.grade },
+      { key: 'batch', label: 'batch', of: (p: any) => p.batch_no },
+    ],
+    totals: [
+      { label: 'Packs', of: () => 1 },
+      { label: 'Worth', of: (p: any) => Number(p.price) || 0, money: true },
+    ],
+  });
+  const fSugg = useFilters<any>(sugg.data?.suggestions, {
+    search: (x: any) => [x.product_name, x.batch_no, x.grade].filter(Boolean).join(' '),
+    facets: [
+      { key: 'prod', label: 'product', of: (x: any) => x.product_name },
+      { key: 'urg', label: 'urgency', of: (x: any) => x.urgency },
+      { key: 'grade', label: 'grade', of: (x: any) => x.grade },
+    ],
+    totals: [
+      { label: 'On hand', of: (x: any) => Number(x.available_qty) || 0 },
+      { label: 'Money on it', of: (x: any) => Number(x.valueAtRisk) || 0, money: true },
+    ],
+  });
+  const fRecent = useFilters<any>(recent.data, {
+    date: (x: any) => x.issue_date,
+    search: (x: any) => [x.issue_no, x.party_name].filter(Boolean).join(' '),
+    facets: [
+      { key: 'party', label: 'buyer', of: (x: any) => x.party_name },
+    ],
+    totals: [
+      { label: 'Sales', of: () => 1 },
+      { label: 'Value', of: (x: any) => Number(x.total_value) || 0, money: true },
+    ],
+  });
   const chosenPacks = inStockPacks.filter((p: any) => pickedPacks[p.id]);
 
   return (
@@ -115,9 +153,11 @@ export function SalesPage() {
               ) : null}
             </div>
             <div className="card-body tight">
+              <FilterBar f={fPacks} placeholder="Search barcode, product, batch" />
+              <FilterTotals f={fPacks} noun="pack" />
               <DataTable
                 loading={packs.loading}
-                rows={inStockPacks}
+                rows={fPacks.rows}
                 onRowClick={(p: any) =>
                   setPickedPacks((s2) => ({ ...s2, [p.id]: !s2[p.id] }))}
                 cols={[
@@ -136,8 +176,10 @@ export function SalesPage() {
                     <span>{num(p.qty, 2)} <span className="small muted">{p.uom}</span></span> },
                   { key: 'r', head: 'Sells for', num: true, render: (p: any) => <b>{inr(p.price)}</b> },
                 ]}
-                empty={<Empty icon="📦" title="No packs made up yet"
-                  hint="Make packs on the Packing screen and they appear here to sell." />}
+                empty={<Empty icon="📦"
+                  title={fPacks.active > 0 ? 'No pack matches those filters' : 'No packs made up yet'}
+                  hint={fPacks.active > 0 ? 'Clear a filter to widen the search.'
+                    : 'Make packs on the Packing screen and they appear here to sell.'} />}
               />
             </div>
           </div>
@@ -162,9 +204,11 @@ export function SalesPage() {
 
       <div className="card mb">
         <div className="card-body tight">
+          <FilterBar f={fSugg} placeholder="Search product or batch" />
+          <FilterTotals f={fSugg} noun="batch" />
           <DataTable
             loading={sugg.loading}
-            rows={sugg.data?.suggestions ?? []}
+            rows={fSugg.rows}
             rowTone={(s: any) => (s.urgency === 'CRITICAL' ? 'crit' : s.urgency === 'HIGH' ? 'warn' : undefined)}
             cols={[
               {
@@ -217,8 +261,10 @@ export function SalesPage() {
                   : null,
               },
             ]}
-            empty={<Empty icon="👍" title="Nothing is close to expiring"
-              hint="Every batch in the warehouse has room on its shelf life." />}
+            empty={<Empty icon="👍"
+              title={fSugg.active > 0 ? 'No batch matches those filters' : 'Nothing is close to expiring'}
+              hint={fSugg.active > 0 ? 'Clear a filter to widen the search.'
+                : 'Every batch in the warehouse has room on its shelf life.'} />}
           />
         </div>
       </div>
@@ -297,8 +343,10 @@ export function SalesPage() {
           <div className="card">
             <div className="card-head"><h2>Recent sales</h2></div>
             <div className="card-body tight">
+              <FilterBar f={fRecent} placeholder="Search sale or buyer" />
+              <FilterTotals f={fRecent} noun="sale" />
               <DataTable
-                rows={(recent.data ?? []).slice(0, 12)}
+                rows={fRecent.rows}
                 cols={[
                   { key: 'n', head: 'Sale', render: (s: any) => (
                     <div>
@@ -314,7 +362,8 @@ export function SalesPage() {
                     render: (s: any) => inr(s.total_value, 0),
                   }] : []),
                 ]}
-                empty={<Empty icon="🧾" title="No sales recorded yet" />}
+                empty={<Empty icon="🧾" title={fRecent.active > 0
+                  ? 'No sale matches those filters' : 'No sales recorded yet'} />}
               />
             </div>
           </div>
@@ -354,6 +403,15 @@ function SellModal({ row, onClose, onDone }: { row: any; onClose: () => void; on
   const [qty, setQty] = useState(String(row.available_qty ?? ''));
   const [rate, setRate] = useState(row.suggestedRate != null ? String(row.suggestedRate) : '');
   const [party, setParty] = useState('');
+  /* A name typed into a box is not a customer — it is a different spelling
+     every time, and "who buys from us" becomes unanswerable. So the buyer is
+     picked from the list, and adding one is a button beside it rather than a
+     trip to another screen while somebody waits at the counter. */
+  const [customerId, setCustomerId] = useState('');
+  const [addingCustomer, setAddingCustomer] = useState(false);
+  const customers = useApi<any[]>(
+    `/centres/customers/list?warehouseId=${row.warehouse_id ?? ''}`, [row.warehouse_id]);
+  const centres = useApi<any[]>('/centres');
   const [ref, setRef] = useState('');
   const [busy, setBusy] = useState(false);
   const [key] = useState(() => idempotencyKey('sale'));
@@ -365,10 +423,18 @@ function SellModal({ row, onClose, onDone }: { row: any; onClose: () => void; on
   const cost = Number(row.landed_rate ?? 0);
   const over = n > available + 0.001;
 
+  /* Three prices, not one. "Below cost" only counts what this crate was bought
+     for; the floor that actually keeps the business alive includes the wages,
+     the electricity and the cold store, and allows for what gets thrown away. */
+  const overhead = Number(row.overhead_per_kg ?? 0);
+  const trueCost = Number(row.true_cost ?? cost);
+  const minSell = Number(row.min_sell_price ?? 0);
   const revenue = n * r;
   const costOut = n * cost;
   const margin = revenue - costOut;
   const belowCost = r > 0 && r < cost;
+  const belowTrueCost = r > 0 && r >= cost && r < trueCost;
+  const belowMin = r > 0 && minSell > 0 && r >= trueCost && r < minSell;
 
   const post = async () => {
     setBusy(true);
@@ -378,6 +444,7 @@ function SellModal({ row, onClose, onDone }: { row: any; onClose: () => void; on
         warehouseId: row.warehouse_id,
         reason: 'SALE',
         partyName: party || undefined,
+        customerId: customerId || undefined,
         referenceNo: ref || undefined,
         lines: [{ batchId: row.batch_id, qty: n, rate: r }],
       });
@@ -386,7 +453,22 @@ function SellModal({ row, onClose, onDone }: { row: any; onClose: () => void; on
     } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
 
+  const customerModal = addingCustomer ? (
+    <AddCustomerModal
+      centres={centres.data ?? []}
+      defaultCentre={row.warehouse_id}
+      onClose={() => setAddingCustomer(false)}
+      onDone={(m, c) => {
+        setAddingCustomer(false);
+        customers.reload();
+        if (c?.id) { setCustomerId(c.id); setParty(c.name); }
+        toast(m, 'ok');
+      }} />
+  ) : null;
+
   return (
+    <>
+    {customerModal}
     <Modal
       title={`Sell ${row.product_name}`}
       onClose={onClose}
@@ -422,24 +504,61 @@ function SellModal({ row, onClose, onDone }: { row: any; onClose: () => void; on
       </div>
 
       <div className="grid c2">
-        <Field label="Sold to" hint="A name on the sale makes it traceable later.">
-          <input value={party} onChange={(e) => setParty(e.target.value)} placeholder="Buyer name" />
+        <Field label="Sold to" hint="Pick the customer so their history builds up.">
+          <div className="row" style={{ gap: 6 }}>
+            <select style={{ flex: 1 }} value={customerId}
+              onChange={(e) => {
+                setCustomerId(e.target.value);
+                const c = (customers.data ?? []).find((x: any) => x.id === e.target.value);
+                setParty(c?.name ?? '');
+              }}>
+              <option value="">Walk-in — no name</option>
+              {(customers.data ?? []).map((c: any) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}{c.phone ? ` · ${c.phone}` : ''}
+                </option>))}
+            </select>
+            <button className="btn sm" onClick={() => setAddingCustomer(true)}>+ New</button>
+          </div>
         </Field>
         <Field label="Their reference" hint="Challan or order number, if any.">
           <input value={ref} onChange={(e) => setRef(e.target.value)} />
         </Field>
       </div>
 
+      {/* The whole cost of a crate, spelled out, because "it cost 110" and
+          "we cannot sell it under 140" are different sentences and the person
+          at the till needs the second one. */}
+      {trueCost > 0 ? (
+        <div className="price-ladder mb">
+          <div><span>Bought for</span><b>{inr(cost)}</b></div>
+          <div><span>Running costs</span><b>+ {inr(overhead)}</b>
+            <em>wages, power, cold store — per {row.base_uom}</em></div>
+          <div className="tot"><span>Really cost</span><b>{inr(trueCost)}</b></div>
+          {minSell > 0 ? (
+            <div className="floor">
+              <span>Do not sell below</span><b>{inr(minSell)}</b>
+              <em>{num(row.wastage_pct, 1)}% goes to waste · {num(row.margin_pct, 0)}% margin</em>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       {n > 0 && r > 0 ? (
-        <div className={`banner ${belowCost ? 'danger' : margin > 0 ? 'ok' : 'warn'}`}>
+        <div className={`banner ${belowCost || belowTrueCost ? 'danger'
+          : belowMin ? 'warn' : margin > 0 ? 'ok' : 'warn'}`}>
           <span>{belowCost ? '⚠' : margin > 0 ? '✓' : 'ℹ'}</span>
           <div>
             <b>
               {belowCost
-                ? `Below cost — you lose ${inr(Math.abs(margin), 0)} on this sale`
-                : margin > 0
-                  ? `You make ${inr(margin, 0)} on this sale`
-                  : 'You break even on this sale'}
+                ? `Below what it cost — you lose ${inr(Math.abs(margin), 0)} on this sale`
+                : belowTrueCost
+                  ? `Covers the purchase but not the running costs — ${inr(minSell)} is the floor`
+                  : belowMin
+                    ? `Under the minimum of ${inr(minSell)} — thinner margin than intended`
+                    : margin > 0
+                      ? `You make ${inr(margin, 0)} on this sale`
+                      : 'You break even on this sale'}
             </b>
             <div className="small">
               {inr(revenue, 0)} in, {inr(costOut, 0)} of cost out
@@ -455,5 +574,6 @@ function SellModal({ row, onClose, onDone }: { row: any; onClose: () => void; on
         </div>
       ) : null}
     </Modal>
+    </>
   );
 }

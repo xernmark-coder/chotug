@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { api, useAuth, inr, num, date } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
+  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
 
@@ -25,8 +26,52 @@ export function SupplierPortalPage() {
 
   const meSup = useApi<any>('/supplier/me');
   const orders = useApi<any[]>('/supplier/orders');
+  const [sending, setSending] = useState<any>(null);
+  const [responding, setResponding] = useState<any>(null);
+  const [askingFor, setAskingFor] = useState<any>(null);
   const receipts = useApi<any[]>('/supplier/receipts');
   const invoices = useApi<any[]>('/supplier/invoices');
+
+  /* Declared above the loading guard: a hook cannot sit behind an early
+   * return. A supplier with two hundred orders needs these as much as the
+   * buyer does. */
+  const fOrders = useFilters<any>(orders.data, {
+    date: (o: any) => o.order_date,
+    search: (o: any) => [o.po_no, o.branch_name, o.status].filter(Boolean).join(' '),
+    facets: [
+      { key: 'st', label: 'state', of: (o: any) => o.status },
+      { key: 'ans', label: 'answer', of: (o: any) => o.supplier_response },
+      { key: 'br', label: 'branch', of: (o: any) => o.branch_name },
+      { key: 'bill', label: 'billing', of: (o: any) => (o.invoiced ? 'invoiced' : 'not billed') },
+    ],
+    totals: [
+      { label: 'Items', of: (o: any) => Number(o.line_count) || 0 },
+      { label: 'Value', of: (o: any) => Number(o.grand_total) || 0, money: true },
+    ],
+  });
+  const fReceipts = useFilters<any>(receipts.data, {
+    date: (r: any) => r.posting_date,
+    search: (r: any) => [r.grn_no, r.po_no].filter(Boolean).join(' '),
+    facets: [
+      { key: 'b', label: 'billing', of: (r: any) => (r.already_billed ? 'billed' : 'not billed') },
+    ],
+    totals: [
+      { label: 'Deliveries', of: () => 1 },
+      { label: 'Accepted', of: (r: any) =>
+        (r.lines ?? []).reduce((a: number, l: any) => a + Number(l.acceptedQty || 0), 0) },
+    ],
+  });
+  const fInvoices = useFilters<any>(invoices.data, {
+    date: (i: any) => i.invoice_date,
+    search: (i: any) => [i.invoice_no, i.po_no, i.status].filter(Boolean).join(' '),
+    facets: [
+      { key: 'st', label: 'status', of: (i: any) => i.status },
+    ],
+    totals: [
+      { label: 'Billed', of: (i: any) => Number(i.total) || 0, money: true },
+      { label: 'Outstanding', of: (i: any) => Number(i.balance ?? 0), money: true },
+    ],
+  });
 
   if (meSup.loading) return <Layout title="Supplier portal"><Loading /></Layout>;
   if (meSup.error) {
@@ -41,6 +86,12 @@ export function SupplierPortalPage() {
   const open = (orders.data ?? []).filter((o: any) =>
     ['CONFIRMED', 'APPROVED', 'PART_RECEIVED'].includes(o.status));
   const unbilled = (receipts.data ?? []).filter((r: any) => !r.already_billed);
+  /* The order the buyer has placed but nobody has answered. This is the most
+   * urgent thing on the whole portal: until it is answered the buyer is
+   * planning against a promise that was never made. */
+  const toAnswer = (orders.data ?? []).filter(
+    (o: any) => o.placed && o.supplier_response === 'PENDING'
+      && ['CONFIRMED'].includes(o.status));
   const outstanding = (invoices.data ?? [])
     .reduce((a: number, i: any) => a + Number(i.balance ?? 0), 0);
   const held = (invoices.data ?? []).filter((i: any) => ['HOLD', 'MISMATCH'].includes(i.status));
@@ -50,7 +101,10 @@ export function SupplierPortalPage() {
       title={s.trade_name ?? s.legal_name}
       subtitle={`Supplying ${s.buyer_name} · ${s.payment_terms_days} day terms`}
     >
-      <div className="grid c4 mb">
+      <div className="grid c5 mb">
+        <Kpi label="Waiting for your answer" value={num(toAnswer.length, 0)}
+          tone={toAnswer.length ? 'crit' : 'good'}
+          foot={toAnswer.length ? 'accept or decline these' : 'nothing to answer'} />
         <Kpi label="Open orders" value={num(open.length, 0)} foot="confirmed with you" />
         <Kpi label="Delivered, not billed" value={num(unbilled.length, 0)}
           tone={unbilled.length ? 'warn' : undefined}
@@ -71,10 +125,13 @@ export function SupplierPortalPage() {
       </div>
 
       {tab === 'orders' ? (
+        <>
+        <FilterBar f={fOrders} placeholder="Search order number" />
+        <FilterTotals f={fOrders} noun="order" />
         <div className="card"><div className="card-body tight">
           <DataTable
             loading={orders.loading}
-            rows={orders.data ?? []}
+            rows={fOrders.rows}
             cols={[
               { key: 'n', head: 'Order', render: (o: any) => (
                 <div><b className="mono">{o.po_no}</b>
@@ -83,16 +140,31 @@ export function SupplierPortalPage() {
               { key: 'e', head: 'Wanted by', render: (o: any) => date(o.expected_date) },
               { key: 'l', head: 'Items', num: true, render: (o: any) => o.line_count },
               { key: 'v', head: 'Value', num: true, render: (o: any) => inr(o.grand_total, 0) },
-              { key: 's', head: 'Status', render: (o: any) => <Chip value={o.status} /> },
+              /* Their words, not our workflow's. A supplier does not care that
+                 an order is "PART_RECEIVED"; they care whether it is theirs to
+                 act on, whether they have sent it, and whether it arrived. */
+              { key: 's', head: 'Where it stands', render: (o: any) => <OrderState o={o} /> },
+              /* One button: whatever this order needs from them next. A
+                 supplier should never have to work out which of four actions
+                 applies — the order already knows. */
+              { key: 'x', head: '', width: 170, render: (o: any) => (
+                <OrderAction o={o}
+                  onRespond={() => setResponding(o)}
+                  onAsk={() => setAskingFor(o)}
+                  onSend={() => setSending(o)} />
+              ) },
               { key: 'b', head: 'Billed', render: (o: any) => o.invoiced
                 ? <Chip tone="ok">invoiced</Chip>
-                : Number(o.receipts) > 0 ? <Chip tone="warn">delivered</Chip>
+                : Number(o.receipts) > 0 ? <Chip tone="warn">bill it</Chip>
                 : <span className="muted small">—</span> },
             ]}
-            empty={<Empty icon="📄" title="No orders yet"
-              hint="Orders appear here once they are confirmed with you." />}
+            empty={<Empty icon="📄"
+              title={fOrders.active > 0 ? 'No order matches those filters' : 'No orders yet'}
+              hint={fOrders.active > 0 ? 'Clear a filter to widen the search.'
+                : 'Orders appear here once they are confirmed with you.'} />}
           />
         </div></div>
+        </>
       ) : null}
 
       {tab === 'bill' ? (
@@ -104,10 +176,12 @@ export function SupplierPortalPage() {
               are what the warehouse booked in; you set the rate.
             </div>
           </div>
+          <FilterBar f={fReceipts} placeholder="Search delivery or order number" />
+          <FilterTotals f={fReceipts} noun="delivery" />
           <div className="card"><div className="card-body tight">
             <DataTable
               loading={receipts.loading}
-              rows={receipts.data ?? []}
+              rows={fReceipts.rows}
               rowTone={(r: any) => (r.already_billed ? undefined : 'warn')}
               cols={[
                 { key: 'g', head: 'Delivery', render: (r: any) => (
@@ -123,17 +197,21 @@ export function SupplierPortalPage() {
                   <button className="btn sm primary" onClick={() => setBilling(r)}>File invoice</button>
                 ) },
               ]}
-              empty={<Empty icon="✅" title="Nothing waiting to be billed" />}
+              empty={<Empty icon="✅" title={fReceipts.active > 0
+                ? 'Nothing matches those filters' : 'Nothing waiting to be billed'} />}
             />
           </div></div>
         </>
       ) : null}
 
       {tab === 'invoices' ? (
+        <>
+        <FilterBar f={fInvoices} placeholder="Search invoice or order number" />
+        <FilterTotals f={fInvoices} noun="invoice" />
         <div className="card"><div className="card-body tight">
           <DataTable
             loading={invoices.loading}
-            rows={invoices.data ?? []}
+            rows={fInvoices.rows}
             rowTone={(i: any) => (['HOLD', 'MISMATCH'].includes(i.status) ? 'crit' : undefined)}
             cols={[
               { key: 'n', head: 'Invoice', render: (i: any) => (
@@ -157,14 +235,30 @@ export function SupplierPortalPage() {
                     </Chip>))}</div>
                 : <span className="muted small">—</span> },
             ]}
-            empty={<Empty icon="🧾" title="You have not filed any invoices yet" />}
+            empty={<Empty icon="🧾" title={fInvoices.active > 0
+              ? 'No invoice matches those filters'
+              : 'You have not filed any invoices yet'} />}
           />
         </div></div>
+        </>
       ) : null}
 
       {billing ? (
         <FileInvoiceModal receipt={billing} onClose={() => setBilling(null)}
           onDone={() => { setBilling(null); receipts.reload(); invoices.reload(); setTab('invoices'); }} />
+      ) : null}
+
+      {responding ? (
+        <RespondModal order={responding} onClose={() => setResponding(null)}
+          onDone={() => { setResponding(null); orders.reload(); }} />
+      ) : null}
+      {askingFor ? (
+        <AskForPaymentModal order={askingFor} onClose={() => setAskingFor(null)}
+          onDone={() => { setAskingFor(null); orders.reload(); }} />
+      ) : null}
+      {sending ? (
+        <MarkSentModal order={sending} onClose={() => setSending(null)}
+          onDone={() => { setSending(null); orders.reload(); }} />
       ) : null}
     </Layout>
   );
@@ -301,6 +395,308 @@ function FileInvoiceModal({ receipt, onClose, onDone }: {
           </div>
         </div>
       </div>
+    </Modal>
+  );
+}
+
+
+/* ---------------------------------------------------------------------------
+ * "It has left." Two fields, both of which the supplier already knows, and a
+ * date we pre-fill from the order so the common case is one tap.
+ * ------------------------------------------------------------------------ */
+function MarkSentModal({ order, onClose, onDone }: {
+  order: any; onClose: () => void; onDone: () => void;
+}) {
+  const toast = useToast();
+  const [vehicle, setVehicle] = useState(order.vehicle_hint ?? '');
+  const [when, setWhen] = useState(String(order.arrival_date ?? order.expected_date ?? '').slice(0, 10));
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  return (
+    <Modal
+      title={`Send ${order.po_no}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn primary" disabled={busy} onClick={async () => {
+            setBusy(true); setError(null);
+            try {
+              const r = await api.post<any>(`/supplier/orders/${order.id}/dispatch`, {
+                vehicleReg: vehicle.trim() || undefined,
+                expectedDate: when || undefined,
+                note: note.trim() || undefined,
+              });
+              toast(r.message, 'ok');
+              onDone();
+            } catch (e: any) { setError(e); } finally { setBusy(false); }
+          }}>
+            {busy ? 'Telling them…' : 'It has left'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBanner error={error} />
+      <p className="small muted mb">
+        This tells the gate to expect you. They see the vehicle number at the
+        barrier, so the load is checked in against this rather than held up.
+      </p>
+      <div className="grid c2">
+        <Field label="Vehicle number" hint="As painted on the lorry.">
+          <input value={vehicle} onChange={(e) => setVehicle(e.target.value.toUpperCase())}
+            placeholder="MH12AB1234" />
+        </Field>
+        <Field label="Arriving on">
+          <input type="date" value={when} onChange={(e) => setWhen(e.target.value)} />
+        </Field>
+      </div>
+      <Field label="Anything to tell them? (optional)">
+        <input value={note} onChange={(e) => setNote(e.target.value)}
+          placeholder="Leaving after 6pm, driver will call" />
+      </Field>
+    </Modal>
+  );
+}
+
+/* ===========================================================================
+ * THE CONVERSATION AROUND ONE ORDER
+ *
+ *   we place it  →  they accept  →  they ask for the money
+ *                →  Finance pays →  they send it  →  it arrives
+ *
+ * Both components below read the same order object and agree on which step it
+ * is at, so the label and the button can never contradict each other.
+ * ======================================================================== */
+
+function paymentStage(o: any) {
+  if (!o.payment_request_no) return 'none';
+  if (o.payment_status === 'PAID') return 'paid';
+  if (o.payment_status === 'REJECTED') return 'refused';
+  return 'waiting';
+}
+
+function OrderState({ o }: { o: any }) {
+  if (!o.placed) return <Chip tone="neutral">being placed</Chip>;
+  if (Number(o.receipts) > 0) return <Chip tone="ok">delivered</Chip>;
+  if (o.supplier_response === 'DECLINED') {
+    return <Chip tone="danger">you declined{o.supplier_response_note ? ` — ${o.supplier_response_note}` : ''}</Chip>;
+  }
+  if (o.supplier_response !== 'ACCEPTED') return <Chip tone="danger">answer this</Chip>;
+  if (o.supplier_marked_sent_at) return <Chip tone="primary">on the way</Chip>;
+
+  const stage = paymentStage(o);
+  if (stage === 'refused') {
+    return <Chip tone="danger">payment turned down — {o.payment_reject_reason}</Chip>;
+  }
+  if (stage === 'waiting') {
+    const paid = Number(o.payment_paid ?? 0);
+    return (
+      <Chip tone="warn">
+        {paid > 0
+          ? `part paid — ${inr(paid, 0)} of ${inr(o.payment_amount, 0)}`
+          : 'waiting for payment'}
+      </Chip>
+    );
+  }
+  return <Chip tone="warn">{stage === 'paid' ? 'paid — send it' : 'to send'}</Chip>;
+}
+
+function OrderAction({ o, onRespond, onAsk, onSend }: {
+  o: any; onRespond: () => void; onAsk: () => void; onSend: () => void;
+}) {
+  if (!o.placed) return <span className="small muted">not yet placed</span>;
+  if (Number(o.receipts) > 0) return <span className="small muted">received</span>;
+  if (o.supplier_response === 'DECLINED') return <span className="small muted">declined</span>;
+
+  if (o.supplier_response !== 'ACCEPTED') {
+    return <button className="btn sm primary" onClick={onRespond}>Accept or decline</button>;
+  }
+  if (o.supplier_marked_sent_at) {
+    return <button className="btn sm" onClick={onSend}>Update</button>;
+  }
+
+  const stage = paymentStage(o);
+  if (stage === 'none') {
+    return (
+      <div className="btn-row">
+        <button className="btn sm primary" onClick={onAsk}>Ask for payment</button>
+        <button className="btn sm" onClick={onSend}>Send</button>
+      </div>
+    );
+  }
+  if (stage === 'paid') return <button className="btn sm primary" onClick={onSend}>Mark as sent</button>;
+  if (stage === 'refused') return <span className="small muted">speak to the buyer</span>;
+  return <span className="small muted">with Finance</span>;
+}
+
+function RespondModal({ order, onClose, onDone }: {
+  order: any; onClose: () => void; onDone: () => void;
+}) {
+  const toast = useToast();
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  /* Accepting is also when they know their invoice number and which lorry it
+   * is going on. Collecting it here means the gate types one number instead of
+   * eight fields with a driver waiting in the rain. All optional — a farmer
+   * accepting on a phone at 5am has neither to hand. */
+  const [invoiceNo, setInvoiceNo] = useState('');
+  const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().slice(0, 10));
+  const [invoiceTotal, setInvoiceTotal] = useState(String(order.grand_total));
+  const [vehicleReg, setVehicleReg] = useState('');
+  const [driverName, setDriverName] = useState('');
+  const [driverPhone, setDriverPhone] = useState('');
+  const [transporter, setTransporter] = useState('');
+  const [lrNo, setLrNo] = useState('');
+
+  const send = async (decision: 'ACCEPT' | 'DECLINE') => {
+    setBusy(true); setError(null);
+    try {
+      const r = await api.post<any>(`/supplier/orders/${order.id}/respond`, {
+        decision,
+        note: note.trim() || undefined,
+        ...(decision === 'ACCEPT' ? {
+          invoiceNo: invoiceNo.trim() || undefined,
+          invoiceDate: invoiceNo.trim() ? invoiceDate : undefined,
+          invoiceTotal: invoiceNo.trim() ? Number(invoiceTotal) : undefined,
+          vehicleReg: vehicleReg.trim() || undefined,
+          driverName: driverName.trim() || undefined,
+          driverPhone: driverPhone.trim() || undefined,
+          transporter: transporter.trim() || undefined,
+          lrNo: lrNo.trim() || undefined,
+        } : {}),
+      });
+      toast(r.message, decision === 'ACCEPT' ? 'ok' : 'info');
+      onDone();
+    } catch (e: any) { setError(e); } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal
+      title={`${order.po_no} — can you supply this?`}
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Not now</button>
+        <button className="btn danger" disabled={busy || !note.trim()}
+          onClick={() => send('DECLINE')}>Cannot supply</button>
+        <button className="btn primary" disabled={busy}
+          onClick={() => send('ACCEPT')}>Yes, I accept</button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+      <dl className="kv mb">
+        <dt>Wanted by</dt><dd>{date(order.expected_date)}</dd>
+        <dt>Items</dt><dd>{order.line_count}</dd>
+        <dt>Order value</dt><dd><b>{inr(order.grand_total)}</b></dd>
+        <dt>Deliver to</dt><dd>{order.branch_name}</dd>
+      </dl>
+      <p className="small muted mb">
+        Accepting tells the buyer the load is coming, and lets you ask for the
+        money. If you cannot supply it, say so now — while there is still time
+        for them to buy it elsewhere.
+      </p>
+
+      <div className="section-head sm"><h3>Your invoice</h3><span className="rule" /></div>
+      <div className="grid c3">
+        <Field label="Invoice number"><input value={invoiceNo}
+          onChange={(e) => setInvoiceNo(e.target.value)} placeholder="SAH/26-27/118" /></Field>
+        <Field label="Invoice date"><input type="date" value={invoiceDate}
+          disabled={!invoiceNo.trim()} onChange={(e) => setInvoiceDate(e.target.value)} /></Field>
+        <Field label="Invoice total (₹)"><input type="number" step="0.01" value={invoiceTotal}
+          disabled={!invoiceNo.trim()} onChange={(e) => setInvoiceTotal(e.target.value)} /></Field>
+      </div>
+
+      <div className="section-head sm"><h3>The vehicle</h3><span className="rule" /></div>
+      <p className="small muted mb">
+        Give these and the gate will find the lorry by your invoice number — the
+        driver will not be kept waiting while somebody types them in again.
+      </p>
+      <div className="grid c2">
+        <Field label="Vehicle number"><input value={vehicleReg}
+          onChange={(e) => setVehicleReg(e.target.value.toUpperCase())}
+          placeholder="MH14CD5678" /></Field>
+        <Field label="Transporter"><input value={transporter}
+          onChange={(e) => setTransporter(e.target.value)} placeholder="Pawar Roadlines" /></Field>
+      </div>
+      <div className="grid c3">
+        <Field label="Driver"><input value={driverName}
+          onChange={(e) => setDriverName(e.target.value)} placeholder="Balu Pawar" /></Field>
+        <Field label="Driver's phone"><input value={driverPhone}
+          onChange={(e) => setDriverPhone(e.target.value)} placeholder="98220 11223" /></Field>
+        <Field label="LR number"><input value={lrNo}
+          onChange={(e) => setLrNo(e.target.value)} placeholder="LR-8891" /></Field>
+      </div>
+
+      <div className="section-head sm"><h3>Message to the buyer</h3><span className="rule" /></div>
+      <Field label="" hint="Required if you cannot supply it. Say why, and when you could.">
+        <input value={note} onChange={(e) => setNote(e.target.value)}
+          placeholder="Rain damage — can supply 100 kg next week" />
+      </Field>
+    </Modal>
+  );
+}
+
+function AskForPaymentModal({ order, onClose, onDone }: {
+  order: any; onClose: () => void; onDone: () => void;
+}) {
+  const toast = useToast();
+  const [amount, setAmount] = useState(String(order.grand_total));
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+  const part = Number(amount) > 0 && Number(amount) < Number(order.grand_total) - 0.01;
+
+  return (
+    <Modal
+      title={`Ask for payment — ${order.po_no}`}
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary"
+          disabled={busy || !Number(amount) || Number(amount) > Number(order.grand_total) + 0.01}
+          onClick={async () => {
+            setBusy(true); setError(null);
+            try {
+              const r = await api.post<any>(`/supplier/orders/${order.id}/request-payment`,
+                { amount: Number(amount), note: note.trim() || undefined });
+              toast(r.message, 'ok');
+              onDone();
+            } catch (e: any) { setError(e); } finally { setBusy(false); }
+          }}>
+          Send to Finance
+        </button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+      <p className="small muted mb">
+        This goes straight to the buyer's Finance desk. They check it and pay —
+        and once it is paid you can send the load.
+      </p>
+      <dl className="kv mb">
+        <dt>Order value</dt><dd><b>{inr(order.grand_total)}</b></dd>
+        <dt>Wanted by</dt><dd>{date(order.expected_date)}</dd>
+      </dl>
+      <Field label="How much are you asking for (₹)"
+        hint="You can ask for part of it now and bill the rest after delivery.">
+        <input type="number" step="0.01" value={amount} autoFocus
+          onChange={(e) => setAmount(e.target.value)} />
+      </Field>
+      <Field label="Anything they should know">
+        <input value={note} onChange={(e) => setNote(e.target.value)}
+          placeholder="Advance needed before loading" />
+      </Field>
+      {part ? (
+        <div className="banner info">
+          <span><Icon name="info" size={16} /></span>
+          <div className="small">
+            You are asking for <b>{inr(Number(amount), 0)}</b> of {inr(order.grand_total, 0)}.
+            You can only ask once per order, so include everything you need up front.
+          </div>
+        </div>
+      ) : null}
     </Modal>
   );
 }

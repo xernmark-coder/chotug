@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api, useAuth, idempotencyKey, inr, num, date, dateTime, pctText } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, useApi, useToast,
+  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
 
@@ -11,12 +12,33 @@ export function GrnListPage() {
   const nav = useNavigate();
   const { data, loading, error } = useApi<any[]>('/receiving/grns');
 
+  const f = useFilters<any>(data, {
+    date: (g: any) => g.posting_date,
+    search: (g: any) => [g.grn_no, g.supplier_name, g.po_no, g.vehicle_reg_captured, g.gate_no]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'sup', label: 'supplier', of: (g: any) => g.supplier_name },
+      { key: 'st', label: 'status', of: (g: any) => g.status },
+      { key: 'veh', label: 'vehicle', of: (g: any) => g.vehicle_reg_captured },
+      { key: 'lc', label: 'costing', of: (g: any) =>
+        (Number(g.has_landing_cost) > 0 ? 'computed' : 'pending') },
+    ],
+    totals: [
+      { label: 'Accepted', of: (g: any) => Number(g.total_accepted_qty) || 0 },
+      { label: 'Rejected', of: (g: any) => Number(g.total_rejected_qty) || 0 },
+      { label: 'Net kg', of: (g: any) => Number(g.total_net_weight_kg) || 0, decimals: 1 },
+      { label: 'Value', of: (g: any) => Number(g.total_value) || 0, money: true },
+    ],
+  });
+
   return (
     <Layout title="Goods receipts" subtitle="Everything that has entered stock">
       <ErrorBanner error={error} />
+      <FilterBar f={f} placeholder="Search receipt, supplier, order, vehicle" />
+      <FilterTotals f={f} noun="receipt" />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           onRowClick={(g: any) => nav(`/grns/${g.id}`)}
           rowTone={(g: any) => (g.status === 'REVERSED' ? 'crit'
             : Number(g.total_rejected_qty) > 0 ? 'warn' : undefined)}
@@ -39,7 +61,8 @@ export function GrnListPage() {
               Number(g.has_landing_cost) > 0 ? <Chip tone="ok">computed</Chip> : <Chip tone="warn">pending</Chip> },
             { key: 'st', head: 'Status', render: (g: any) => <Chip value={g.status} /> },
           ]}
-          empty={<Empty icon="📥" title="No goods receipts yet" />}
+          empty={<Empty icon="📥" title={f.active > 0
+            ? 'No receipt matches those filters' : 'No goods receipts yet'} />}
         />
       </div></div>
     </Layout>
@@ -337,6 +360,20 @@ export function PutawayPage() {
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
 
+  const f = useFilters<any>(data, {
+    search: (t: any) => [t.product_name, t.sku, t.batch_no, t.suggested_zone_code,
+      t.suggested_rack_code, t.suggested_bin_code].filter(Boolean).join(' '),
+    facets: [
+      { key: 'p', label: 'product', of: (t: any) => t.product_name },
+      { key: 'z', label: 'zone', of: (t: any) => t.suggested_zone_code },
+      { key: 'st', label: 'storage', of: (t: any) => t.storage_type },
+    ],
+    totals: [
+      { label: 'Crates', of: (t: any) => Number(t.qty) || 0 },
+      { label: 'Weight kg', of: (t: any) => Number(t.weight_kg) || 0, decimals: 1 },
+    ],
+  });
+
   const confirm = async () => {
     setBusy(true);
     try {
@@ -355,9 +392,11 @@ export function PutawayPage() {
     <Layout title="Put-away" subtitle="Move received stock to its bin" touch
       actions={<button className="btn sm" onClick={reload}>Refresh</button>}>
       <ErrorBanner error={error} />
+      <FilterBar f={f} placeholder="Search product, batch, bin" />
+      <FilterTotals f={f} noun="task" />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           onRowClick={(t: any) => { setTask(t); setBinId(t.suggested_bin_id ?? ''); }}
           cols={[
             { key: 'p', head: 'Product', render: (t: any) => (
@@ -376,7 +415,8 @@ export function PutawayPage() {
             ) },
             { key: 'a', head: '', width: 110, render: () => <span className="btn sm primary">Confirm</span> },
           ]}
-          empty={<Empty icon="🏷️" title="Nothing waiting to be put away" />}
+          empty={<Empty icon="🏷️" title={f.active > 0
+            ? 'Nothing matches those filters' : 'Nothing waiting to be put away'} />}
         />
       </div></div>
 
@@ -431,6 +471,45 @@ export function StockPage() {
   const { data: issues, reload: reloadIssues } = useApi<any[]>(
     `/inventory/issues?warehouseId=${warehouseId ?? ''}`, [warehouseId]);
 
+  const f = useFilters<any>(data, {
+    search: (x: any) => [x.product_name, x.sku, x.batch_no, x.grade].filter(Boolean).join(' '),
+    facets: [
+      { key: 'p', label: 'product', of: (x: any) => x.product_name },
+      { key: 'g', label: 'grade', of: (x: any) => x.grade },
+      { key: 's', label: 'status', of: (x: any) => x.status },
+      /* Not a column on the row — a question the warehouse asks daily and
+       * could not previously answer without reading every line. */
+      { key: 'exp', label: 'shelf life', of: (x: any) =>
+        x.days_to_expiry == null ? null
+          : x.days_to_expiry <= 1 ? 'goes today'
+          : x.days_to_expiry <= 3 ? 'this week' : 'plenty of time' },
+    ],
+    totals: [
+      { label: 'On hand', of: (x: any) => Number(x.qty) || 0 },
+      { label: 'Available', of: (x: any) => Number(x.available_qty) || 0 },
+      { label: 'Weight kg', of: (x: any) => Number(x.weight_kg) || 0, decimals: 1 },
+      { label: 'Worth', of: (x: any) =>
+        (Number(x.qty) || 0) * (Number(x.landed_rate) || 0), money: true },
+    ],
+  });
+  const fOut = useFilters<any>(issues, {
+    date: (r: any) => r.issue_date,
+    search: (r: any) => [r.issue_no, r.party_name, r.reference_no, r.note, r.posted_by_name,
+      ...(r.lines ?? []).map((l: any) => `${l.productName} ${l.batchNo}`)].filter(Boolean).join(' '),
+    facets: [
+      { key: 'why', label: 'reason', of: (r: any) => r.reason },
+      { key: 'to', label: 'destination', of: (r: any) => r.party_name },
+      { key: 'by', label: 'posted by', of: (r: any) => r.posted_by_name },
+      { key: 'st', label: 'state', of: (r: any) =>
+        (r.status === 'CANCELLED' ? 'cancelled' : 'posted') },
+    ],
+    totals: [
+      { label: 'Issues', of: () => 1 },
+      { label: 'Quantity', of: (r: any) => Number(r.total_qty) || 0, decimals: 1 },
+      { label: 'Value', of: (r: any) => Number(r.total_value) || 0, money: true },
+    ],
+  });
+
   const lookup = async () => {
     if (!code) return;
     try {
@@ -449,7 +528,7 @@ export function StockPage() {
           Issued out{issues?.length ? ` (${issues.length})` : ''}
         </button>
       </div>
-      {tab === 'out' ? <IssuedOutTable rows={issues ?? []} /> : <>
+      {tab === 'out' ? <IssuedOutTable f={fOut} /> : <>
       <div className="search-bar">
         <input placeholder="Scan or type a label code to trace…" value={code}
           onChange={(e) => setCode(e.target.value)}
@@ -457,9 +536,11 @@ export function StockPage() {
         <button className="btn" onClick={lookup}>Trace</button>
       </div>
 
+      <FilterBar f={f} placeholder="Search product, batch, grade" />
+      <FilterTotals f={f} noun="batch" />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           rowTone={(s: any) => (s.days_to_expiry != null && s.days_to_expiry <= 1 ? 'crit'
             : s.days_to_expiry != null && s.days_to_expiry <= 3 ? 'warn' : undefined)}
           cols={[
@@ -488,7 +569,8 @@ export function StockPage() {
                 </button>),
             }] : []),
           ]}
-          empty={<Empty icon="🧺" title="No stock on hand" />}
+          empty={<Empty icon="🧺" title={f.active > 0
+            ? 'No batch matches those filters' : 'No stock on hand'} />}
         />
       </div></div>
       </>}
@@ -527,10 +609,12 @@ export function StockPage() {
  * could only ever see what arrived, never what left — so the balance was the
  * only evidence a crate had gone, and it carried no reason and no name.
  * ======================================================================== */
-function IssuedOutTable({ rows }: { rows: any[] }) {
+function IssuedOutTable({ f }: { f: ReturnType<typeof useFilters<any>> }) {
   return (
     <div className="card"><div className="card-body tight">
-      <DataTable rows={rows} cols={[
+      <FilterBar f={f} placeholder="Search issue, destination, product" />
+      <FilterTotals f={f} noun="issue" />
+      <DataTable rows={f.rows} cols={[
         { key: 'n', head: 'Issue', render: (r: any) => (
           <div><b className="mono">{r.issue_no}</b>
             <div className="small muted">{date(r.issue_date)}</div></div>) },
@@ -557,8 +641,11 @@ function IssuedOutTable({ rows }: { rows: any[] }) {
           r.status === 'CANCELLED' ? <Chip tone="neutral">cancelled</Chip> : null },
       ]} rowTone={(r: any) => (r.status !== 'CANCELLED'
         && ['WASTAGE', 'ADJUSTMENT'].includes(r.reason) ? 'warn' : undefined)}
-        empty={<Empty icon="📤" title="Nothing has left the warehouse yet"
-          hint="Sales, transfers, wastage and consumption all appear here." />} />
+        empty={<Empty icon="📤"
+          title={f.active > 0 ? 'Nothing matches those filters'
+            : 'Nothing has left the warehouse yet'}
+          hint={f.active > 0 ? 'Clear a filter to widen the search.'
+            : 'Sales, transfers, wastage and consumption all appear here.'} />} />
     </div></div>
   );
 }

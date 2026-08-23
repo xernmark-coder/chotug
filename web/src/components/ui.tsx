@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { api, useAuth } from '../lib/api';
+import { api, useAuth, inr, num } from '../lib/api';
 import { Icon } from './icons';
 
 /* ------------------------------------------------------------- toasts ---- */
@@ -406,6 +406,8 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         { to: '/gate', label: 'Gate & Receiving', icon: 'gate', perms: ['receiving.gate.create', 'receiving.weighment.create', 'quality.inspection.create', 'receiving.grn.submit'] },
         { to: '/grns', label: 'Goods Receipts', icon: 'inbox', perms: ['receiving.grn.create', 'receiving.grn.submit'] },
         { to: '/putaway', label: 'Put-away', icon: 'shelf', perms: ['receiving.putaway.confirm'] },
+        { to: '/warehouse-map', label: 'Warehouse Map', icon: 'shelf',
+          perms: ['master.location.manage', 'inventory.pack.store'] },
         { to: '/stock', label: 'Stock & Batches', icon: 'crates',
           perms: ['receiving.grn.create', 'receiving.putaway.confirm', 'inventory.stock.issue', 'reports.purchase.view'] },
         // Selling is where stock stops being cost and becomes revenue, so it
@@ -418,8 +420,23 @@ export function Layout({ children, title, subtitle, actions, touch }: {
       ],
     },
     {
+      label: 'Sell',
+      items: [
+        { to: '/centres', label: 'Centres', icon: 'home',
+          perms: ['centre.performance.view', 'centre.day.close', 'centre.stock.receive'] },
+        { to: '/customers', label: 'Customers', icon: 'people',
+          perms: ['master.customer.manage'] },
+      ],
+    },
+    {
       label: 'Money',
       items: [
+        /* The desk comes first: it is the one screen where money actually
+         * moves, and the client asked for Finance to be the centre of the
+         * business rather than a report at the end of it. */
+        { to: '/finance', label: can('finance.expense.view') ? 'Finance Desk' : 'Money Requests',
+          icon: 'coins',
+          perms: ['finance.request.create', 'finance.request.verify', 'finance.payment.make', 'finance.receipt.record'] },
         { to: '/invoices', label: 'Invoices & Match', icon: 'invoice', perms: ['finance.invoice.create', 'finance.invoice.match'] },
         { to: '/payments', label: 'Payment Status', icon: 'card', perms: ['finance.payment.view'] },
         { to: '/suppliers', label: 'Suppliers', icon: 'handshake',
@@ -429,9 +446,17 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     {
       label: 'Insight',
       items: [
-        { to: '/reports', label: 'Reports', icon: 'chart', perms: ['reports.purchase.view'] },
+        { to: '/audit', label: 'Audit', icon: 'clipboard',
+          perms: ['audit.count.record', 'audit.report.view', 'audit.task.raise'] },
+        { to: '/performance', label: 'Product Performance', icon: 'chart',
+          perms: ['reports.purchase.view'] },
+        { to: '/reports', label: 'Reports', icon: 'doc', perms: ['reports.purchase.view'] },
         { to: '/ai', label: 'AI Centre', icon: 'sparkle',
           perms: ['ai.feature.manage', 'ai.suggestion.accept'] },
+        { to: '/catalogue', label: 'Catalogue', icon: 'basket',
+          perms: ['master.product.manage', 'master.category.manage', 'reports.purchase.view'] },
+        { to: '/hr', label: 'Workers & Wages', icon: 'user',
+          perms: ['hr.report.view', 'hr.attendance.mark', 'hr.worker.manage'] },
         { to: '/people', label: 'People & Access', icon: 'people', perms: ['admin.rbac.manage'] },
         { to: '/settings', label: 'Settings', icon: 'gear', perms: ['admin.settings.manage'] },
       ],
@@ -586,4 +611,192 @@ export function useApi<T>(path: string | null, deps: any[] = []) {
   }, [path, nonce, ...deps]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { data, loading, error, reload: () => setNonce((n) => n + 1) };
+}
+
+
+/* ===========================================================================
+ * FILTERS, AND THE NUMBERS UNDER THEM
+ *
+ *   "there should be various filter on every list in the website, the one must
+ *    filter is by time … after the filter there should come up numbers
+ *    representing the filter like total entities in that filter, total cost."
+ *
+ * One hook, one bar, one totals strip — used by every list, so a filter behaves
+ * the same on the order list as on the requirement list. Written once because
+ * six hand-rolled filter bars is six sets of slightly different behaviour and
+ * five of them will be subtly wrong.
+ *
+ * The totals are the point. A filtered list without them answers "which ones"
+ * but not "how much", and "how much" is the question somebody filtered in order
+ * to ask.
+ * ======================================================================== */
+
+export type Facet<T> = {
+  key: string;
+  label: string;
+  /** The value this row falls under, or null to leave it out of that facet. */
+  of: (row: T) => string | null | undefined;
+};
+
+export type Total<T> = {
+  label: string;
+  of: (row: T) => number;
+  /** Render as rupees rather than a plain count. */
+  money?: boolean;
+  decimals?: number;
+};
+
+export type FilterSpec<T> = {
+  /** The date this row belongs to. Omit for lists with no meaningful date. */
+  date?: (row: T) => string | null | undefined;
+  /** Everything a search should look through, joined. */
+  search?: (row: T) => string;
+  facets?: Facet<T>[];
+  totals?: Total<T>[];
+  /** Default window in days; 0 means everything. */
+  defaultDays?: number;
+};
+
+const WINDOWS: { days: number; label: string }[] = [
+  { days: 0, label: 'All time' },
+  { days: 1, label: 'Today' },
+  { days: 7, label: 'Last 7 days' },
+  { days: 30, label: 'Last 30 days' },
+  { days: 90, label: 'Last 90 days' },
+  { days: 365, label: 'Last year' },
+];
+
+export function useFilters<T>(rows: T[] | null | undefined, spec: FilterSpec<T>) {
+  const all = React.useMemo(() => rows ?? [], [rows]);
+  const [days, setDays] = React.useState(spec.defaultDays ?? 0);
+  const [q, setQ] = React.useState('');
+  const [picked, setPicked] = React.useState<Record<string, string>>({});
+
+  /* Options come from the data, not a hard-coded list: a supplier who has never
+   * been ordered from should not sit in the dropdown, and one who was added
+   * this morning should. */
+  const options = React.useMemo(() => {
+    const out: Record<string, string[]> = {};
+    for (const f of spec.facets ?? []) {
+      const seen = new Set<string>();
+      for (const r of all) {
+        const v = f.of(r);
+        if (v != null && v !== '') seen.add(String(v));
+      }
+      out[f.key] = [...seen].sort((a, b) => a.localeCompare(b));
+    }
+    return out;
+  }, [all, spec.facets]);
+
+  const filtered = React.useMemo(() => {
+    const cutoff = days > 0
+      ? new Date(Date.now() - days * 86400000).toISOString().slice(0, 10)
+      : null;
+    const needle = q.trim().toLowerCase();
+
+    return all.filter((r) => {
+      if (cutoff && spec.date) {
+        const d = spec.date(r);
+        /* A row with no date survives a date filter. Hiding it would quietly
+         * drop draft records that have not been dated yet, and somebody would
+         * spend an afternoon looking for them. */
+        if (d && String(d).slice(0, 10) < cutoff) return false;
+      }
+      if (needle && spec.search && !spec.search(r).toLowerCase().includes(needle)) return false;
+      for (const f of spec.facets ?? []) {
+        const want = picked[f.key];
+        if (!want) continue;
+        if (String(f.of(r) ?? '') !== want) return false;
+      }
+      return true;
+    });
+  }, [all, days, q, picked, spec]);
+
+  const totals = React.useMemo(() => (spec.totals ?? []).map((t) => ({
+    label: t.label,
+    money: t.money,
+    decimals: t.decimals,
+    value: filtered.reduce((a, r) => a + (Number(t.of(r)) || 0), 0),
+  })), [filtered, spec.totals]);
+
+  const active = Object.values(picked).filter(Boolean).length
+    + (q.trim() ? 1 : 0) + (days > 0 ? 1 : 0);
+
+  return {
+    rows: filtered, all, days, setDays, q, setQ, picked, setPicked,
+    options, totals, active, facets: spec.facets ?? [], hasDate: !!spec.date,
+    clear: () => { setPicked({}); setQ(''); setDays(spec.defaultDays ?? 0); },
+  };
+}
+
+export function FilterBar({ f, placeholder, children }: {
+  f: ReturnType<typeof useFilters<any>>; placeholder?: string; children?: React.ReactNode;
+}) {
+  return (
+    <div className="search-bar">
+      {f.hasDate ? (
+        <select value={f.days} onChange={(e) => f.setDays(Number(e.target.value))}>
+          {WINDOWS.map((w) => <option key={w.days} value={w.days}>{w.label}</option>)}
+        </select>
+      ) : null}
+      {f.facets.map((facet) => (
+        <select key={facet.key} value={f.picked[facet.key] ?? ''}
+          onChange={(e) => f.setPicked((s: any) => ({ ...s, [facet.key]: e.target.value }))}>
+          <option value="">{`Every ${facet.label.toLowerCase()}`}</option>
+          {(f.options[facet.key] ?? []).map((o) => (
+            <option key={o} value={o}>{o.replace(/_/g, ' ').toLowerCase()}</option>))}
+        </select>
+      ))}
+      <input value={f.q} onChange={(e) => f.setQ(e.target.value)}
+        placeholder={placeholder ?? 'Search'} />
+      {children}
+      {f.active > 0 ? (
+        <button className="btn sm" onClick={f.clear}>
+          Clear {f.active} filter{f.active === 1 ? '' : 's'}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/* "batchs", "deliverys" and "persons" all appeared on screen the first time
+ * these strips went in. English plurals are irregular enough that a bare +'s'
+ * is wrong often enough to notice, and a wrong plural on a number makes the
+ * number itself look careless. */
+const PLURAL: Record<string, string> = {
+  person: 'people', delivery: 'deliveries', batch: 'batches', box: 'boxes',
+  entry: 'entries', company: 'companies', category: 'categories', body: 'bodies',
+  match: 'matches', dispatch: 'dispatches', loss: 'losses', class: 'classes',
+};
+
+function plural(noun: string) {
+  if (PLURAL[noun]) return PLURAL[noun];
+  if (/(s|x|z|ch|sh)$/.test(noun)) return `${noun}es`;
+  if (/[^aeiou]y$/.test(noun)) return `${noun.slice(0, -1)}ies`;
+  return `${noun}s`;
+}
+
+/** What is left after filtering, and what it adds up to. */
+export function FilterTotals({ f, noun = 'row' }: {
+  f: ReturnType<typeof useFilters<any>>; noun?: string;
+}) {
+  if (!f.all.length) return null;
+  return (
+    <div className="filter-total">
+      <span>
+        <b>{f.rows.length}</b> {f.rows.length === 1 ? noun : plural(noun)}
+        {f.rows.length !== f.all.length ? (
+          <span className="muted"> of {f.all.length}</span>
+        ) : null}
+      </span>
+      <span className="row" style={{ gap: 20 }}>
+        {f.totals.map((t: any) => (
+          <span key={t.label} className="ft-num">
+            <em>{t.label}</em>
+            <b>{t.money ? inr(t.value, t.decimals ?? 0) : num(t.value, t.decimals ?? 0)}</b>
+          </span>
+        ))}
+      </span>
+    </div>
+  );
 }

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, useAuth, inr, num, date, dateTime, addDays, ago, pctText } from '../lib/api';
 import {
-  AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, Steps, useApi, useToast,
+  AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, Steps, useApi, useToast,  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
 
@@ -10,8 +10,25 @@ import { Icon } from '../components/icons';
 export function PoListPage() {
   const nav = useNavigate();
   const { can } = useAuth();
-  const [status, setStatus] = useState('');
-  const { data, loading, error } = useApi<any[]>(`/planning/purchase-orders?status=${status}`, [status]);
+  const { data, loading, error } = useApi<any[]>('/planning/purchase-orders');
+
+  const f = useFilters<any>(data, {
+    date: (o) => o.order_date,
+    search: (o) => [o.po_no, o.supplier_name, o.supplier_legal_name, o.branch_name,
+      o.supplier_response_note].filter(Boolean).join(' '),
+    facets: [
+      { key: 'status', label: 'status', of: (o) => o.status },
+      { key: 'supplier', label: 'supplier', of: (o) => o.supplier_name ?? o.supplier_legal_name },
+      { key: 'source', label: 'kind of supplier', of: (o) => o.source_type },
+      { key: 'answer', label: 'answer', of: (o) => o.supplier_response },
+    ],
+    /* Both numbers, because "42 orders" and "₹6.1 lakh" answer different
+       questions and somebody filtering by supplier usually wants the second. */
+    totals: [
+      { label: 'Ordered', of: (o) => Number(o.grand_total), money: true },
+      { label: 'Received', of: (o) => Number(o.received_qty ?? 0) },
+    ],
+  });
 
   return (
     <Layout title="Purchase orders" subtitle="Every order placed with a supplier"
@@ -19,16 +36,10 @@ export function PoListPage() {
         ? <button className="btn primary" onClick={() => nav('/purchase-orders/new')}>New order</button>
         : undefined}>
       <ErrorBanner error={error} />
-      <div className="search-bar">
-        <select value={status} onChange={(e) => setStatus(e.target.value)}>
-          <option value="">All statuses</option>
-          {['DRAFT', 'SUBMITTED', 'APPROVED', 'CONFIRMED', 'PART_RECEIVED', 'RECEIVED', 'CLOSED', 'CANCELLED']
-            .map((s) => <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
-        </select>
-      </div>
+      <FilterBar f={f} placeholder="Search order number or supplier" />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           onRowClick={(o: any) => nav(`/purchase-orders/${o.id}`)}
           rowTone={(o: any) => (o.is_urgent ? 'warn' : Number(o.pending_approvals) > 0 ? 'warn' : undefined)}
           cols={[
@@ -49,6 +60,21 @@ export function PoListPage() {
                   <div className="progress"><i style={{ width: `${Math.min(100, Number(o.fill_pct))}%` }} /></div>
                 </div>
               ) },
+            /* Our status and theirs are different facts. Ours says where the
+               paperwork is; theirs says whether anybody is actually going to
+               load a lorry. A CONFIRMED order the supplier declined used to
+               look exactly like one being packed right now. */
+            { key: 'sr', head: 'Supplier says', render: (o: any) => (
+              o.status !== 'CONFIRMED' && o.supplier_response === 'PENDING'
+                ? <span className="muted small">—</span>
+              : o.supplier_response === 'DECLINED'
+                ? <Chip tone="danger">declined{o.supplier_response_note ? ` — ${o.supplier_response_note}` : ''}</Chip>
+              : o.supplier_response === 'PENDING'
+                ? <Chip tone="warn">no answer yet</Chip>
+              : o.payment_status && o.payment_status !== 'PAID'
+                ? <Chip tone="warn">accepted · wants {inr(Number(o.payment_amount) - Number(o.payment_paid), 0)}</Chip>
+              : <Chip tone="ok">accepted</Chip>
+            ) },
             { key: 'st', head: 'Status', render: (o: any) => (
               <div className="row" style={{ gap: 4 }}>
                 <Chip value={o.status} />
@@ -59,6 +85,7 @@ export function PoListPage() {
           ]}
           empty={<Empty icon="📦" title="No purchase orders yet" />}
         />
+        <FilterTotals f={f} noun="order" />
       </div></div>
     </Layout>
   );

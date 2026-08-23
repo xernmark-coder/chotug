@@ -58,6 +58,26 @@ there is no other way to get a client.
 
 ## Permissions
 
+**Two layers, resolved in the database.** Roles are the default and the sane
+thing to manage — twelve roles, not sixty people. On top of them sits a
+per-person layer, because two purchase executives on one role do not always do
+the same job:
+
+```
+what a person can do = (their roles' permissions + their GRANTs) − their REVOKEs
+```
+
+`v_user_permissions` computes that, and `loadActor` reads the view. Doing the
+arithmetic in the application as well would let the screen that shows what
+somebody can do disagree with the gate that decides whether to let them.
+
+Every override carries a reason and who set it, and may carry an expiry — a
+permission that outlives its reason is how access creeps. Nobody may edit their
+own permissions: it is the one change in the system with no second pair of eyes
+anywhere.
+
+## Permissions — the original role model
+
 Loaded once per request in a single query that returns every permission code from every active role
 assignment, plus the *most permissive* limit across those roles (limits are a ceiling, not a floor).
 `requires('purchase.po.approve')` guards the route; `admin.override` passes any gate but is still
@@ -397,3 +417,90 @@ Four of these (3, 4, 5, 6) share one shape: **a state the system can reach that 
 rights or the code path to leave.** They are invisible to unit tests and to any walkthrough that
 stops at the happy step before them, and they only appear when one person tries to carry a single
 document all the way from the buy list to a matched invoice.
+
+
+---
+
+# The modules added for the client update
+
+The original system was purchase → receive → store. The client's update turned
+it into the whole business, and the shape that held it together was: **do not
+build a second version of anything that already works.**
+
+| What the client asked for | What was built | Why not a new thing |
+|---|---|---|
+| Centres, each with a panel | `warehouses.is_centre` | A centre holds stock, moves stock, has a ledger. A second table would have meant a second stock model and two answers to "how much mango is in Kothrud" |
+| A centre asking for stock | `requirements.raised_for_warehouse_id` + `reasoning` | The purchase manager's review queue already existed |
+| Wages | `WAGES` payment requests | There is one place money leaves from |
+| Transport cost on a transfer | a `TRANSPORT` payment request | Same. A cost typed on a document and paid by nobody is not a cost |
+| The supplier's invoice | `supplier_invoices` with `filed_by_supplier` | The invoice table already existed; only who typed it was new |
+| Floor / section / rack / shelf | the floor added above the existing zone → rack → bin | Three of the four levels already worked |
+| The audit team's messages | the work queue | The same queue every other role works from |
+
+## The money spine
+
+```
+anybody raises  →  payment_requests   nothing is paid without one
+Finance verifies →  a second pair of eyes, or a smaller number
+Finance pays     →  payments          cash / UPI / bank, with a reference
+money arrives    →  money_receipts    declared by whoever took it,
+                                      confirmed by Finance against what landed
+```
+
+A claim and the money moving are separate rows, because a claim can be
+part-paid, reduced or turned down — only "paid twice" must be impossible, and
+that is a unique index on the transaction reference.
+
+`is_system_raised` marks a document that queued *itself* — a captured supplier
+invoice — and skips maker-checker, because there is no second human to find:
+the clerk who captured it is the Finance clerk who must pay it.
+
+## Costing, and the floor price
+
+```
+overhead per kg = operating expenses PAID in the window ÷ kilos RECEIVED in it
+true cost       = the batch's landed rate + overhead
+minimum price   = true cost ÷ (1 − wastage%) × (1 + margin%)
+```
+
+Both sides of the overhead are facts already in the system, so the number moves
+as the business moves and nobody has to remember to update it. Dividing by the
+wastage rather than multiplying is the part usually got wrong: if a tenth of a
+crate is binned, the nine tenths that sell carry the whole crate.
+
+`v_overhead_per_kg` and `v_batch_pricing` are the only places these are
+computed. The till, the sell suggestion and the performance report all read
+them, so no two screens can quote a different floor.
+
+## Views as single definitions
+
+A pattern worth naming, because it is used deliberately and repeatedly:
+
+| View | The one question it answers |
+|---|---|
+| `v_user_permissions` | what can this person do |
+| `v_unload_totals` | how much of each product came off that lorry |
+| `v_bin_contents` | what is on that shelf |
+| `v_locations` | what is this scanned code |
+| `v_batch_pricing` | what is the least we can sell this for |
+| `v_overhead_per_kg` | what does it cost to run the place, per kilo |
+| `v_effective_upi` | which UPI code does this shop print |
+| `v_worker_output` | what did this person actually do |
+
+Each exists because the same number was about to be computed in two places.
+Two screens that disagree about a number are worse than either being wrong,
+because nobody can tell which to believe.
+
+## Scannable codes, drawn rather than fetched
+
+`components/barcode.tsx` (Code 128-B, on pack labels) and `components/qr.tsx`
+(QR version 1, EC level M, on location labels) both encode in the browser. A
+label that only prints when a CDN is reachable is not a label, and a warehouse
+basement is where the signal dies.
+
+The QR encoder is deliberately narrow — 20 alphanumeric characters, where every
+code printed is ten — and was verified rather than assumed: 800 random codes
+rendered and decoded back through a real scanner library. The first version
+failed all 800; the two copies of the format-information bits run in different
+directions and one had been mirrored, which produces a code that looks
+completely plausible and scans as nothing.

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, useAuth, inr, num, date, ago, addDays } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
+  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 
 /* ===========================================================================
@@ -36,6 +37,30 @@ export function LogisticsDispatchPage() {
   const rows = (pickups.data ?? []).filter((p: any) => p.status !== 'CANCELLED');
   const looking = rows.filter((p: any) => p.status === 'OFFERED');
   const moving = rows.filter((p: any) => ['ASSIGNED', 'EN_ROUTE', 'LOADED'].includes(p.status));
+
+  const fCand = useFilters<any>(candidates.data, {
+    date: (c: any) => c.expected_date,
+    search: (c: any) => [c.po_no, c.supplier_name, c.pickup_address].filter(Boolean).join(' '),
+    facets: [{ key: 'sup', label: 'supplier', of: (c: any) => c.supplier_name }],
+    totals: [
+      { label: 'Orders', of: () => 1 },
+      { label: 'Value', of: (c: any) => Number(c.grand_total) || 0, money: true },
+    ],
+  });
+  const fPickups = useFilters<any>(rows, {
+    date: (p2: any) => p2.pickup_on,
+    search: (p2: any) => [p2.pickup_no, p2.po_no, p2.supplier_name, p2.driver_name, p2.driver_phone]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'sup', label: 'supplier', of: (p2: any) => p2.supplier_name },
+      { key: 'drv', label: 'driver', of: (p2: any) => p2.driver_name ?? 'nobody yet' },
+      { key: 'st', label: 'stage', of: (p2: any) => STAGE_LABEL[p2.status] ?? p2.status },
+    ],
+    totals: [
+      { label: 'Pickups', of: () => 1 },
+      { label: 'Crates reported', of: (p2: any) => Number(p2.reported_crates) || 0 },
+    ],
+  });
   const canManage = can('logistics.pickup.manage');
 
   const cancel = async (p: any) => {
@@ -69,10 +94,12 @@ export function LogisticsDispatchPage() {
       {canManage ? (
         <>
           <div className="section-head"><h2>Needs a vehicle</h2><span className="rule" /></div>
+          <FilterBar f={fCand} placeholder="Search order or supplier" />
+          <FilterTotals f={fCand} noun="order" />
           <div className="card mb"><div className="card-body tight">
             <DataTable
               loading={candidates.loading}
-              rows={candidates.data ?? []}
+              rows={fCand.rows}
               rowTone={() => 'warn'}
               cols={[
                 { key: 'o', head: 'Order', render: (c: any) => (
@@ -88,17 +115,20 @@ export function LogisticsDispatchPage() {
                   <button className="btn sm primary" onClick={() => setArranging(c)}>Arrange pickup</button>
                 ) },
               ]}
-              empty={<Empty icon="✅" title="Every confirmed order has a vehicle" />}
+              empty={<Empty icon="✅" title={fCand.active > 0
+                ? 'No order matches those filters' : 'Every confirmed order has a vehicle'} />}
             />
           </div></div>
         </>
       ) : null}
 
       <div className="section-head"><h2>Pickups</h2><span className="rule" /></div>
+      <FilterBar f={fPickups} placeholder="Search pickup, order, supplier, driver" />
+      <FilterTotals f={fPickups} noun="pickup" />
       <div className="card"><div className="card-body tight">
         <DataTable
           loading={pickups.loading}
-          rows={rows}
+          rows={fPickups.rows}
           rowTone={(p: any) => (p.status === 'OFFERED' ? 'warn' : undefined)}
           cols={[
             { key: 'n', head: 'Pickup', render: (p: any) => (
@@ -123,8 +153,10 @@ export function LogisticsDispatchPage() {
                 <button className="btn sm ghost" onClick={() => cancel(p)}>Cancel</button>
               ) : null },
           ]}
-          empty={<Empty icon="🚚" title="No pickups arranged yet"
-            hint="Arrange one against a confirmed order above." />}
+          empty={<Empty icon="🚚"
+            title={fPickups.active > 0 ? 'No pickup matches those filters' : 'No pickups arranged yet'}
+            hint={fPickups.active > 0 ? 'Clear a filter to widen the search.'
+              : 'Arrange one against a confirmed order above.'} />}
         />
       </div></div>
 

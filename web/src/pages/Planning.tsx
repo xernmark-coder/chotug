@@ -4,7 +4,7 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianG
 import { api, useAuth, inr, num, date, addDays, pctText } from '../lib/api';
 import {
   AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, ReasonPicker,
-  useApi, useReasonBank, useToast,
+  useApi, useReasonBank, useToast,  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
 import { CHART } from '../components/charts';
@@ -34,7 +34,23 @@ export function BuyListPage() {
     return onlyNeeded ? all.filter((i: any) => i.suggestedQty > 0) : all;
   }, [data, onlyNeeded]);
 
-  const chosen = items.filter((i: any) => selected[i.productId]);
+  /* No date facet: this is what to buy *now*, and every row is about today.
+     What matters here is finding a product and seeing what the selection will
+     cost before committing to it. */
+  const f = useFilters<any>(items, {
+    search: (i) => [i.productName, i.sku, i.categoryName].filter(Boolean).join(' '),
+    facets: [
+      { key: 'cat', label: 'category', of: (i) => i.categoryName },
+      { key: 'urgency', label: 'urgency', of: (i) => i.urgency },
+    ],
+    totals: [
+      { label: 'To order', of: (i) => Number(i.suggestedQty ?? 0) },
+      { label: 'At last rate', of: (i) =>
+        Number(i.suggestedQty ?? 0) * Number(i.lastRate ?? i.landedRate ?? 0), money: true },
+    ],
+  });
+
+  const chosen = f.rows.filter((i: any) => selected[i.productId]);
 
   const finalQty = (i: any) => qtyOverride[i.productId] ?? i.suggestedQty;
 
@@ -178,10 +194,10 @@ export function BuyListPage() {
         </div>
       </div>
 
-      <div className="search-bar">
+      <FilterBar f={f} placeholder="Search a product or its code">
         <label className="check">
           <input type="checkbox" checked={onlyNeeded} onChange={(e) => setOnlyNeeded(e.target.checked)} />
-          Only show products that need ordering
+          Only what needs ordering
         </label>
         <span className="spacer" />
         <button className="btn sm" onClick={() => {
@@ -189,16 +205,17 @@ export function BuyListPage() {
           items.forEach((i: any) => { if (i.suggestedQty > 0) next[i.productId] = true; });
           setSelected(next);
         }}>Select all suggested</button>
-      </div>
+      </FilterBar>
 
       <div className="card">
         <div className="card-body tight">
           <DataTable
-            rows={items} cols={cols} loading={loading}
+            rows={f.rows} cols={cols} loading={loading}
             rowTone={(i) => (i.urgency === 'URGENT' ? 'crit' : i.urgency === 'HIGH' ? 'warn' : undefined)}
             empty={<Empty icon="👍" title="Nothing needs ordering right now"
               hint="Uncheck the filter above to see every product." />}
           />
+          <FilterTotals f={f} noun="product" />
         </div>
       </div>
 
@@ -326,23 +343,35 @@ function InsightModal({ item, onClose }: { item: any; onClose: () => void }) {
 /* ======================================================= REQUIREMENTS ==== */
 export function RequirementListPage() {
   const nav = useNavigate();
-  const [status, setStatus] = useState('');
-  const { data, loading, error } = useApi<any[]>(`/planning/requirements?status=${status}`, [status]);
+  const { data, loading, error } = useApi<any[]>('/planning/requirements');
+
+  /* Everything the client asked for on this list — by time, priority, who
+     raised it, which centre, and a search — plus what the filtered set adds
+     up to, which is the reason anybody filters. */
+  const f = useFilters<any>(data, {
+    date: (r) => r.req_date,
+    search: (r) => [r.req_no, r.branch_name, r.created_by_name, r.remarks,
+      r.reasoning, r.raised_for_centre].filter(Boolean).join(' '),
+    facets: [
+      { key: 'status', label: 'status', of: (r) => r.status },
+      { key: 'priority', label: 'priority', of: (r) => r.priority },
+      { key: 'who', label: 'raiser', of: (r) => r.created_by_name },
+      { key: 'centre', label: 'centre', of: (r) => r.raised_for_centre },
+    ],
+    totals: [
+      { label: 'Products', of: (r) => Number(r.line_count) },
+      { label: 'Quantity', of: (r) => Number(r.total_qty) },
+    ],
+  });
 
   return (
-    <Layout title="Requirements" subtitle="What each branch has asked to buy"
+    <Layout title="Requirements" subtitle="What each branch and centre has asked to buy"
       actions={<button className="btn primary" onClick={() => nav('/buy-list')}>New from buy list</button>}>
       <ErrorBanner error={error} />
-      <div className="search-bar">
-        <select value={status} onChange={(e) => setStatus(e.target.value)}>
-          <option value="">All statuses</option>
-          {['DRAFT', 'SUBMITTED', 'APPROVED', 'CONVERTED', 'CLOSED', 'CANCELLED'].map((s) =>
-            <option key={s} value={s}>{s}</option>)}
-        </select>
-      </div>
+      <FilterBar f={f} placeholder="Search number, branch, who raised it, or why" />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           onRowClick={(r: any) => nav(`/requirements/${r.id}`)}
           rowTone={(r: any) => (r.priority === 'URGENT' ? 'crit' : undefined)}
           cols={[
@@ -354,11 +383,17 @@ export function RequirementListPage() {
             { key: 'l', head: 'Products', num: true, render: (r: any) => r.line_count },
             { key: 'q', head: 'Total qty', num: true, render: (r: any) => num(r.total_qty, 0) },
             { key: 's', head: 'Status', render: (r: any) => <Chip value={r.status} /> },
-            { key: 'u', head: 'Raised by', render: (r: any) => <span className="small">{r.created_by_name}</span> },
+            { key: 'u', head: 'Raised by', render: (r: any) => (
+              <div className="small">{r.created_by_name}
+                {r.raised_for_centre ? (
+                  <div className="muted">for {r.raised_for_centre}</div>) : null}
+                {r.reasoning ? <div className="muted">{r.reasoning}</div> : null}
+              </div>) },
           ]}
           empty={<Empty icon="📝" title="No requirements yet"
             hint="Start from the buy list — the system already knows what you are short of." />}
         />
+        <FilterTotals f={f} noun="requirement" />
       </div></div>
     </Layout>
   );

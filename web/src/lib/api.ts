@@ -38,6 +38,7 @@ export const api = {
   get: <T,>(p: string) => request<T>(p),
   post: <T,>(p: string, b?: any) => request<T>(p, { method: 'POST', body: JSON.stringify(b ?? {}) }),
   put: <T,>(p: string, b?: any) => request<T>(p, { method: 'PUT', body: JSON.stringify(b ?? {}) }),
+  patch: <T,>(p: string, b?: any) => request<T>(p, { method: 'PATCH', body: JSON.stringify(b ?? {}) }),
   setToken: (t: string) => localStorage.setItem(TOKEN_KEY, t),
   clearToken: () => localStorage.removeItem(TOKEN_KEY),
   hasToken: () => !!localStorage.getItem(TOKEN_KEY),

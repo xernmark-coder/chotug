@@ -182,6 +182,255 @@ receivingRouter.post('/gate-entries/:id/submit', requires('receiving.gate.submit
     return { ok: true, status: 'ARRIVED', locked: true };
   })));
 
+/* ---------------------------------------------------------------------------
+ * "Type the invoice number." — the gate's whole job at the barrier.
+ *
+ * The clerk stands in the rain copying a lorry number, a driver's name and a
+ * phone number off a piece of paper while the driver waits. Every one of those
+ * facts was recorded by the supplier days ago, when they accepted the order.
+ *
+ * So the gate types one number and gets the rest. Nothing here is authoritative
+ * — it is a first draft of the entry, and the clerk corrects whatever the
+ * paperwork actually says. What matters is that the common case, where the
+ * supplier told the truth, takes one field instead of eight.
+ * ------------------------------------------------------------------------ */
+receivingRouter.get('/lookup/invoice', requires('receiving.gate.create'), h(async (req) => {
+  const no = String(req.query.no ?? '').trim();
+  if (no.length < 2) throw ApiError.badRequest('Enter the invoice number from the driver\'s papers');
+
+  const [hit] = await query(req.actor,
+    `SELECT e.id                AS expected_arrival_id,
+            e.expected_date, e.status AS arrival_status,
+            e.vehicle_hint      AS vehicle_reg,
+            e.driver_name, e.driver_phone, e.transporter, e.lr_no, e.eway_bill_no,
+            e.supplier_marked_sent_at, e.supplier_note,
+            o.id                AS po_id, o.po_no, o.source_type, o.grand_total,
+            o.supplier_response, o.warehouse_id, o.branch_id,
+            s.id                AS supplier_id,
+            COALESCE(s.trade_name, s.legal_name) AS supplier_name, s.phone AS supplier_phone,
+            w.name              AS warehouse_name,
+            i.invoice_no, i.invoice_date, i.total AS invoice_total,
+            i.filed_by_supplier,
+            (SELECT count(*) FROM po_lines pl WHERE pl.po_id = o.id)   AS line_count,
+            /* The clerk should know, before the lorry is inside, whether this
+             * load has been paid for. */
+            pay.request_no AS payment_request_no, pay.status AS payment_status,
+            /* And whether it is already through the gate, so the same invoice
+             * cannot walk in twice. */
+            (SELECT g.id FROM gate_entries g
+              WHERE g.po_id = o.id AND g.status NOT IN ('CANCELLED','REJECTED')
+              ORDER BY g.arrived_at DESC LIMIT 1)                      AS existing_entry_id
+       FROM supplier_invoices i
+       JOIN purchase_orders o ON o.id = i.po_id
+       JOIN suppliers s ON s.id = o.supplier_id
+       LEFT JOIN expected_arrivals e ON e.po_id = o.id AND e.status <> 'CANCELLED'
+       LEFT JOIN warehouses w ON w.id = o.warehouse_id
+       LEFT JOIN LATERAL (
+         SELECT x.request_no, x.status FROM payment_requests x
+          WHERE x.company_id = o.company_id AND x.status <> 'CANCELLED'
+            AND ((x.source_type = 'supplier_invoice' AND x.source_id = i.id)
+              OR (x.source_type = 'purchase_order'   AND x.source_id = o.id))
+          ORDER BY x.requested_at LIMIT 1) pay ON true
+      WHERE i.company_id = $1 AND lower(i.invoice_no) = lower($2)
+        AND i.status <> 'CANCELLED'
+      ORDER BY i.created_at DESC LIMIT 1`,
+    [req.actor.companyId, no]);
+
+  if (!hit) {
+    /* A number the system has never seen is not necessarily a mistake — plenty
+     * of loads arrive against no invoice at all — so this is an answer, not an
+     * error. The gate falls back to typing the details. */
+    return { found: false, invoiceNo: no,
+      message: 'No invoice with that number. Enter the vehicle details by hand.' };
+  }
+
+  return { found: true, ...hit };
+}));
+
+/* ===========================================================================
+ * EVERY BOX, AS IT COMES OFF THE LORRY
+ *
+ * The weighbridge weighs the vehicle. One number, for a load carrying mango,
+ * tomato and onion together — it can never tell you how much mango arrived. The
+ * floor already weighs each box on a platform scale; the number was going onto
+ * paper and then into somebody's head.
+ *
+ * One row per box, and the per-product total is a SUM rather than a figure
+ * somebody types at the end of the day.
+ * ======================================================================== */
+
+/** What has come off this vehicle so far, against what the order said. */
+async function unloadState(actor: any, gateEntryId: string) {
+  const [entry] = await query(actor,
+    `SELECT g.id, g.gate_no, g.status, g.po_id, g.branch_id, g.warehouse_id,
+            g.supplier_id, o.po_no
+       FROM gate_entries g
+       LEFT JOIN purchase_orders o ON o.id = g.po_id
+      WHERE g.id = $1 AND g.company_id = $2`,
+    [gateEntryId, actor.companyId]);
+  if (!entry) throw ApiError.notFound('That vehicle is not at our gate.');
+
+  /* Ordered and unloaded side by side. A product on the lorry that was never
+   * ordered still has to appear — that is exactly the case worth seeing. */
+  const lines = await query(actor,
+    `WITH ordered AS (
+        SELECT pl.id AS po_line_id, pl.product_id, pl.qty, pl.uom,
+               pl.expected_weight_kg, pl.rate
+          FROM po_lines pl WHERE pl.po_id = $3
+     ), unloaded AS (
+        SELECT * FROM v_unload_totals
+         WHERE gate_entry_id = $1 AND company_id = $2
+     ), ids AS (
+        SELECT product_id FROM ordered
+        UNION
+        SELECT product_id FROM unloaded
+     )
+     SELECT i.product_id,
+            p.name AS product_name, p.sku, p.icon, p.base_uom,
+            o.po_line_id, o.qty AS ordered_qty, o.uom AS ordered_uom,
+            o.expected_weight_kg, o.rate,
+            COALESCE(u.boxes, 0)  AS boxes,
+            COALESCE(u.net_kg, 0) AS net_kg,
+            u.avg_box_kg, u.min_box_kg, u.max_box_kg
+       FROM ids i
+       LEFT JOIN ordered   o ON o.product_id = i.product_id
+       LEFT JOIN unloaded  u ON u.product_id = i.product_id
+       LEFT JOIN products  p ON p.id = i.product_id
+      ORDER BY p.name`,
+    [gateEntryId, actor.companyId, entry.po_id]);
+
+  const boxes = await query(actor,
+    `SELECT b.id, b.box_no, b.weight_kg, b.product_id, b.scanned_code,
+            b.capture_mode, b.weighed_at, b.voided_at, b.void_reason,
+            p.name AS product_name, u.full_name AS weighed_by_name
+       FROM unload_boxes b
+       JOIN products p ON p.id = b.product_id
+       LEFT JOIN users u ON u.id = b.weighed_by
+      WHERE b.gate_entry_id = $1
+      ORDER BY b.box_no DESC LIMIT 200`,
+    [gateEntryId]);
+
+  const totalKg = lines.reduce((a: number, l: any) => a + Number(l.net_kg), 0);
+  const totalBoxes = lines.reduce((a: number, l: any) => a + Number(l.boxes), 0);
+  return { entry, lines, boxes, totalKg, totalBoxes };
+}
+
+receivingRouter.get('/gate-entries/:id/boxes', h(async (req) =>
+  unloadState(req.actor, req.params.id)));
+
+receivingRouter.post('/gate-entries/:id/boxes',
+  requires('receiving.box.weigh'), h(async (req) => {
+    const input = body(z.object({
+      productId: z.string().uuid().optional(),
+      /* Or the code printed on the box. The floor scans that, not our UUID. */
+      scannedCode: z.string().trim().max(60).optional(),
+      weightKg: z.coerce.number().positive('What did the box weigh?'),
+      captureMode: z.enum(['MANUAL', 'DEVICE', 'SCAN']).default('MANUAL'),
+      scaleDeviceId: z.string().uuid().nullable().optional(),
+    }), req.body);
+
+    if (!input.productId && !input.scannedCode) {
+      throw ApiError.badRequest('Which product is in this box?');
+    }
+
+    return withTx(req.actor, async (tx) => {
+      const { rows: eRows } = await tx.query(
+        `SELECT g.id, g.gate_no, g.status, g.po_id, g.branch_id, g.warehouse_id
+           FROM gate_entries g
+          WHERE g.id = $1 AND g.company_id = $2 FOR UPDATE`,
+        [req.params.id, req.actor.companyId]);
+      const entry = eRows[0];
+      if (!entry) throw ApiError.notFound('That vehicle is not at our gate.');
+      if (['CANCELLED', 'REJECTED', 'CLOSED'].includes(entry.status)) {
+        throw ApiError.rule(
+          `${entry.gate_no} is ${entry.status.toLowerCase()} — nothing more can be unloaded against it.`);
+      }
+
+      /* Resolve the supplier's own code for the product, which is what is
+       * printed on the box, before falling back to ours. */
+      let productId = input.productId ?? null;
+      if (!productId && input.scannedCode) {
+        const { rows: sp } = await tx.query(
+          `SELECT product_id FROM supplier_products
+            WHERE company_id = $1
+              AND (lower(supplier_code) = lower($2) OR lower(tracking_code) = lower($2))
+            LIMIT 1`,
+          [req.actor.companyId, input.scannedCode]);
+        productId = sp[0]?.product_id ?? null;
+        if (!productId) {
+          const { rows: bySku } = await tx.query(
+            `SELECT id FROM products WHERE company_id=$1 AND lower(sku)=lower($2) LIMIT 1`,
+            [req.actor.companyId, input.scannedCode]);
+          productId = bySku[0]?.id ?? null;
+        }
+        if (!productId) {
+          throw ApiError.rule(
+            `Nothing on file for code "${input.scannedCode}". Pick the product from the list instead.`);
+        }
+      }
+
+      const { rows: pl } = await tx.query(
+        `SELECT id FROM po_lines WHERE po_id = $1 AND product_id = $2 LIMIT 1`,
+        [entry.po_id, productId]);
+
+      /* Numbered per vehicle so the floor can shout "box 41". Taken under the
+       * row lock above, so two tablets weighing at once cannot claim the same
+       * number. */
+      const { rows: nextNo } = await tx.query(
+        `SELECT COALESCE(MAX(box_no), 0) + 1 AS n FROM unload_boxes WHERE gate_entry_id = $1`,
+        [entry.id]);
+
+      const { rows: ins } = await tx.query(
+        `INSERT INTO unload_boxes (company_id, branch_id, warehouse_id, gate_entry_id,
+                po_line_id, product_id, box_no, weight_kg, capture_mode,
+                scale_device_id, scanned_code, weighed_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         RETURNING *`,
+        [req.actor.companyId, entry.branch_id, entry.warehouse_id, entry.id,
+         pl[0]?.id ?? null, productId, nextNo[0].n, input.weightKg, input.captureMode,
+         input.scaleDeviceId ?? null, input.scannedCode ?? null, req.actor.userId]);
+
+      const { rows: tot } = await tx.query(
+        `SELECT boxes, net_kg FROM v_unload_totals
+          WHERE gate_entry_id = $1 AND product_id = $2`, [entry.id, productId]);
+      const { rows: prod } = await tx.query(
+        `SELECT name FROM products WHERE id = $1`, [productId]);
+
+      return {
+        ...ins[0],
+        productName: prod[0]?.name,
+        productBoxes: tot[0]?.boxes ?? 1,
+        productNetKg: tot[0]?.net_kg ?? input.weightKg,
+        message: `Box ${nextNo[0].n} · ${input.weightKg} kg · ${prod[0]?.name} `
+          + `(${tot[0]?.boxes ?? 1} boxes, ${Number(tot[0]?.net_kg ?? input.weightKg).toFixed(1)} kg so far)`,
+      };
+    });
+  }));
+
+/* A box is corrected by voiding it, never by editing the weight. A number that
+ * can be changed after the fact is a number nobody can be held to. */
+receivingRouter.post('/boxes/:id/void', requires('receiving.box.void'), h(async (req) => {
+  const input = body(z.object({
+    reason: z.string().trim().min(3, 'Why is this box being voided?'),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE unload_boxes
+          SET voided_at = now(), voided_by = $2, void_reason = $3
+        WHERE id = $1 AND company_id = $4 AND voided_at IS NULL
+        RETURNING box_no, weight_kg, gate_entry_id, product_id`,
+      [req.params.id, req.actor.userId, input.reason, req.actor.companyId]);
+    if (!rows[0]) throw ApiError.rule('That box has already been voided.');
+
+    await emit(tx, req.actor, 'unload_box', req.params.id, 'box.voided', {
+      boxNo: rows[0].box_no, weightKg: rows[0].weight_kg, reason: input.reason,
+    });
+    return { ok: true, boxNo: rows[0].box_no,
+      message: `Box ${rows[0].box_no} voided. It no longer counts towards the total.` };
+  });
+}));
+
 receivingRouter.get('/pipeline', h(async (req) =>
   query(req.actor,
     `SELECT * FROM v_receiving_pipeline
@@ -202,7 +451,7 @@ receivingRouter.get('/gate-entries/:id', h(async (req) => {
       WHERE g.id = $1 AND g.company_id = $2`, [req.params.id, req.actor.companyId]);
   if (!g) throw ApiError.notFound('Gate entry not found');
 
-  const [weighments, inspections, poLines, grns] = await Promise.all([
+  const [weighments, inspections, poLines, grns, boxTotals] = await Promise.all([
     query(req.actor,
       `SELECT w.*, u.full_name AS weighed_by_name, ct.name AS container_type_name
          FROM weighments w LEFT JOIN users u ON u.id = w.weighed_by
@@ -219,9 +468,15 @@ receivingRouter.get('/gate-entries/:id', h(async (req) => {
          FROM po_lines l JOIN products p ON p.id = l.product_id
         WHERE l.po_id=$1 ORDER BY l.line_no`, [g.po_id]) : Promise.resolve([]),
     query(req.actor, `SELECT id, grn_no, status, posted_at FROM grns WHERE gate_entry_id=$1`, [g.id]),
+    /* What was actually weighed off the lorry, box by box. The receipt should
+     * be booked against this rather than against a quantity somebody types, or
+     * the boxes were weighed for nothing. */
+    query(req.actor,
+      `SELECT t.product_id, t.po_line_id, t.boxes, t.net_kg, t.avg_box_kg
+         FROM v_unload_totals t WHERE t.gate_entry_id = $1`, [g.id]),
   ]);
 
-  return { ...g, weighments, inspections, poLines, grns };
+  return { ...g, weighments, inspections, poLines, grns, boxTotals };
 }));
 
 /* ===========================================================================

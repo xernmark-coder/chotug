@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, useAuth, inr, num, date, ago } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
+  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
 
@@ -45,6 +46,21 @@ export function WarehouseIntakePage() {
   const withQc = rows.filter((g: any) => ['WEIGHED', 'QC_PENDING'].includes(g.status));
   const toBook = rows.filter((g: any) => ['QC_COMPLETE', 'GRN_PENDING'].includes(g.status));
 
+  const f = useFilters<any>(rows, {
+    date: (g: any) => g.arrived_at,
+    search: (g: any) => [g.vehicle_reg_captured, g.gate_no, g.supplier_name, g.po_no]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'sup', label: 'supplier', of: (g: any) => g.supplier_name },
+      { key: 'st', label: 'stage', of: (g: any) => STAGE[g.status]?.label ?? g.status },
+      { key: 'veh', label: 'vehicle', of: (g: any) => g.vehicle_reg_captured },
+    ],
+    totals: [
+      { label: 'Vehicles', of: () => 1 },
+      { label: 'Net kg', of: (g: any) => Number(g.net_kg ?? 0), decimals: 1 },
+    ],
+  });
+
   return (
     <Layout
       title="Warehouse intake"
@@ -69,9 +85,11 @@ export function WarehouseIntakePage() {
           <button className="btn sm" onClick={reload}>Refresh</button>
         </div>
         <div className="card-body tight">
+          <FilterBar f={f} placeholder="Search vehicle, gate pass, supplier" />
+          <FilterTotals f={f} noun="vehicle" />
           <DataTable
             loading={loading}
-            rows={rows}
+            rows={f.rows}
             rowTone={(g: any) => (g.status === 'ARRIVED' ? 'warn' : undefined)}
             cols={[
               { key: 'v', head: 'Vehicle', render: (g: any) => (
@@ -98,12 +116,20 @@ export function WarehouseIntakePage() {
                 const st = STAGE[g.status] ?? { label: g.status, tone: 'neutral' as const };
                 return <Chip tone={st.tone as any}>{st.label}</Chip>;
               } },
-              { key: 'a', head: '', width: 230, render: (g: any) => (
+              { key: 'a', head: '', width: 330, render: (g: any) => (
                 <div className="btn-row">
                   {!['COMPLETED', 'REJECTED_AT_GATE'].includes(g.status)
                     && !(g.has_gross && g.has_tare) && can('receiving.weighment.create') ? (
                     <button className="btn sm primary" onClick={() => setWeighing(g)}>
                       {g.has_gross ? 'Tare weight' : 'Weigh in'}
+                    </button>
+                  ) : null}
+                  {/* The weighbridge weighs the lorry; this weighs what comes
+                      off it. On a mixed load it is the only way to know how
+                      much of each product actually arrived. */}
+                  {!['REJECTED_AT_GATE'].includes(g.status) && can('receiving.box.weigh') ? (
+                    <button className="btn sm" onClick={() => nav(`/unload/${g.gate_entry_id}`)}>
+                      Weigh boxes
                     </button>
                   ) : null}
                   {['WEIGHED', 'QC_PENDING'].includes(g.status) ? (
@@ -116,8 +142,10 @@ export function WarehouseIntakePage() {
                 </div>
               ) },
             ]}
-            empty={<Empty icon="🚚" title="Nothing in the yard"
-              hint="Vehicles appear here once the gate has logged them in." />}
+            empty={<Empty icon="🚚"
+              title={f.active > 0 ? 'No vehicle matches those filters' : 'Nothing in the yard'}
+              hint={f.active > 0 ? 'Clear a filter to widen the search.'
+                : 'Vehicles appear here once the gate has logged them in.'} />}
           />
         </div>
       </div>

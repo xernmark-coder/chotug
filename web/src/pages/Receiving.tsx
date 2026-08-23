@@ -3,6 +3,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, useAuth, inr, num, date, dateTime, ago, idempotencyKey, today } from '../lib/api';
 import {
   AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, Steps, useApi, useToast,
+  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
 import { DriverModal, VehicleModal } from './Fleet';
@@ -12,13 +13,32 @@ export function ArrivalsPage() {
   const nav = useNavigate();
   const { data, loading, error } = useApi<any[]>('/planning/expected-arrivals');
 
+  const f = useFilters<any>(data, {
+    date: (a: any) => a.expected_date,
+    search: (a: any) => [a.po_no, a.supplier_name, a.warehouse_name, a.vehicle_hint]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'sup', label: 'supplier', of: (a: any) => a.supplier_name },
+      { key: 'wh', label: 'warehouse', of: (a: any) => a.warehouse_name },
+      { key: 'src', label: 'source', of: (a: any) => a.source_type },
+      { key: 'late', label: 'timing', of: (a: any) => (a.overdue ? 'not arrived' : 'on time') },
+    ],
+    totals: [
+      { label: 'Vehicles', of: () => 1 },
+      { label: 'Products', of: (a: any) => Number(a.line_count) || 0 },
+      { label: 'Value', of: (a: any) => Number(a.grand_total) || 0, money: true },
+    ],
+  });
+
   return (
     <Layout title="Expected arrivals" subtitle="Vehicles we are waiting for"
       actions={<button className="btn primary" onClick={() => nav('/gate/new')}>Vehicle at gate</button>}>
       <ErrorBanner error={error} />
+      <FilterBar f={f} placeholder="Search order, supplier, vehicle" />
+      <FilterTotals f={f} noun="arrival" />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           rowTone={(a: any) => (a.overdue ? 'crit' : undefined)}
           onRowClick={(a: any) => nav(`/gate/new?poId=${a.po_id}`)}
           cols={[
@@ -36,8 +56,10 @@ export function ArrivalsPage() {
             { key: 'val', head: 'Value', num: true, render: (a: any) => inr(a.grand_total, 0) },
             { key: 'go', head: '', width: 130, render: () => <span className="btn sm primary">Record arrival</span> },
           ]}
-          empty={<Empty icon="🚛" title="No vehicles expected"
-            hint="Confirm an approved purchase order to schedule an arrival." />}
+          empty={<Empty icon="🚛"
+            title={f.active > 0 ? 'No arrival matches those filters' : 'No vehicles expected'}
+            hint={f.active > 0 ? 'Clear a filter to widen the search.'
+              : 'Confirm an approved purchase order to schedule an arrival.'} />}
         />
       </div></div>
     </Layout>
@@ -59,6 +81,23 @@ export function GatePipelinePage() {
 
   const NEXT = ['Weigh in', 'Weigh out', 'Quality check', 'Post receipt', 'Done'];
 
+  const f = useFilters<any>(data, {
+    date: (g: any) => g.arrived_at,
+    search: (g: any) => [g.vehicle_reg_captured, g.gate_no, g.supplier_name, g.po_no]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'sup', label: 'supplier', of: (g: any) => g.supplier_name },
+      { key: 'st', label: 'stage', of: (g: any) => g.status },
+      { key: 'nx', label: 'next step', of: (g: any) => NEXT[stage(g)] },
+      { key: 'fl', label: 'flag', of: (g: any) =>
+        g.critical_fail ? 'hygiene fail' : g.is_unplanned ? 'unplanned' : null },
+    ],
+    totals: [
+      { label: 'Vehicles', of: () => 1 },
+      { label: 'Checks done', of: (g: any) => Number(g.qc_count) || 0 },
+    ],
+  });
+
   return (
     <Layout title="Gate &amp; receiving" subtitle="Every vehicle currently inside the chain" touch
       actions={
@@ -68,9 +107,11 @@ export function GatePipelinePage() {
         </div>
       }>
       <ErrorBanner error={error} />
+      <FilterBar f={f} placeholder="Search vehicle, gate pass, supplier, order" />
+      <FilterTotals f={f} noun="vehicle" />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           rowTone={(g: any) => (g.critical_fail ? 'crit' : g.age_minutes > 180 ? 'warn' : undefined)}
           onRowClick={(g: any) => nav(`/gate/${g.gate_entry_id}`)}
           cols={[
@@ -99,8 +140,10 @@ export function GatePipelinePage() {
               g.critical_fail ? <Chip tone="danger">hygiene fail</Chip>
                 : g.is_unplanned ? <Chip tone="warn">unplanned</Chip> : null },
           ]}
-          empty={<Empty icon="🛃" title="No vehicles at the gate"
-            hint="Record an arrival when a truck reaches you." />}
+          empty={<Empty icon="🛃"
+            title={f.active > 0 ? 'No vehicle matches those filters' : 'No vehicles at the gate'}
+            hint={f.active > 0 ? 'Clear a filter to widen the search.'
+              : 'Record an arrival when a truck reaches you.'} />}
         />
       </div></div>
     </Layout>
@@ -137,6 +180,36 @@ export function GateEntryPage() {
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
+
+  /* The invoice-first path. The supplier recorded the lorry, the driver and his
+   * phone number days ago when they accepted the order; the clerk should not be
+   * copying them off wet paper with the driver waiting. One field, then correct
+   * whatever is wrong. */
+  const [invoiceNo, setInvoiceNo] = useState('');
+  const [looking, setLooking] = useState(false);
+  const [found, setFound] = useState<any>(null);
+
+  const lookupInvoice = async () => {
+    if (!invoiceNo.trim()) return;
+    setLooking(true); setError(null);
+    try {
+      const r = await api.get<any>(`/receiving/lookup/invoice?no=${encodeURIComponent(invoiceNo.trim())}`);
+      setFound(r);
+      if (!r.found) { toast(r.message, 'err'); return; }
+      setForm((f: any) => ({
+        ...f,
+        poId: r.po_id ?? f.poId,
+        supplierId: r.supplier_id ?? f.supplierId,
+        sourceType: r.source_type ?? f.sourceType,
+        vehicleRegCaptured: r.vehicle_reg ?? f.vehicleRegCaptured,
+        driverName: r.driver_name ?? f.driverName,
+        driverPhone: r.driver_phone ?? f.driverPhone,
+        supplierInvoiceRef: r.invoice_no ?? f.supplierInvoiceRef,
+        ewayBillNo: r.eway_bill_no ?? f.ewayBillNo,
+      }));
+      toast(`${r.po_no} — ${r.supplier_name}. Check the details and correct anything wrong.`, 'ok');
+    } catch (e: any) { setError(e); } finally { setLooking(false); }
+  };
 
   const arrival = arrivals?.find((a) => a.po_id === form.poId);
   useEffect(() => {
@@ -205,6 +278,49 @@ export function GateEntryPage() {
           <div className="card">
             <div className="card-head"><h2>1 · Which delivery is this?</h2></div>
             <div className="card-body">
+              <Field label="Invoice number from the driver's papers"
+                hint="Type this one number and the rest fills itself in. Correct anything that is wrong.">
+                <div className="row" style={{ gap: 8 }}>
+                  <input value={invoiceNo} autoFocus style={{ flex: 1 }}
+                    onChange={(e) => setInvoiceNo(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); lookupInvoice(); } }}
+                    placeholder="SAH/26-27/118" />
+                  <button className="btn primary" disabled={looking || !invoiceNo.trim()}
+                    onClick={lookupInvoice}>{looking ? 'Looking…' : 'Find'}</button>
+                </div>
+              </Field>
+
+              {found?.found ? (
+                <div className={`banner ${found.existing_entry_id ? 'danger'
+                  : found.payment_status && found.payment_status !== 'PAID' ? 'warn' : 'ok'} mb`}>
+                  <span><Icon name={found.existing_entry_id ? 'alert' : 'check'} size={16} /></span>
+                  <div>
+                    <b>{found.po_no} · {found.supplier_name}</b>
+                    <div className="small">
+                      {found.vehicle_reg ?? 'no vehicle recorded'}
+                      {found.driver_name ? ` · ${found.driver_name}` : ''}
+                      {found.driver_phone ? ` · ${found.driver_phone}` : ''}
+                      {found.transporter ? ` · ${found.transporter}` : ''}
+                      {' · '}invoice {inr(found.invoice_total, 0)}
+                    </div>
+                    {/* Two things the clerk must know before the lorry is
+                        inside, because neither can be undone afterwards. */}
+                    {found.existing_entry_id ? (
+                      <div className="small"><b>This invoice has already been through the gate.</b>{' '}
+                        Do not let it in twice — check with the buyer.</div>
+                    ) : null}
+                    {found.payment_status && found.payment_status !== 'PAID' ? (
+                      <div className="small">
+                        Not paid yet — {found.payment_request_no} is {String(found.payment_status).toLowerCase()}.
+                      </div>
+                    ) : null}
+                    {found.supplier_marked_sent_at ? null : (
+                      <div className="small">The supplier has not marked this as sent.</div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+
               <Field label="Purchase order" hint="Leave blank only if the vehicle arrived without an order">
                 <select value={form.poId} onChange={(e) => setForm({ ...form, poId: e.target.value })}>
                   <option value="">— No purchase order (unplanned) —</option>
@@ -1102,14 +1218,27 @@ function GrnTab({ gate, onDone }: { gate: any; onDone: () => void }) {
   useEffect(() => {
     const netTotal = Number(gate.weighments?.find((w: any) => w.net_kg)?.net_kg ?? 0);
     const insByProduct = new Map((gate.inspections ?? []).map((i: any) => [i.product_id, i]));
+    /* If the floor weighed the boxes, that IS the received quantity — it is the
+       only number on this page that was measured per product rather than
+       inferred from a weighbridge reading for the whole lorry. It still shows
+       in an editable field, because a clerk with the paperwork in front of them
+       may know something the scale did not. */
+    const boxByProduct = new Map((gate.boxTotals ?? []).map((b: any) => [b.product_id, b]));
     const src = (gate.poLines ?? []).length ? gate.poLines : (gate.inspections ?? []).map((i: any) => ({
       product_id: i.product_id, product_name: i.product_name, sku: i.sku,
       uom: 'KG', qty: i.received_qty, rate: 0, id: null,
     }));
     setLines(src.map((l: any) => {
       const ins: any = insByProduct.get(l.product_id);
+      const box: any = boxByProduct.get(l.product_id);
+      const weighedKg = box ? Number(box.net_kg) : null;
+      /* Only trust it as the quantity when the order is in kilos too —
+         otherwise it is a weight, and it belongs in the weight field. */
+      const inKg = String(l.uom ?? 'KG').toUpperCase() === 'KG';
       return {
         poLineId: l.id ?? null,
+        boxes: box ? Number(box.boxes) : 0,
+        weighedKg,
         qcInspectionId: ins?.id ?? null,
         productId: l.product_id, name: l.product_name, sku: l.sku,
         uom: l.uom ?? 'KG',
@@ -1117,11 +1246,15 @@ function GrnTab({ gate, onDone }: { gate: any; onDone: () => void }) {
         // unit mix-up is visible on the row rather than only in the total.
         orderedQty: Number(l.qty ?? 0),
         alreadyReceived: Number(l.received_qty ?? 0),
-        receivedQty: Number(ins?.received_qty ?? l.qty ?? 0),
-        acceptedQty: Number(ins?.accepted_qty ?? l.qty ?? 0),
+        receivedQty: weighedKg != null && inKg
+          ? weighedKg
+          : Number(ins?.received_qty ?? l.qty ?? 0),
+        acceptedQty: weighedKg != null && inKg && !ins
+          ? weighedKg
+          : Number(ins?.accepted_qty ?? l.qty ?? 0),
         rejectedQty: Number(ins?.rejected_qty ?? 0),
         holdQty: Number(ins?.hold_qty ?? 0),
-        netWeightKg: src.length === 1 ? netTotal : null,
+        netWeightKg: weighedKg ?? (src.length === 1 ? netTotal : null),
         rate: Number(l.rate ?? 0),
         grade: ins?.assigned_grade ?? l.expected_grade ?? null,
         rejectionReasonCode: Number(ins?.rejected_qty ?? 0) > 0
@@ -1196,7 +1329,17 @@ function GrnTab({ gate, onDone }: { gate: any; onDone: () => void }) {
               <tbody>
                 {lines.map((l, i) => (
                   <tr key={l.productId}>
-                    <td><b>{l.name}</b><div className="small muted">{l.sku}</div></td>
+                    <td><b>{l.name}</b><div className="small muted">{l.sku}</div>
+                      {/* Where this quantity came from. "48.8 kg over 4 boxes"
+                          is a number the clerk can defend to the supplier; a
+                          weighbridge figure split across three products is
+                          not. */}
+                      {l.boxes ? (
+                        <div className="chip ok" style={{ marginTop: 4 }}>
+                          {l.boxes} boxes weighed · {num(l.weighedKg, 1)} kg
+                        </div>
+                      ) : null}
+                    </td>
                     <td className="num mono">
                       {num(l.receivedQty, 0)} <span className="muted">{l.uom}</span>
                       {l.orderedQty > 0 ? (

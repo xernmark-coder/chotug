@@ -382,3 +382,261 @@ quietly let finance wave through a mismatch far larger than they are trusted wit
 Self-approval is **recorded, not hidden**: `purchase_orders.self_approved` and
 `self_approved_reason` are set, and `ck_po_maker_checker` was relaxed from "never" to "only when
 the row says so and gives a reason".
+
+## finance — every rupee in and out
+
+Mounted at `/api/finance`. Three ideas, kept apart on purpose:
+
+- a **request** is a *claim* on money — anybody who spends may raise one;
+- a **payment** is money *actually moving* — only Finance;
+- a **receipt** is money *arriving* — declared by whoever took it, confirmed by
+  Finance against what really landed.
+
+A claim can be part-paid, reduced, or turned down; only "paid twice" must be
+impossible.
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/expense-categories` | any | Seeded with the client's own list; `affects_landed_cost` decides whether the cost reaches the produce |
+| POST | `/expense-categories` | `admin.settings.manage` | |
+| POST | `/requests` | `finance.request.create` | Held by everyone who spends: purchase, gate, QC, warehouse, farm |
+| GET | `/requests` | any | **Scoped**: without `finance.expense.view` you see only your own, `?mine=1` or not |
+| GET | `/requests/:id` | any | With its payment history |
+| POST | `/requests/:id/verify` | `finance.request.verify` | `{ decision: VERIFY \| REJECT, approvedAmount?, reason? }` — may approve *less*, never more; rejection needs a reason |
+| POST | `/requests/:id/pay` | `finance.payment.make` | Part payments allowed; non-cash needs `transactionRef`, and a reference cannot be reused |
+| POST | `/payments/:id/reverse` | `finance.payment.reverse` | Needs a reason; restores the request |
+| POST | `/receipts` | `finance.receipt.record` | A *declaration*, not a confirmation |
+| GET | `/receipts` | any | Scoped like requests |
+| POST | `/receipts/:id/confirm` | `finance.receipt.confirm` | A gap between declared and landed forces a note and marks the receipt `DISPUTED` |
+| GET | `/overview` | `finance.expense.view` | KPIs, spend by category, cash vs online, daily in/out |
+
+**Maker–checker.** Nobody verifies a request they raised. A document that
+queues *itself* — a captured supplier invoice — is marked `is_system_raised`
+and skips that check, because there is no second human to find: the person who
+captured the invoice is the same Finance clerk who must pay it.
+
+**The three-way match is not a gate.** A supplier invoice reaches this inbox on
+capture, from our clerk or from the supplier's own portal. The match still runs
+and is still shown on the invoice; it informs the buyer, it does not hold the
+money.
+
+## supplier — the other side answers
+
+Mounted at `/api/supplier`. The client's sequence, and the endpoint for each
+arrow:
+
+```
+we confirm  →  POST /orders/:id/respond          (ACCEPT | DECLINE)
+            →  POST /orders/:id/request-payment  (goes to the Finance inbox)
+            →  Finance verifies and pays          (POST /finance/requests/:id/pay)
+            →  POST /orders/:id/dispatch          (the gate is told to expect it)
+```
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| POST | `/orders/:id/respond` | `supplier.order.accept` | Only a `CONFIRMED` order; only once. A decline **needs a reason**, cancels the expected arrival so the gate stops waiting, raises a HIGH alert and puts a critical task in front of the buyer |
+| POST | `/orders/:id/request-payment` | `supplier.payment.request` | Must have accepted first. May ask for **less** than the order is worth, never more, and only once per order — `uq_payreq_source` makes a second claim on the same goods impossible. Asking again returns the standing request and what has been paid on it |
+| POST | `/orders/:id/dispatch` | `supplier.order.dispatch` | Refused unless the order is accepted, **and** any payment they asked for is fully paid. A supplier on credit terms never raises a request, so nothing changes for them — the gate only bites on money they asked for and have not received |
+
+`GET /orders` and `GET /orders/:id` carry `supplier_response`, the response
+note, and the live payment request (`payment_request_no`, `payment_status`,
+`payment_amount`, `payment_paid`), so the portal's label and its button can
+never disagree about which step the order is at.
+
+The buyer's `GET /planning/purchase-orders` carries the same fields: our status
+says where the paperwork is, theirs says whether anybody is going to load a
+lorry.
+
+## receiving — invoice-first entry and per-box weighing
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/receiving/lookup/invoice?no=` | `receiving.gate.create` | The gate's whole job at the barrier. Returns the order, supplier, vehicle, driver, transporter, LR, e-way, the invoice total, whether it has been **paid**, and whether that invoice **has already been through the gate**. A number nobody has seen returns `{found:false}` with a sentence, not an error — plenty of loads arrive against no invoice |
+| GET | `/receiving/gate-entries/:id/boxes` | any | Ordered vs unloaded per product, plus the last 200 boxes. A product on the lorry that was never ordered still appears — that is the case worth seeing |
+| POST | `/receiving/gate-entries/:id/boxes` | `receiving.box.weigh` | One box. Takes `productId` **or** `scannedCode` (the supplier's code or tracking code printed on the box, falling back to our SKU). Box numbers are allocated under the gate entry's row lock, so two tablets weighing at once cannot claim the same number |
+| POST | `/receiving/boxes/:id/void` | `receiving.box.void` | Needs a reason. **Nothing edits a weight** — a weight that can be changed after the fact is a weight nobody can be held to. The box stays on the record and stops counting |
+
+`v_unload_totals` is the one place per-product totals are computed, so no two
+screens can disagree about how much mango came off the lorry. The gate file
+(`GET /gate-entries/:id`) carries `boxTotals`, and the goods receipt prefills
+its received quantity and net weight from them.
+
+**Who may do what:** the warehouse weighs and voids; the gate and QC may weigh;
+the purchase manager and owner may void. Weighing is routine, voiding is not.
+
+## inventory — the packing bench
+
+Quality and packing are one job. Lot QC still governs what is accepted off the
+vehicle; this is the finer pass made by the person holding the box.
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/inventory/pack-bench/:batchId` | any | The batch, what is left unpacked, the split by grade so far, the last 40 boxes, and every active shelf |
+| POST | `/inventory/pack-bench/:batchId/box` | `inventory.pack.grade` | One box: quantity, its **own** grade, price, optional note, optional `binCode` to store it in the same breath. Opens today's pack run for the batch if there isn't one |
+| POST | `/inventory/packs/store` | `inventory.pack.store` | `{ binCode, packIds }` — scan the shelf, tick the boxes. One call, so a box is never half-stored |
+| GET | `/inventory/bins` | any | What is on each shelf: packs, quantity, weight, and which product and grade |
+
+**Why the grade is per box.** The lot inspection gives one grade to everything
+off one lorry. The packer has each box in their hands and can see that this one
+is A and the next is B. Grading the lot and packing separately throws that
+judgement away and puts a grade on the label that the label is supposed to be
+about. When a box is graded differently from its lot, the screen says so and the
+difference is recorded against the packer's name.
+
+`v_bin_contents` is the single source for what is on a shelf, so "where is the
+A-grade mango" has one answer rather than one per screen.
+
+Guards: packing more than the batch holds is refused with the number still
+unpacked; an unknown shelf code is refused by name; a gate clerk may not store
+(403).
+
+## warehouse — the map and the audit team
+
+Mounted at `/api/warehouse`. Four levels — **floor → section → rack → shelf** —
+each with its own printed QR. Three of them already existed as zone/rack/bin;
+this adds the floor above them and a scannable code on every one, rather than
+building a second hierarchy beside the working one.
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/layout` | any | The whole map with pack counts per shelf |
+| POST | `/floors` · `/sections` · `/racks` · `/shelves` | `master.location.manage` | Racks and shelves take a `count` and are created in runs (`A` → `A1, A2, A3`), because nobody lays out ninety shelves one at a time |
+| GET | `/scan/:qr` | any | **One code, one answer.** A shelf returns its contents and its last ten audits; a rack or section returns its children; a *pack* label returns the pack and where it is, because with two stickers on a box that is an easy mistake and an answerable one; anything else returns `{found:false}` with a sentence |
+| GET | `/audits` · `/audits/:id` | `audit.report.view` | Tasks with counts, loss quantity and loss value |
+| POST | `/audits` | `audit.task.raise` | Pushes the task into the auditor's work queue — the same queue every other role works from |
+| POST | `/audits/counts` | `audit.count.record` | One shelf, one product. **The book figure is captured here and stored**; recomputing it later would make last Tuesday's variance change every time a crate moved |
+| POST | `/audits/:id/complete` | `audit.count.record` | Needs findings in the auditor's own words |
+| GET | `/audits-summary` | `audit.report.view` | Open, overdue, mismatches, and what is being lost, by condition and by product |
+
+**The audit reports; it does not correct.** Nothing in this module moves stock.
+The `AUDITOR` role can count, scan and report, and cannot issue, adjust or sell
+— an auditor who can rewrite the ledger is not an auditor. A variance or a
+write-off raises an alert; deciding what to do about it is somebody else's job.
+
+`v_locations` resolves any scanned code to its level and full path; `loc_code()`
+generates the codes from an alphabet with no O/0 or I/1, because these get read
+back off dusty labels.
+
+## centres — the shops
+
+Mounted at `/api/centres`. **A centre is a warehouse with `is_centre` set.** It
+holds stock, stock moves through the same ledger, packs sit on the same shelves
+— giving it its own table would have meant a second stock model and two
+different answers to "how much mango is in Kothrud".
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/` | any | Every centre: holding, value, loads in transit, 30-day sales, customers, last close |
+| PATCH | `/:id` | `admin.settings.manage` | Turn a warehouse into a centre; city, manager, rent, its own UPI |
+| GET | `/:id/today` | any | Stock, incoming loads, today's bills, the last fortnight of closes, customers |
+| POST | `/transfers` | `inventory.stock.issue` | Sends stock **and raises the transport cost with Finance** as a claim, rather than a number typed on a transfer that nobody pays |
+| POST | `/transfers/:id/receive` | `centre.stock.receive` | Per line. Only what is confirmed becomes the shop's stock; a shortfall needs a note and alerts the buyer |
+| GET/POST | `/customers/list`, `/customers` | `master.customer.manage` to add | Added from the dropdown at the till, because that is when you meet them |
+| GET | `/:id/day-close-draft` | any | What the bills say, before the person disagrees with it |
+| POST | `/:id/day-close` | `centre.day.close` | Freezes the system figure beside the declared one; a gap needs a note, raises an alert, and the cash goes to Finance as a receipt |
+| GET | `/performance` | `centre.performance.view` | Ranked, with **net after costs** — revenue flatters a shop with high rent, a long delivery run and heavy wastage |
+
+**Stock in transit belongs to neither place.** Before this a transfer credited
+the destination the instant somebody pressed send, so a load that never arrived
+looked exactly like one sitting on the shelf. It is now `IN_TRANSIT` until the
+shop counts it in.
+
+**Closing twice is a correction, not a second day's takings** — the existing
+receipt is amended, and if Finance has already confirmed it, the change is
+alerted instead of silently rewriting a fact they checked.
+
+A centre asking for stock is an ordinary requirement carrying
+`raisedForWarehouseId` and the person's own `reasoning`, so it lands in the
+purchase manager's existing review queue.
+
+## Person-centric permissions
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/masters/users/:id/permissions` | `admin.rbac.manage` | **Every** permission in the system with where this person's answer comes from — role, granted, or revoked. Showing only what they have would make "why can't they do X" unanswerable |
+| POST | `/masters/users/:id/permissions` | `admin.permission.override` | `{ permissionCode, effect: GRANT \| REVOKE \| DEFAULT, reason, expiresOn? }`. A reason is required; `DEFAULT` removes the override and puts them back on their role |
+| POST | `/masters/users/:id/permissions/reset` | `admin.permission.override` | Clears every override for that person |
+
+```
+what they see = (their roles' permissions + GRANTs) − REVOKEs
+```
+
+Resolved by `v_user_permissions` in the database, so the screen showing what a
+person can do and the gate deciding whether to let them cannot disagree about
+precedence. `loadActor` reads that view.
+
+Guards, each tested: a grant with no reason is refused; an expired grant stops
+working the next time they sign in; **nobody can edit their own permissions**
+— it is the one change with no second pair of eyes anywhere in the system.
+
+## Pricing — what it really cost
+
+`v_overhead_per_kg` derives the cost of simply running the place, rather than
+asking anyone to type it:
+
+```
+overhead per kg = operating expenses actually PAID in the window
+                ÷ kilos actually RECEIVED in the window
+```
+
+Both sides are facts already in the system, so it moves as the business moves.
+Only categories flagged `affects_landed_cost` count — rent and wages do, a
+supplier advance does not, because that is the purchase price arriving early
+and counting it would charge the same rupee twice.
+
+`v_batch_pricing` then gives, per batch:
+
+```
+true cost     = landed rate + overhead
+minimum price = true cost ÷ (1 − wastage%) × (1 + margin%)
+```
+
+Dividing by the wastage rather than multiplying is the part that gets done
+wrong: if a tenth of a crate is thrown away, the nine tenths that sell have to
+carry the whole crate's cost.
+
+`GET /inventory/issuable` and `/inventory/sell-suggestions` both carry
+`overhead_per_kg`, `true_cost` and `min_sell_price`, and the **suggested price
+now floors at the minimum rather than at the purchase price** — selling at what
+a crate cost to buy loses money quietly, which is the worst way to lose it.
+
+## GET /insights/product-performance
+
+`?days=` (1–365). Returns `products[]` and `categories[]`. Per product: bought
+and sold quantity and value, margin and margin %, **waste from both wastage
+issues and audit shortfalls**, sell-through, stock still held, the top four
+suppliers, the top four places it sells, and a daily revenue series.
+
+Categories are summed from the products rather than queried separately, so the
+two can never disagree on a page whose whole purpose is comparison.
+
+## hr — the people who do the work
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/hr/workers` | `hr.report.view` | With 30-day attendance and measured output |
+| POST/PATCH | `/hr/workers`, `/hr/workers/:id` | `hr.worker.manage` | A worker is **not** a user — most will never log in, and requiring an account to be paid is how half a workforce ends up off the books |
+| GET/POST | `/hr/attendance` | `hr.attendance.mark` to write | A batch per day, because somebody walks the floor once. Marking again corrects it. A future date is refused |
+| GET | `/hr/wages/preview` | `hr.wages.run` | Worked out from the attendance, nothing saved |
+| POST | `/hr/wages/run` | `hr.wages.run` | One `WAGES` payment request per person, so Finance can hold one without holding everybody. A bonus needs a reason; the same period cannot be run twice |
+| GET | `/hr/summary` | `hr.report.view` | Headcount, today, wages and bonuses, day-cost per place |
+
+Monthly pay is a salary — it does not shrink because February is short; what it
+loses is unpaid absence. With no overtime rate set, an overtime hour is worth an
+hour of the normal day, because assuming zero would quietly pay people nothing
+for it.
+
+**Performance is measured, not rated**: boxes weighed, boxes packed and shelves
+counted are already recorded against whoever did them (`v_worker_output`). A
+number somebody earned beats a star somebody gave them.
+
+## masters — the company
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/masters/company` | any | Company UPI, default margin, overhead window, and what **each place actually prints** |
+| PATCH | `/masters/company` | `admin.settings.manage` | |
+
+`v_effective_upi`: a centre's own code wins where it has one, the company's is
+what everyone else prints. Only having the per-centre code meant a new shop had
+nothing to print until somebody remembered to set it.

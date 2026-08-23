@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, useAuth, inr, num, date, dateTime, ago, today, addDays } from '../lib/api';
 import {
   AiBox, Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
+  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
 import { EmailSettingsCard } from './People';
@@ -11,8 +12,20 @@ import { EmailSettingsCard } from './People';
 export function InvoiceListPage() {
   const nav = useNavigate();
   const { can } = useAuth();
-  const [status, setStatus] = useState('');
-  const { data, loading, error } = useApi<any[]>(`/costing/invoices?status=${status}`, [status]);
+  const { data, loading, error } = useApi<any[]>('/costing/invoices');
+
+  const f = useFilters<any>(data, {
+    date: (i) => i.invoice_date,
+    search: (i) => [i.invoice_no, i.supplier_name, i.po_no].filter(Boolean).join(' '),
+    facets: [
+      { key: 'status', label: 'status', of: (i) => i.status },
+      { key: 'supplier', label: 'supplier', of: (i) => i.supplier_name },
+    ],
+    totals: [
+      { label: 'Billed', of: (i) => Number(i.total), money: true },
+      { label: 'Still owed', of: (i) => Number(i.balance ?? 0), money: true },
+    ],
+  });
 
   return (
     <Layout title="Supplier invoices" subtitle="Captured, matched against receipts, then payable"
@@ -20,16 +33,10 @@ export function InvoiceListPage() {
         ? <button className="btn primary" onClick={() => nav('/invoices/new')}>Capture invoice</button>
         : undefined}>
       <ErrorBanner error={error} />
-      <div className="search-bar">
-        <select value={status} onChange={(e) => setStatus(e.target.value)}>
-          <option value="">All statuses</option>
-          {['PENDING', 'MATCHED', 'MISMATCH', 'HOLD', 'PAYABLE', 'PART_PAID', 'PAID'].map((s) =>
-            <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
-        </select>
-      </div>
+      <FilterBar f={f} placeholder="Search invoice number or supplier" />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           onRowClick={(i: any) => nav(`/invoices/${i.id}`)}
           rowTone={(i: any) => (i.duplicate_of_id || i.status === 'HOLD' ? 'crit'
             : i.status === 'MISMATCH' ? 'warn' : undefined)}
@@ -50,6 +57,7 @@ export function InvoiceListPage() {
           ]}
           empty={<Empty icon="🧾" title="No invoices captured yet" />}
         />
+        <FilterTotals f={f} noun="invoice" />
       </div></div>
     </Layout>
   );
@@ -347,6 +355,23 @@ export function PaymentsPage() {
   const [tab, setTab] = useState<'due' | 'notes'>('due');
   const { data, loading, error } = useApi<any[]>(`/costing/payments?filter=${filter}`, [filter]);
 
+  const f = useFilters<any>(data, {
+    date: (p: any) => p.invoice_date,
+    search: (p: any) => [p.invoice_no, p.supplier_name].filter(Boolean).join(' '),
+    facets: [
+      { key: 'sup', label: 'supplier', of: (p: any) => p.supplier_name },
+      { key: 'od', label: 'age', of: (p: any) =>
+        Number(p.overdue_days) > 7 ? 'more than a week late'
+          : Number(p.overdue_days) > 0 ? 'late' : 'in time' },
+      { key: 'bl', label: 'block', of: (p: any) => (p.is_blocked ? 'blocked' : 'clear') },
+    ],
+    totals: [
+      { label: 'Payable', of: (p: any) => Number(p.payable_amount) || 0, money: true },
+      { label: 'Paid', of: (p: any) => Number(p.paid_amount) || 0, money: true },
+      { label: 'Still owed', of: (p: any) => Number(p.balance) || 0, money: true },
+    ],
+  });
+
   return (
     <Layout title="Payment status" subtitle="Read-only — payments are made in Finance">
       <ErrorBanner error={error} />
@@ -359,16 +384,17 @@ export function PaymentsPage() {
         </button>
       </div>
       {tab === 'notes' ? <NotesPanel /> : <>
-      <div className="search-bar">
+      <FilterBar f={f} placeholder="Search invoice or supplier">
         <select value={filter} onChange={(e) => setFilter(e.target.value)}>
           <option value="">Everything</option>
           <option value="OPEN">Balance outstanding</option>
           <option value="OVERDUE">Overdue only</option>
         </select>
-      </div>
+      </FilterBar>
+      <FilterTotals f={f} noun="invoice" />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           onRowClick={(p: any) => nav(`/invoices/${p.invoice_id}`)}
           rowTone={(p: any) => (Number(p.overdue_days) > 7 ? 'crit' : Number(p.overdue_days) > 0 ? 'warn' : undefined)}
           cols={[
@@ -383,7 +409,8 @@ export function PaymentsPage() {
               Number(p.overdue_days) > 0 ? <Chip tone="danger">{p.overdue_days}d</Chip> : '—' },
             { key: 'bl', head: '', render: (p: any) => p.is_blocked ? <Chip tone="danger">blocked</Chip> : null },
           ]}
-          empty={<Empty icon="💳" title="Nothing payable" />}
+          empty={<Empty icon="💳" title={f.active > 0
+            ? 'No invoice matches those filters' : 'Nothing payable'} />}
         />
       </div></div>
     </>}
@@ -399,6 +426,21 @@ export function SuppliersPage() {
   const { data, loading, error, reload } = useApi<any[]>('/insights/supplier-performance');
   const [busy, setBusy] = useState(false);
   const mayManage = can('master.supplier.manage');
+
+  const f = useFilters<any>(data, {
+    search: (x: any) => [x.trade_name, x.legal_name, x.code, x.source_type]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'ty', label: 'type', of: (x: any) => x.source_type },
+      { key: 'st', label: 'status', of: (x: any) => x.status },
+      { key: 'rj', label: 'rejections', of: (x: any) =>
+        (Number(x.rejection_pct) > 10 ? 'over 10%' : 'under 10%') },
+    ],
+    totals: [
+      { label: 'Suppliers', of: () => 1 },
+      { label: 'Orders', of: (x: any) => Number(x.order_count) || 0 },
+    ],
+  });
 
   const recompute = async () => {
     setBusy(true);
@@ -437,9 +479,11 @@ export function SuppliersPage() {
           few orders is pulled towards 50 so a single lucky delivery does not look like excellence.
         </div>
       </div>
+      <FilterBar f={f} placeholder="Search supplier or code" />
+      <FilterTotals f={f} noun="supplier" />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           rowTone={(s: any) => (s.status === 'BLOCKED' ? 'crit'
             : s.status === 'ON_HOLD' || Number(s.rejection_pct) > 10 ? 'warn' : undefined)}
           cols={[
@@ -498,21 +542,40 @@ function SupplierManager() {
   const [editing, setEditing] = useState<any>(null);
   const [blocking, setBlocking] = useState<any>(null);
 
+  const f = useFilters<any>(data, {
+    search: (x: any) => [x.trade_name, x.legal_name, x.code, x.district, x.phone, x.email, x.gstin]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'ty', label: 'type', of: (x: any) => x.source_type },
+      { key: 'st', label: 'status', of: (x: any) => x.status },
+      { key: 'ds', label: 'district', of: (x: any) => x.district },
+      { key: 'gst', label: 'GST', of: (x: any) =>
+        (x.gstin ? 'registered' : x.is_unregistered ? 'unregistered' : 'not recorded') },
+      { key: 'lg', label: 'portal', of: (x: any) =>
+        (Number(x.login_count) > 0 ? 'signs in' : 'never signed in') },
+    ],
+    totals: [
+      { label: 'Suppliers', of: () => 1 },
+      { label: 'Orders', of: (x: any) => Number(x.order_count) || 0 },
+    ],
+  });
+
   return (
     <>
       <ErrorBanner error={error} />
-      <div className="search-bar">
+      <FilterBar f={f} placeholder="Search supplier, code, district, GSTIN">
         <label className="row" style={{ gap: 7 }}>
           <input type="checkbox" style={{ width: 'auto' }} checked={showBlocked}
             onChange={(e) => setShowBlocked(e.target.checked)} />
-          <span className="small">Show removed suppliers</span>
+          <span className="small">Show removed</span>
         </label>
         <span className="spacer" />
         <button className="btn primary" onClick={() => setEditing({})}>Add supplier</button>
-      </div>
+      </FilterBar>
+      <FilterTotals f={f} noun="supplier" />
 
       <div className="card"><div className="card-body tight">
-        <DataTable rows={data ?? []} loading={loading}
+        <DataTable rows={f.rows} loading={loading}
           rowTone={(s: any) => (s.status === 'BLOCKED' ? 'crit' : undefined)}
           cols={[
             { key: 'n', head: 'Supplier', render: (s: any) => (
@@ -707,6 +770,17 @@ export function AlertsPage() {
   const [status, setStatus] = useState('OPEN');
   const { data, loading, error, reload } = useApi<any[]>(`/insights/alerts?status=${status}`, [status]);
 
+  const f = useFilters<any>(data, {
+    date: (a: any) => a.created_at,
+    search: (a: any) => [a.title, a.message, a.alert_type].filter(Boolean).join(' '),
+    facets: [
+      { key: 'sv', label: 'severity', of: (a: any) => a.severity },
+      { key: 'ty', label: 'type', of: (a: any) => String(a.alert_type).replace(/_/g, ' ') },
+      { key: 'st', label: 'status', of: (a: any) => a.status },
+    ],
+    totals: [{ label: 'Alerts', of: () => 1 }],
+  });
+
   const act = async (id: string, action: string) => {
     try {
       await api.post(`/insights/alerts/${id}/ack`, { action });
@@ -718,14 +792,15 @@ export function AlertsPage() {
   return (
     <Layout title="Alerts" subtitle="Things the system noticed that need a person">
       <ErrorBanner error={error} />
-      <div className="search-bar">
+      <FilterBar f={f} placeholder="Search alerts">
         <select value={status} onChange={(e) => setStatus(e.target.value)}>
           {['OPEN', 'ACK', 'RESOLVED'].map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
-      </div>
+      </FilterBar>
+      <FilterTotals f={f} noun="alert" />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           rowTone={(a: any) => (a.severity === 'CRITICAL' ? 'crit' : a.severity === 'HIGH' ? 'warn' : undefined)}
           cols={[
             { key: 's', head: 'Severity', width: 100, render: (a: any) => <Chip value={a.severity} /> },
@@ -742,7 +817,10 @@ export function AlertsPage() {
               </div>
             ) : null },
           ]}
-          empty={<Empty icon="🔕" title="No alerts" hint="Nothing needs your attention." />}
+          empty={<Empty icon="🔕"
+            title={f.active > 0 ? 'No alert matches those filters' : 'No alerts'}
+            hint={f.active > 0 ? 'Clear a filter to widen the search.'
+              : 'Nothing needs your attention.'} />}
         />
       </div></div>
     </Layout>
@@ -750,14 +828,126 @@ export function AlertsPage() {
 }
 
 /* ======================================================= REPORTS ======== */
-const REPORTS = [
-  { key: 'purchase-register', name: 'Purchase register', desc: 'Every line received, with rate and landed cost' },
-  { key: 'quality-rejection', name: 'Quality & rejection', desc: 'What was rejected, why, and by whom' },
-  { key: 'weight-variance', name: 'Weight variance', desc: 'Where the weighbridge disagreed with the order' },
-  { key: 'landing-cost', name: 'Landed cost analysis', desc: 'True cost per kg and how it moved' },
-  { key: 'pending-po', name: 'Pending purchase orders', desc: 'Ordered but not yet received' },
-  { key: 'stock-position', name: 'Stock position', desc: 'On-hand by batch with expiry risk' },
-  { key: 'ai-acceptance', name: 'AI acceptance', desc: 'How often people take the AI suggestion' },
+/* A report is a table whose columns depend on which report you picked, so the
+ * filters have to be declared per report rather than per page. Each entry says
+ * which column carries the date, which columns are worth narrowing by, and
+ * what the remaining rows should add up to — the same three things every other
+ * list in the app declares, just keyed by report. */
+type ReportDef = {
+  key: string;
+  name: string;
+  desc: string;
+  noun: string;
+  /** Column holding the row's date. Omitted where a time window is meaningless. */
+  date?: string;
+  facets: [col: string, label: string][];
+  totals: { col: string; label: string; money?: boolean; decimals?: number }[];
+  search: string[];
+};
+
+const REPORTS: ReportDef[] = [
+  {
+    key: 'purchase-register',
+    name: 'Purchase register',
+    desc: 'Every line received, with rate and landed cost',
+    noun: 'line', date: 'posting_date',
+    facets: [['supplier', 'supplier'], ['product', 'product'], ['grade', 'grade'],
+      ['source_type', 'source'], ['uom', 'unit']],
+    totals: [
+      { col: 'accepted_qty', label: 'Accepted' },
+      { col: 'rejected_qty', label: 'Rejected' },
+      { col: 'net_weight_kg', label: 'Weight kg', decimals: 1 },
+      { col: 'line_value', label: 'Value', money: true },
+    ],
+    search: ['grn_no', 'po_no', 'sku', 'product', 'supplier'],
+  },
+  {
+    key: 'quality-rejection',
+    name: 'Quality & rejection',
+    desc: 'What was rejected, why, and by whom',
+    noun: 'inspection', date: 'date',
+    facets: [['supplier', 'supplier'], ['product', 'product'],
+      ['assigned_grade', 'grade'], ['inspector', 'inspector']],
+    totals: [
+      { col: 'received_qty', label: 'Received' },
+      { col: 'accepted_qty', label: 'Accepted' },
+      { col: 'rejected_qty', label: 'Rejected' },
+      { col: 'hold_qty', label: 'On hold' },
+    ],
+    search: ['inspection_no', 'product', 'sku', 'supplier', 'inspector'],
+  },
+  {
+    key: 'weight-variance',
+    name: 'Weight variance',
+    desc: 'Where the weighbridge disagreed with the order',
+    noun: 'weighment', date: 'date',
+    facets: [['supplier', 'supplier'], ['variance_band', 'band'], ['kind', 'kind'],
+      ['capture_mode', 'capture'], ['weighed_by', 'weighed by']],
+    totals: [
+      { col: 'net_kg', label: 'Net kg', decimals: 1 },
+      { col: 'expected_kg', label: 'Expected kg', decimals: 1 },
+      { col: 'variance_kg', label: 'Variance kg', decimals: 1 },
+    ],
+    search: ['gate_no', 'vehicle_reg_captured', 'supplier', 'po_no', 'weighed_by'],
+  },
+  {
+    key: 'landing-cost',
+    name: 'Landed cost analysis',
+    desc: 'True cost per kg and how it moved',
+    noun: 'line', date: 'posting_date',
+    facets: [['supplier', 'supplier'], ['product', 'product']],
+    totals: [
+      { col: 'base_value', label: 'Bought for', money: true },
+      { col: 'allocated_total', label: 'Overheads', money: true },
+      { col: 'wastage_amount', label: 'Wastage', money: true },
+      { col: 'landed_value', label: 'Landed', money: true },
+    ],
+    search: ['grn_no', 'supplier', 'product', 'sku'],
+  },
+  {
+    key: 'pending-po',
+    name: 'Pending purchase orders',
+    desc: 'Ordered but not yet received',
+    noun: 'line', date: 'order_date',
+    facets: [['supplier', 'supplier'], ['product', 'product'], ['status', 'status'],
+      ['line_status', 'line status']],
+    totals: [
+      { col: 'ordered', label: 'Ordered' },
+      { col: 'received_qty', label: 'Received' },
+      { col: 'balance_qty', label: 'Still to come' },
+    ],
+    search: ['po_no', 'supplier', 'product'],
+  },
+  {
+    key: 'stock-position',
+    name: 'Stock position',
+    desc: 'On-hand by batch with expiry risk',
+    /* No time window: stock is a position, not a period. The date boxes above
+     * already read as "expiring between", which is the only sense a date makes
+     * here — a second "last 30 days" control would mean something different
+     * again and quietly hide stock. */
+    noun: 'batch',
+    facets: [['product_name', 'product'], ['grade', 'grade'], ['status', 'status']],
+    totals: [
+      { col: 'qty', label: 'On hand' },
+      { col: 'available_qty', label: 'Available' },
+      { col: 'weight_kg', label: 'Weight kg', decimals: 1 },
+    ],
+    search: ['sku', 'product_name', 'batch_no'],
+  },
+  {
+    key: 'ai-acceptance',
+    name: 'AI acceptance',
+    desc: 'How often people take the AI suggestion',
+    noun: 'week', date: 'week',
+    facets: [['feature_key', 'feature']],
+    totals: [
+      { col: 'runs', label: 'Runs' },
+      { col: 'accepted', label: 'Accepted' },
+      { col: 'overridden', label: 'Overridden' },
+    ],
+    search: ['feature_key'],
+  },
 ];
 
 export function ReportsPage() {
@@ -767,11 +957,34 @@ export function ReportsPage() {
   const { data, loading, error } = useApi<any>(
     `/insights/reports/${key}?from=${from}&to=${to}`, [key, from, to]);
   const { can } = useAuth();
+  const def = REPORTS.find((r) => r.key === key)!;
+
+  /* Only offer a facet the chosen report actually has a column for, and only
+   * when more than one value appears — a "supplier" dropdown holding one
+   * supplier is a control that cannot do anything. */
+  const present = React.useMemo(() => {
+    const rows: any[] = data?.rows ?? [];
+    const cols = new Set(rows.length ? Object.keys(rows[0]) : []);
+    return def.facets.filter(([c]) => cols.has(c)
+      && new Set(rows.map((r) => r[c]).filter((v) => v != null && v !== '')).size > 1);
+  }, [data, def]);
+
+  const f = useFilters<any>(data?.rows, React.useMemo(() => ({
+    date: def.date ? (r: any) => r[def.date!] : undefined,
+    search: (r: any) => def.search.map((c) => r[c]).filter(Boolean).join(' '),
+    facets: present.map(([col, label]) => ({ key: col, label, of: (r: any) => r[col] })),
+    totals: def.totals.map((t) => ({
+      label: t.label, money: t.money, decimals: t.decimals,
+      of: (r: any) => Number(r[t.col]) || 0,
+    })),
+  }), [def, present]));
 
   const download = () => {
-    if (!data?.rows?.length) return;
-    const cols = Object.keys(data.rows[0]);
-    const csv = [cols.join(','), ...data.rows.map((r: any) =>
+    // Exports what is on the screen. Downloading 5,000 rows after narrowing to
+    // nine is not the file anyone meant to ask for.
+    if (!f.rows.length) return;
+    const cols = Object.keys(f.rows[0]);
+    const csv = [cols.join(','), ...f.rows.map((r: any) =>
       cols.map((c) => {
         const v = r[c];
         const s = v === null || v === undefined ? '' : String(v);
@@ -785,12 +998,14 @@ export function ReportsPage() {
     URL.revokeObjectURL(url);
   };
 
-  const cols = data?.rows?.length ? Object.keys(data.rows[0]) : [];
+  const cols = f.rows.length ? Object.keys(f.rows[0]) : [];
 
   return (
     <Layout title="Reports" subtitle="Numbers you can take to a meeting"
       actions={can('data.export')
-        ? <button className="btn primary" disabled={!data?.rows?.length} onClick={download}>Download CSV</button>
+        ? <button className="btn primary" disabled={!f.rows.length} onClick={download}>
+            Download CSV{f.active > 0 ? ` (${f.rows.length})` : ''}
+          </button>
         : undefined}>
       <ErrorBanner error={error} />
       <div className="grid c4 mb">
@@ -803,22 +1018,25 @@ export function ReportsPage() {
         ))}
       </div>
 
-      <div className="search-bar">
-        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
-        <span className="spacer" />
-        <span className="small muted">{data?.count ?? 0} rows</span>
-      </div>
+      <FilterBar f={f} placeholder={`Search ${def.name.toLowerCase()}`}>
+        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)}
+          title={key === 'stock-position' ? 'Expiring from' : 'From'} />
+        <input type="date" value={to} onChange={(e) => setTo(e.target.value)}
+          title={key === 'stock-position' ? 'Expiring until' : 'To'} />
+      </FilterBar>
+      <FilterTotals f={f} noun={def.noun} />
 
       <div className="card"><div className="card-body tight">
-        {loading ? <Loading /> : !data?.rows?.length ? (
-          <Empty icon="📈" title="No data for this period" />
+        {loading ? <Loading /> : !f.rows.length ? (
+          <Empty icon="📈"
+            title={f.active > 0 ? 'Nothing matches those filters' : 'No data for this period'}
+            hint={f.active > 0 ? 'Clear a filter to widen the search.' : undefined} />
         ) : (
           <div className="table-wrap" style={{ maxHeight: '65vh', overflowY: 'auto' }}>
             <table className="data">
               <thead><tr>{cols.map((c) => <th key={c}>{c.replace(/_/g, ' ')}</th>)}</tr></thead>
               <tbody>
-                {data.rows.slice(0, 500).map((r: any, i: number) => (
+                {f.rows.slice(0, 500).map((r: any, i: number) => (
                   <tr key={i}>{cols.map((c) => (
                     <td key={c} className={typeof r[c] === 'number' ? 'num mono' : ''}>
                       {r[c] === null || r[c] === undefined ? '—'
@@ -831,6 +1049,12 @@ export function ReportsPage() {
                 ))}
               </tbody>
             </table>
+            {f.rows.length > 500 ? (
+              <div className="small muted" style={{ padding: '8px 12px' }}>
+                Showing the first 500 of {f.rows.length}. Narrow the filters, or download the CSV
+                for all of them.
+              </div>
+            ) : null}
           </div>
         )}
       </div></div>
@@ -994,6 +1218,7 @@ export function SettingsPage() {
   return (
     <Layout title="Settings" subtitle="Thresholds that change how the system behaves">
       <ErrorBanner error={error} />
+      <div className="mb"><CompanyCard /></div>
       <div className="mb"><EmailSettingsCard /></div>
       {loading ? <Loading /> : (
         <div className="card"><div className="card-body">
@@ -1173,5 +1398,96 @@ function NotesPanel() {
         />
       </div></div>
     </>
+  );
+}
+
+
+/* ---------------------------------------------------------------------------
+ * The company's own details: the UPI code every shop prints, and the two
+ * numbers behind the minimum sell price.
+ * ------------------------------------------------------------------------ */
+function CompanyCard() {
+  const toast = useToast();
+  const { can } = useAuth();
+  const { data, reload } = useApi<any>('/masters/company');
+  const [f, setF] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (data && !f) {
+      setF({
+        upiId: data.upi_id ?? '', upiPayeeName: data.upi_payee_name ?? '',
+        defaultMarginPct: String(data.default_margin_pct ?? 15),
+        overheadWindowDays: String(data.overhead_window_days ?? 30),
+      });
+    }
+  }, [data]); // eslint-disable-line
+
+  if (!data || !f) return null;
+  const set = (k: string) => (e: any) => setF((s: any) => ({ ...s, [k]: e.target.value }));
+  const editable = can('admin.settings.manage');
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>{data.trade_name ?? data.legal_name}</h2>
+        {editable ? (
+          <button className="btn sm primary" disabled={busy} onClick={async () => {
+            setBusy(true);
+            try {
+              const r = await api.patch<any>('/masters/company', {
+                upiId: f.upiId || undefined,
+                upiPayeeName: f.upiPayeeName || undefined,
+                defaultMarginPct: Number(f.defaultMarginPct) || undefined,
+                overheadWindowDays: Number(f.overheadWindowDays) || undefined,
+              });
+              toast(r.message, 'ok'); reload();
+            } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(false); }
+          }}>Save</button>
+        ) : null}
+      </div>
+      <div className="card-body">
+        <div className="grid c2">
+          <Field label="Company UPI code"
+            hint="Every centre prints this unless it has its own.">
+            <input value={f.upiId} disabled={!editable} onChange={set('upiId')}
+              placeholder="chotug@okhdfcbank" />
+          </Field>
+          <Field label="Name shown when they pay">
+            <input value={f.upiPayeeName} disabled={!editable} onChange={set('upiPayeeName')}
+              placeholder="ChotuG Agro" />
+          </Field>
+        </div>
+        <div className="grid c2">
+          <Field label="Minimum margin (%)"
+            hint="The profit built into every product's floor price, unless the product sets its own.">
+            <input type="number" value={f.defaultMarginPct} disabled={!editable}
+              onChange={set('defaultMarginPct')} />
+          </Field>
+          <Field label="Overhead is averaged over (days)"
+            hint="Running costs paid, divided by kilos handled, across this many days.">
+            <input type="number" value={f.overheadWindowDays} disabled={!editable}
+              onChange={set('overheadWindowDays')} />
+          </Field>
+        </div>
+
+        <div className="section-head sm"><h3>What each place prints</h3><span className="rule" /></div>
+        <table className="mini">
+          <tbody>
+            {(data.places ?? []).map((pl: any) => (
+              <tr key={pl.warehouse_id}>
+                <td><b>{pl.place_name}</b></td>
+                <td className="mono small">{pl.upi_id ?? <span className="muted">nothing set</span>}</td>
+                <td style={{ width: 120 }}>
+                  <Chip tone={pl.is_own_code ? 'primary' : 'neutral'}>
+                    {pl.is_own_code ? 'its own' : "the company's"}
+                  </Chip>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }

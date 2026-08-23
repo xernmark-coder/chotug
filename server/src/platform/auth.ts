@@ -31,8 +31,12 @@ export async function loadActor(userId: string): Promise<Actor | null> {
     `
     SELECT u.id, u.company_id, u.default_branch_id, u.status, u.supplier_id, u.driver_id,
            COALESCE(array_agg(DISTINCT r.code)   FILTER (WHERE r.code IS NOT NULL), '{}') AS role_codes,
-           COALESCE(array_agg(DISTINCT rp.permission_code)
-                    FILTER (WHERE rp.permission_code IS NOT NULL), '{}')                  AS perms,
+           /* Roles are the default; a person can be given or denied one
+            * permission on top. Resolved in the database rather than here, so
+            * a screen asking "what can this person do" and the gate deciding
+            * whether to let them cannot disagree about precedence. */
+           COALESCE((SELECT array_agg(vp.permission_code)
+                       FROM v_user_permissions vp WHERE vp.user_id = u.id), '{}') AS perms,
            MAX(rl.max_po_value)            AS max_po_value,
            MAX(rl.max_approval_level)      AS max_approval_level,
            MAX(rl.max_rate_variance_pct)   AS max_rate_variance_pct,
@@ -45,7 +49,6 @@ export async function loadActor(userId: string): Promise<Actor | null> {
             AND ura.valid_from <= CURRENT_DATE
             AND (ura.valid_to IS NULL OR ura.valid_to >= CURRENT_DATE)
       LEFT JOIN roles r            ON r.id  = ura.role_id
-      LEFT JOIN role_permissions rp ON rp.role_id = r.id
       LEFT JOIN role_limits rl      ON rl.role_id = r.id
      WHERE u.id = $1
      GROUP BY u.id`,

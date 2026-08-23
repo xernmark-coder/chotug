@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { api, useAuth, date, num } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Layout, Modal, useApi, useToast,
+  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
 
@@ -79,6 +80,22 @@ function VehiclesCard({ showRetired, manage }: { showRetired: boolean; manage: b
     } catch (e: any) { toast(e.message, 'err'); }
   };
 
+  const f = useFilters<any>(data, {
+    search: (v: any) => [v.reg_no, v.make_model, v.transporter_name, v.vehicle_type]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 't', label: 'type', of: (v: any) => v.vehicle_type },
+      { key: 'tr', label: 'transporter', of: (v: any) => v.transporter_name },
+      { key: 'st', label: 'status', of: (v: any) => (v.is_active ? v.status : 'REMOVED') },
+      { key: 'pp', label: 'papers', of: (v: any) =>
+        (v.compliance_expired ? 'expired' : 'valid') },
+    ],
+    totals: [
+      { label: 'Vehicles', of: () => 1 },
+      { label: 'Capacity kg', of: (v: any) => Number(v.capacity_kg) || 0 },
+    ],
+  });
+
   return (
     <>
       <ErrorBanner error={error} />
@@ -91,8 +108,10 @@ function VehiclesCard({ showRetired, manage }: { showRetired: boolean; manage: b
           ) : null}
         </div>
         <div className="card-body tight">
+          <FilterBar f={f} placeholder="Search registration, transporter" />
+          <FilterTotals f={f} noun="vehicle" />
           <DataTable
-            rows={data ?? []} loading={loading}
+            rows={f.rows} loading={loading}
             rowTone={(v: any) => (!v.is_active ? undefined
               : v.status === 'BLOCKED' ? 'crit' : v.compliance_expired ? 'warn' : undefined)}
             cols={[
@@ -325,6 +344,17 @@ function DriversCard({ showRetired, manage }: { showRetired: boolean; manage: bo
     } catch (e: any) { toast(e.message, 'err'); }
   };
 
+  const f = useFilters<any>(data, {
+    search: (d: any) => [d.full_name, d.phone, d.dl_number].filter(Boolean).join(' '),
+    facets: [
+      { key: 'st', label: 'status', of: (d: any) => (d.is_active ? d.status : 'REMOVED') },
+      { key: 'dl', label: 'licence', of: (d: any) => (d.licence_expired ? 'expired' : 'valid') },
+      { key: 'cs', label: 'consent', of: (d: any) =>
+        (d.consent_obtained_at ? 'recorded' : 'not recorded') },
+    ],
+    totals: [{ label: 'Drivers', of: () => 1 }],
+  });
+
   return (
     <>
       <ErrorBanner error={error} />
@@ -337,8 +367,10 @@ function DriversCard({ showRetired, manage }: { showRetired: boolean; manage: bo
           ) : null}
         </div>
         <div className="card-body tight">
+          <FilterBar f={f} placeholder="Search name, phone, licence" />
+          <FilterTotals f={f} noun="driver" />
           <DataTable
-            rows={data ?? []} loading={loading}
+            rows={f.rows} loading={loading}
             rowTone={(d: any) => (!d.is_active ? undefined
               : d.status === 'BLOCKED' ? 'crit' : d.licence_expired ? 'warn' : undefined)}
             cols={[

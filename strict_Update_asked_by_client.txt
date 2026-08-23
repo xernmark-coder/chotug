@@ -1,0 +1,63 @@
+ok now here few major things needs to be chnaged as asked by the client :
+
+when purchase is confirmed the invoice and vehical are entered by the suppplier panel , because the payment is done at that time of confirmation with supplier and the supplier should enter the invoice in the system . also when the vehical come at gate they will only enter this invoice number and get the entry , by invoice number the vehical driver and other details of vehical will be autofilled as entered by supplier the gate person will edit that details if necessary .
+
+also for each product a uinique code will be genrated based on its supplier , product and product breed everyhthing which will help to track it proeprly acorss the system .
+
+also when taking is down from the vehical to warehouse they will weight each box on small weight and then for that product the total weight is calculated this is because in a vehical they buy multiple product then while taking down the boxes they weight each box by selecting its product number , for that product the wieght should be updated in the system .
+
+also when the product comes froma particular supplier its product number will be different for different suppliers , also there are different types of same product take that into consideration too like mango can have different verities like happos kokani etc , this should be trcked and admin and other should be able to add it .
+
+Finance panel : thisis very much cruicial and central panel in this crm strictly , because here as said by client all the money related things are handld by this panel , weather it be payment to supplier , total revenue generated , payment to the workers everything , so this panel should be tightly integrated everywhere and should get the details of the each payment , he will get payment request and make payment this is reflected acorss all system . each payment request go to him and then he verifies and do payment . also payments from the centers and the customers will be collected by the finance panel . what is center ive explained later in it . also finance panel should be able to track the total expense and every expense will be don by them only like manpower working on the warehouse their wadges , electricity bill , petrol bill for vehicals , rent of center or warehouse , cleaning cost , everything should be tracked at the finance panel make it very good . also they should be able to see performance of each center . 
+
+also payment mode also should be tracked properly , weather it is cash or online across the centers , also admin should be able to set particular upi code from his pael so centers may print that , or keep their own code for online payment at their shop . for payment trasaction id to should be stored and checked properly . 
+
+now on the warehouse they want it like to make the sections , shelves , rank , floor such type of structure , each product will be placed in particular place , now each thing will have a qr code , like each section , each shell and at time of placing product in warehouse the product will also generate a qr code based on the location in the warehouse , they will stick this qr and place at partiuculatr location . this qr will be later used by the audit team they will scan a qr of shelve they will get all information about that shelve and so on . this information will be properly updated with the input output of the product .
+
+also each reduction and increase in amunt of product should be reflected acress the whole sysytem .
+
+there will be one audit team interface , also from that everything will be recrder such as who , how , when how much audit it done everything . they will recorder how much loss or status of any product during audit . and this audit team will get message to audit particular stock or product . 
+
+also at selling they shuould be able to add the customer from dropdown just keep a button of add one more customr and this will open a form for details of customer such as name , loaction , other necessary details , phone number , etc. and then they will select customer from the dropdown . every dropdown should have option to add new things to it by admin in the website .
+
+also what each panel see should be totally controllable by the admin , admin should be able to give extra permissions or remove some permissions from a panel of a person , for example there are two purchase executives , admin can set different things on their panels , that it should be person centric what they see , also psition centric modifcation alsp should be there , person centric will ovverride postion and can be reset also.
+
+every purchase every entry should be be immediatly visible to every page particularly finance and admin pages .
+
+also packing and quality check should be together , what they do it , they take all product and then while packing them they just give each box a quality and then store it to warehouse , so these 2 things should be done together quality check packing with proper flow . and then packed boxes go to their particular rack by taking qr code on them .
+
+here one more panel to add that is center , center is basically they sell their product from various centers in the city , so each center will have a panel , everything about them  will be tracked such as to which center how much quntity is sent , how much quantity of product is present at that center , how much selling is beign done at that center who are customers at that center , ranking and comparison of various centers . each center will enter its audit everyday before closing the center about how much quantitiy of product sod , how much revenue generated everything , also the person at the center should be able to raise the requirement of particular product along with the proper resoning and this request will come to purchase manager to review so accordingly he can but more quantity to send to particular center . the payment from each center will be collected at the finance department . everything will be tracked properly about the quantity of product available in warehouse , the product present at each center the vehicak used to send those product to that center the cost of that transport every single expense will be recorded .
+
+
+also on the panel they want the emoji for ezch product so that they will be able to identify the product visually as their staff is bit non technical they want to understad it visually , it should be clean good svg for each product .
+
+also there should be proper visible pricing of each product such as it bought for this , total expense on this is this much including everything , labour storage transposrt so this should be mimimum price to sell it for profit , it should be there , 
+
+also there will be product category and under that there will be products such as category of mango under that different breeds of the mango . 
+
+also they want one page for product and category perfomance analysis , on that page , performace of each product should be visible , like how much it got sold total , how much revenue by that product , supplier of that products , where it is being sold , loss in that product , everything in that card of the report for each product . also same performance and evrything should be for the category wise also . this should be visible along with proper graphs on that page . 
+
+also they want one hr panel , from hr panel they will be keep track of every person working in their center , their wedges , evrything about them such as leave they are taking their working hours and performances of the workers and bonuses given to them etc. 
+
+also there should various filter on every list in the website , the one must filter is by time . others could be by product , supplier , etc. like on the search on what to buy , various filters on the reuiqrements , such by product , by prioirty , by raised by , search also . various filters on the purchase order also by possible things also after the filer there should come up numbers repreenting the filter like total entities in that filter , total cost , etc.
+
+also see strickly every payment and invoice and other things should be updated acorss all the pages and panel , there one ivoice i enter for a vehical and it not get updated .
+
+please update the architecure according to it and make the flow smooth for the users .
+
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+also it is possible that the supplier will update the rate of each product from their panel so admin or purchaser just compare .
+
+there is one bug in buying the product if ai suggested something in points to buy , it should be rounded off to upper multiple of 5 please do that . 
+
+the call supplier to confirm should be removed just keep there number in case the purchaser wants to call , when the purchase order is confirmed with any supplier it will be confirmed by side of the supplier he will confirm it on thier panel , then notficatio will come to purchaser that they have confirmed do payment.
+
+also the option to do packing should be with the quality check  only they do quality check and make the paclet of that and store those packets directly in the warehouse. so keep those options in the flow please .
+
+also there is one option of the dispatch , it should be there when the order is places if supplier reuqest for vehical or admin or purchase executive voluntarily can assign vehical to them .
+
+

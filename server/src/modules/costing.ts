@@ -4,6 +4,7 @@ import { query, withTx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
 import { authenticate, staffOnly, requires } from '../platform/auth.js';
 import { emit, getSetting, nextDocNo, pushTask, raiseAlert, requestApprovals, resolveTask } from '../platform/services.js';
+import { createRequest } from './finance.js';
 import {
   computeLandingCost, money, round, threeWayMatch,
   type Charge, type CostLine, type MatchLine,
@@ -348,6 +349,29 @@ costingRouter.post('/invoices', requires('finance.invoice.create'), h(async (req
       });
     }
 
+    /* Straight into Finance's inbox on capture.
+     *
+     * This used to wait for a clean 3-way match, which meant an invoice that
+     * differed from the receipt by a kilo could never be paid. The client pays
+     * the supplier at confirmation, so the match is reconciliation after the
+     * fact — useful to read, never a gate. Finance still verifies every request
+     * before money moves; that is where the judgement belongs. */
+    const { rows: supRow } = await tx.query(
+      `SELECT COALESCE(trade_name, legal_name) AS name FROM suppliers WHERE id=$1`,
+      [input.supplierId]);
+    await createRequest(tx, req.actor, {
+      kind: 'SUPPLIER_INVOICE',
+      amount: Number(input.total),
+      payeeName: supRow[0]?.name ?? 'Supplier',
+      branchId: input.branchId,
+      supplierId: input.supplierId,
+      dueDate: input.dueDate ?? undefined,
+      note: `Invoice ${input.invoiceNo}`,
+      sourceType: 'supplier_invoice',
+      sourceId: inv.id,
+      systemRaised: true,
+    });
+
     await pushTask(tx, req.actor, {
       branchId: input.branchId, queueKey: 'INVOICE_MATCH',
       docType: 'INVOICE', docId: inv.id, docNo: input.invoiceNo,
@@ -435,6 +459,7 @@ costingRouter.post('/invoices/:id/match', requires('finance.invoice.match'), h(a
          ON CONFLICT (invoice_id) DO UPDATE SET payable_amount=EXCLUDED.payable_amount,
               balance=EXCLUDED.balance, due_date=EXCLUDED.due_date, last_synced_at=now()`,
         [inv.id, req.actor.companyId, inv.supplier_id, inv.total, inv.due_date]);
+
       await resolveTask(tx, req.actor, 'INVOICE_MATCH', 'INVOICE', inv.id);
       await emit(tx, req.actor, 'supplier_invoice', inv.id, 'invoice.payable',
         { invoiceNo: inv.invoice_no, total: inv.total });

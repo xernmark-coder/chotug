@@ -6,6 +6,7 @@ import { authenticate, staffOnly, requires } from '../platform/auth.js';
 import { emit } from '../platform/services.js';
 import { supplierScore, round } from '../domain/index.js';
 import { assistantAnswer, forecastDemand, priceSignal } from '../ai/features.js';
+import { buyList } from './planning.js';
 
 export const insightsRouter = Router();
 insightsRouter.use(authenticate);
@@ -42,6 +43,197 @@ insightsRouter.get('/work-queue', h(async (req) => {
 /* ===========================================================================
  * §21 — Dashboard. Every number here is a link to the list behind it.
  * ======================================================================== */
+
+/* ===========================================================================
+ * HOW EACH PRODUCT IS ACTUALLY DOING
+ *
+ *   "performance of each product should be visible, like how much it got sold
+ *    total, how much revenue by that product, supplier of that products, where
+ *    it is being sold, loss in that product, everything in that card … also the
+ *    same for the category."
+ *
+ * One query per fact, joined on the product, rather than one enormous query
+ * with six left joins — a product that was bought and never sold, or sold and
+ * never bought, has to appear either way, and aggregate joins quietly multiply
+ * each other's rows when more than one has several matches.
+ * ======================================================================== */
+insightsRouter.get('/product-performance', requires('reports.purchase.view'), h(async (req) => {
+  const days = Math.min(Math.max(Number(req.query.days ?? 30), 1), 365);
+  const c = req.actor.companyId;
+
+  const [bought, sold, wasted, audited, stock, suppliers, places, daily, categories] =
+    await Promise.all([
+      query(req.actor,
+        `SELECT gl.product_id, SUM(gl.accepted_qty) AS qty, SUM(gl.line_value) AS value,
+                SUM(gl.rejected_qty) AS rejected_qty, count(DISTINCT g.id)::int AS loads
+           FROM grn_lines gl JOIN grns g ON g.id = gl.grn_id
+          WHERE g.company_id = $1 AND g.status = 'POSTED'
+            AND g.posting_date > CURRENT_DATE - $2::int
+          GROUP BY gl.product_id`, [c, days]),
+      query(req.actor,
+        `SELECT sl.product_id, SUM(sl.qty) AS qty, SUM(sl.value) AS revenue,
+                SUM(sl.qty * COALESCE(b.landed_rate, 0)) AS cogs,
+                count(DISTINCT si.id)::int AS bills,
+                count(DISTINCT si.customer_id)::int AS customers
+           FROM stock_issue_lines sl
+           JOIN stock_issues si ON si.id = sl.issue_id
+           LEFT JOIN batches b ON b.id = sl.batch_id
+          WHERE si.company_id = $1 AND si.reason = 'SALE'
+            AND si.status IN ('POSTED','RECEIVED')
+            AND si.issue_date > CURRENT_DATE - $2::int
+          GROUP BY sl.product_id`, [c, days]),
+      query(req.actor,
+        `SELECT sl.product_id, SUM(sl.qty) AS qty,
+                SUM(sl.qty * COALESCE(b.landed_rate, 0)) AS value
+           FROM stock_issue_lines sl
+           JOIN stock_issues si ON si.id = sl.issue_id
+           LEFT JOIN batches b ON b.id = sl.batch_id
+          WHERE si.company_id = $1 AND si.reason IN ('WASTAGE','ADJUSTMENT')
+            AND si.issue_date > CURRENT_DATE - $2::int
+          GROUP BY sl.product_id`, [c, days]),
+      query(req.actor,
+        `SELECT product_id, SUM(loss_qty) AS qty, COALESCE(SUM(loss_value),0) AS value
+           FROM audit_counts
+          WHERE company_id = $1 AND counted_at > now() - ($2::int || ' days')::interval
+          GROUP BY product_id`, [c, days]),
+      query(req.actor,
+        `SELECT sb.product_id, SUM(sb.qty) AS qty,
+                SUM(sb.qty * COALESCE(b.landed_rate,0)) AS value
+           FROM stock_balances sb LEFT JOIN batches b ON b.id = sb.batch_id
+          WHERE sb.company_id = $1 GROUP BY sb.product_id`, [c]),
+      /* Who we buy it from, biggest first — "supplier of that product" is a
+       * list, not a field, and the useful part is who dominates. */
+      query(req.actor,
+        `SELECT x.product_id, x.supplier_name, x.qty, x.value FROM (
+            SELECT gl.product_id, COALESCE(s.trade_name, s.legal_name) AS supplier_name,
+                   SUM(gl.accepted_qty) AS qty, SUM(gl.line_value) AS value,
+                   row_number() OVER (PARTITION BY gl.product_id
+                                      ORDER BY SUM(gl.line_value) DESC) AS rn
+              FROM grn_lines gl
+              JOIN grns g ON g.id = gl.grn_id
+              JOIN suppliers s ON s.id = g.supplier_id
+             WHERE g.company_id = $1 AND g.status = 'POSTED'
+               AND g.posting_date > CURRENT_DATE - $2::int
+             GROUP BY gl.product_id, COALESCE(s.trade_name, s.legal_name)) x
+          WHERE x.rn <= 4`, [c, days]),
+      query(req.actor,
+        `SELECT x.product_id, x.name AS place, x.qty, x.revenue FROM (
+            SELECT sl.product_id, w.name, SUM(sl.qty) AS qty, SUM(sl.value) AS revenue,
+                   row_number() OVER (PARTITION BY sl.product_id
+                                      ORDER BY SUM(sl.value) DESC) AS rn
+              FROM stock_issue_lines sl
+              JOIN stock_issues si ON si.id = sl.issue_id
+              JOIN warehouses w ON w.id = si.warehouse_id
+             WHERE si.company_id = $1 AND si.reason = 'SALE'
+               AND si.status IN ('POSTED','RECEIVED')
+               AND si.issue_date > CURRENT_DATE - $2::int
+             GROUP BY sl.product_id, w.name) x
+          WHERE x.rn <= 4`, [c, days]),
+      query(req.actor,
+        `SELECT si.issue_date::text AS date, sl.product_id,
+                SUM(sl.qty) AS qty, SUM(sl.value) AS revenue
+           FROM stock_issue_lines sl
+           JOIN stock_issues si ON si.id = sl.issue_id
+          WHERE si.company_id = $1 AND si.reason = 'SALE'
+            AND si.status IN ('POSTED','RECEIVED')
+            AND si.issue_date > CURRENT_DATE - $2::int
+          GROUP BY si.issue_date, sl.product_id ORDER BY si.issue_date`, [c, days]),
+      query(req.actor,
+        `SELECT p.id, p.name, p.sku, p.icon, p.base_uom, p.category_id,
+                cat.name AS category_name, cat.icon AS category_icon
+           FROM products p
+           LEFT JOIN product_categories cat ON cat.id = p.category_id
+          WHERE p.company_id = $1 AND p.is_active`, [c]),
+    ]);
+
+  const idx = (rows: any[], key = 'product_id') =>
+    new Map(rows.map((r: any) => [r[key], r]));
+  const bBy = idx(bought); const sBy = idx(sold); const wBy = idx(wasted);
+  const aBy = idx(audited); const stBy = idx(stock);
+
+  const group = (rows: any[]) => {
+    const m = new Map<string, any[]>();
+    for (const r of rows) { (m.get(r.product_id) ?? m.set(r.product_id, []).get(r.product_id)!).push(r); }
+    return m;
+  };
+  const supBy = group(suppliers); const plBy = group(places); const dayBy = group(daily);
+
+  const products = categories.map((p: any) => {
+    const b = bBy.get(p.id); const sl = sBy.get(p.id);
+    const w = wBy.get(p.id); const a = aBy.get(p.id); const st = stBy.get(p.id);
+
+    const revenue = Number(sl?.revenue ?? 0);
+    const cogs = Number(sl?.cogs ?? 0);
+    const wasteValue = Number(w?.value ?? 0) + Number(a?.value ?? 0);
+    const boughtQty = Number(b?.qty ?? 0);
+    const soldQty = Number(sl?.qty ?? 0);
+
+    return {
+      productId: p.id, name: p.name, sku: p.sku, icon: p.icon, uom: p.base_uom,
+      categoryId: p.category_id, categoryName: p.category_name,
+      boughtQty, boughtValue: Number(b?.value ?? 0),
+      rejectedQty: Number(b?.rejected_qty ?? 0),
+      loads: Number(b?.loads ?? 0),
+      soldQty, revenue, cogs,
+      margin: round(revenue - cogs, 2),
+      /* Margin as a share of revenue, not of cost — that is how a shopkeeper
+       * reads it, and mixing the two is how a 20% product looks like 25%. */
+      marginPct: revenue > 0 ? round(((revenue - cogs) / revenue) * 100, 1) : null,
+      bills: Number(sl?.bills ?? 0), customers: Number(sl?.customers ?? 0),
+      wasteQty: round(Number(w?.qty ?? 0) + Number(a?.qty ?? 0), 3),
+      wasteValue: round(wasteValue, 2),
+      /* What was lost as a share of what was bought — the number that says
+       * whether a product is worth handling at all. */
+      wastePct: boughtQty > 0
+        ? round(((Number(w?.qty ?? 0) + Number(a?.qty ?? 0)) / boughtQty) * 100, 1) : null,
+      stockQty: Number(st?.qty ?? 0), stockValue: Number(st?.value ?? 0),
+      sellThrough: boughtQty > 0 ? round((soldQty / boughtQty) * 100, 1) : null,
+      netMargin: round(revenue - cogs - wasteValue, 2),
+      suppliers: (supBy.get(p.id) ?? []).map((x: any) => ({
+        name: x.supplier_name, qty: Number(x.qty), value: Number(x.value),
+      })),
+      places: (plBy.get(p.id) ?? []).map((x: any) => ({
+        name: x.place, qty: Number(x.qty), revenue: Number(x.revenue),
+      })),
+      trend: (dayBy.get(p.id) ?? []).map((x: any) => ({
+        date: x.date, qty: Number(x.qty), revenue: Number(x.revenue),
+      })),
+    };
+  }).filter((p: any) =>
+    p.boughtQty > 0 || p.soldQty > 0 || p.stockQty > 0 || p.wasteQty > 0);
+
+  products.sort((x: any, y: any) => y.revenue - x.revenue);
+
+  /* The category is the sum of its products. Computing it from a second set of
+   * queries would let the two disagree, which on a comparison page is worse
+   * than either being wrong. */
+  const catMap = new Map<string, any>();
+  for (const p of products) {
+    const key = p.categoryId ?? 'none';
+    const cur = catMap.get(key) ?? {
+      categoryId: p.categoryId, name: p.categoryName ?? 'Uncategorised',
+      products: 0, boughtQty: 0, boughtValue: 0, soldQty: 0, revenue: 0,
+      cogs: 0, wasteQty: 0, wasteValue: 0, stockQty: 0, stockValue: 0,
+    };
+    cur.products += 1;
+    for (const k of ['boughtQty', 'boughtValue', 'soldQty', 'revenue', 'cogs',
+                     'wasteQty', 'wasteValue', 'stockQty', 'stockValue'] as const) {
+      cur[k] = round(cur[k] + Number((p as any)[k] ?? 0), 2);
+    }
+    catMap.set(key, cur);
+  }
+  const cats = [...catMap.values()].map((x: any) => ({
+    ...x,
+    margin: round(x.revenue - x.cogs, 2),
+    marginPct: x.revenue > 0 ? round(((x.revenue - x.cogs) / x.revenue) * 100, 1) : null,
+    netMargin: round(x.revenue - x.cogs - x.wasteValue, 2),
+    wastePct: x.boughtQty > 0 ? round((x.wasteQty / x.boughtQty) * 100, 1) : null,
+    sellThrough: x.boughtQty > 0 ? round((x.soldQty / x.boughtQty) * 100, 1) : null,
+  })).sort((a, b) => b.revenue - a.revenue);
+
+  return { days, products, categories: cats };
+}));
+
 insightsRouter.get('/dashboard', h(async (req) => {
   const branchId = (req.query.branchId as string) || null;
 
@@ -101,7 +293,25 @@ insightsRouter.get('/dashboard', h(async (req) => {
        (SELECT COALESCE(SUM(ps.balance),0) FROM payment_status ps
          WHERE ps.company_id=$1 AND ps.due_date < CURRENT_DATE AND ps.balance > 0) AS overdue_payable,
        (SELECT count(*) FROM alerts a
-         WHERE a.company_id=$1 AND a.status='OPEN' AND a.severity IN ('HIGH','CRITICAL')) AS open_alerts`,
+         WHERE a.company_id=$1 AND a.status='OPEN' AND a.severity IN ('HIGH','CRITICAL')) AS open_alerts,
+       /* The money desk's own backlog, so Finance's home screen leads with the
+        * work rather than with a payables figure they cannot act on. */
+       (SELECT count(*) FROM payment_requests
+         WHERE company_id=$1 AND status='REQUESTED')                        AS money_to_verify,
+       (SELECT COALESCE(SUM(amount - paid_amount),0) FROM payment_requests
+         WHERE company_id=$1 AND status IN ('VERIFIED','PART_PAID'))        AS money_to_pay_value,
+       (SELECT count(*) FROM payment_requests
+         WHERE company_id=$1 AND status IN ('VERIFIED','PART_PAID'))        AS money_to_pay,
+       (SELECT count(*) FROM money_receipts
+         WHERE company_id=$1 AND status='DECLARED')                         AS money_to_confirm,
+       /* Orders we have placed that the other side has not answered. The buyer
+        * is planning against these as if they were certain. */
+       (SELECT count(*) FROM purchase_orders
+         WHERE company_id=$1 AND status='CONFIRMED' AND supplier_response='PENDING'
+           AND ($2::uuid IS NULL OR branch_id=$2))                          AS po_unanswered,
+       (SELECT count(*) FROM purchase_orders
+         WHERE company_id=$1 AND status='CONFIRMED' AND supplier_response='DECLINED'
+           AND ($2::uuid IS NULL OR branch_id=$2))                          AS po_declined`,
     [req.actor.companyId, branchId]);
 
   const [quality] = await query(req.actor,
@@ -114,27 +324,35 @@ insightsRouter.get('/dashboard', h(async (req) => {
         AND ($2::uuid IS NULL OR q.branch_id=$2)`,
     [req.actor.companyId, branchId]);
 
-  const criticalStock = await query(req.actor,
-    `SELECT p.id, p.sku, p.name, p.reorder_point, p.min_stock, p.purchase_uom,
-            COALESCE(sb.qty,0) AS current_stock,
-            COALESCE(ds.avg_daily,0) AS avg_daily_sale,
-            CASE WHEN COALESCE(ds.avg_daily,0) > 0
-                 THEN round(COALESCE(sb.qty,0)/ds.avg_daily, 1) END AS days_of_cover
-       FROM products p
-       LEFT JOIN (SELECT sb.product_id, SUM(sb.qty) qty FROM stock_balances sb
-                   JOIN warehouses w ON w.id = sb.warehouse_id
-                  WHERE ($2::uuid IS NULL OR w.branch_id = $2) GROUP BY sb.product_id) sb
-              ON sb.product_id = p.id
-       LEFT JOIN (SELECT product_id, AVG(daily) avg_daily FROM
-                    (SELECT product_id, signal_date, SUM(qty) daily FROM demand_signals
-                      WHERE signal_type='SALE' AND signal_date >= CURRENT_DATE - 28
-                        AND ($2::uuid IS NULL OR branch_id = $2)
-                      GROUP BY product_id, signal_date) d GROUP BY product_id) ds
-              ON ds.product_id = p.id
-      WHERE p.company_id=$1 AND p.is_active
-        AND COALESCE(sb.qty,0) <= COALESCE(p.reorder_point, p.min_stock, 0)
-      ORDER BY days_of_cover NULLS FIRST LIMIT 12`,
-    [req.actor.companyId, branchId]);
+  /* "Running low" is the buy list, shortened — not a second opinion about it.
+   *
+   * This used to be its own SQL comparing stock on hand against the reorder
+   * point, which ignored open purchase orders: it reported Mango as low while
+   * 558 kg sat on an approved PO, and the Buy list it links to then said
+   * nothing needed buying. Same question, two answers. Both now come from
+   * buyList(), so the panel and the page cannot disagree.
+   *
+   * The branch is required there (a reorder point is meaningless across
+   * branches with separate stock), so with no branch chosen the panel stays
+   * empty rather than inventing a company-wide number. */
+  const criticalStock = branchId
+    ? (await buyList(req.actor, branchId)).items
+      .filter((i: any) => i.suggestedQty > 0)
+      .slice(0, 12)
+      .map((i: any) => ({
+        id: i.productId, sku: i.sku, name: i.name,
+        purchase_uom: i.uom,
+        current_stock: i.currentStock,
+        reorder_point: i.reorderPoint ?? i.minStock,
+        min_stock: i.minStock,
+        avg_daily_sale: i.avgDailySale,
+        days_of_cover: i.daysOfCover,
+        // Carried through so the panel can say *why* it is on the list.
+        suggested_qty: i.suggestedQty,
+        open_po_qty: i.openPoQty,
+        urgency: i.urgency,
+      }))
+    : [];
 
   const trend = await query(req.actor,
     `SELECT g.posting_date::text AS date,
@@ -253,16 +471,32 @@ insightsRouter.post('/alerts/:id/ack', h(async (req) => {
   }), req.body);
 
   return withTx(req.actor, async (tx) => {
-    const set = input.action === 'ACK'
-      ? `status='ACK', acked_by=$2, acked_at=now()`
+    /* One statement per action, each with exactly the parameters it uses.
+     * This was previously a single UPDATE with an interpolated SET clause and
+     * a fixed five-parameter list — so acknowledging or resolving an alert sent
+     * $3 and $4 that the SQL never mentioned, and Postgres refused the whole
+     * statement with "could not determine data type of parameter $3". Neither
+     * button had ever worked. */
+    const { rows } =
+      input.action === 'ACK'
+        ? await tx.query(
+          `UPDATE alerts SET status='ACK', acked_by=$2, acked_at=now()
+            WHERE id=$1 AND company_id=$3 RETURNING *`,
+          [req.params.id, req.actor.userId, req.actor.companyId])
       : input.action === 'RESOLVE'
-      ? `status='RESOLVED', resolved_by=$2, resolved_at=now()`
-      : `status='SNOOZED', snoozed_until = now() + ($3 || ' minutes')::interval, snooze_reason=$4`;
-    const { rows } = await tx.query(
-      `UPDATE alerts SET ${set} WHERE id=$1 AND company_id=$5 RETURNING *`,
-      input.action === 'SNOOZE'
-        ? [req.params.id, req.actor.userId, String(input.snoozeMinutes ?? 60), input.note ?? null, req.actor.companyId]
-        : [req.params.id, req.actor.userId, null, null, req.actor.companyId]);
+        ? await tx.query(
+          `UPDATE alerts SET status='RESOLVED', resolved_by=$2, resolved_at=now()
+            WHERE id=$1 AND company_id=$3 RETURNING *`,
+          [req.params.id, req.actor.userId, req.actor.companyId])
+        : await tx.query(
+          `UPDATE alerts
+              SET status='SNOOZED',
+                  snoozed_until = now() + ($2 || ' minutes')::interval,
+                  snooze_reason = $3
+            WHERE id=$1 AND company_id=$4 RETURNING *`,
+          [req.params.id, String(input.snoozeMinutes ?? 60),
+           input.note ?? null, req.actor.companyId]);
+
     if (!rows[0]) throw ApiError.notFound('Alert not found');
     return rows[0];
   });
