@@ -50,10 +50,9 @@ export function HrPage() {
       { key: 'dg', label: 'job', of: (w: any) => w.designation },
       { key: 'em', label: 'employment', of: (w: any) => w.employment },
       { key: 'wt', label: 'paid', of: (w: any) => w.wage_type },
-      { key: 'ac', label: 'on the books', of: (w: any) => (w.is_active ? 'working' : 'left') },
+      { key: 'ac', label: 'on the books', all: 'Working or left', of: (w: any) => (w.is_active ? 'working' : 'left') },
     ],
     totals: [
-      { label: 'People', of: () => 1 },
       { label: 'Days in, 30d', of: (w: any) => Number(w.present_30d) || 0 },
       { label: 'Hours, 30d', of: (w: any) => Number(w.hours_30d) || 0 },
     ],
@@ -205,10 +204,10 @@ function AttendanceBoard({ day, setDay, data, onSaved }: {
     facets: [
       { key: 'pl', label: 'place', of: (w: any) => w.place_name },
       { key: 'dg', label: 'job', of: (w: any) => w.designation },
-      { key: 'mk', label: 'marked', of: (w: any) =>
+      { key: 'mk', label: 'marked', all: 'Marked or not', of: (w: any) =>
         (marks[w.worker_id] ? 'marked' : 'not marked yet') },
     ],
-    totals: [{ label: 'People', of: () => 1 }],
+    totals: [],
   });
   const unmarkedHere = f.rows.filter((w: any) => !marks[w.worker_id]);
   const future = day > new Date().toISOString().slice(0, 10);
@@ -323,7 +322,7 @@ function WagesTab({ recent, onDone }: { recent: any[]; onDone: () => void }) {
     facets: [
       { key: 'dg', label: 'job', of: (w: any) => w.designation },
       { key: 'wt', label: 'paid', of: (w: any) => w.wageType },
-      { key: 'sent', label: 'sent', of: (w: any) =>
+      { key: 'sent', label: 'sent', all: 'Sent or not', of: (w: any) =>
         (w.alreadyRun?.request_id ? 'already sent' : 'not sent') },
     ],
     totals: [
@@ -333,7 +332,9 @@ function WagesTab({ recent, onDone }: { recent: any[]; onDone: () => void }) {
     ],
   });
   const toRun = f.rows.filter((r: any) => !r.alreadyRun?.request_id);
-  const total = f.rows.reduce((a: number, r: any) => {
+  /* Counted over the same people the count above is counting: this is what the
+     button is about to send, not what the period came to. */
+  const total = toRun.reduce((a: number, r: any) => {
     const e = extras[r.workerId] ?? {};
     return a + r.subtotal + (Number(e.bonus) || 0) - (Number(e.deductions) || 0);
   }, 0);
@@ -440,8 +441,13 @@ function WagesTab({ recent, onDone }: { recent: any[]; onDone: () => void }) {
           />
           {rows.length ? (
             <div className="filter-total">
-              <span>{toRun.length} to pay</span>
-              <b>{inr(total, 0)}</b>
+              <span>
+                <b>{toRun.length}</b> still to pay
+                {toRun.length !== f.rows.length ? (
+                  <span className="muted"> · {f.rows.length - toRun.length} already sent</span>
+                ) : null}
+              </span>
+              <span className="ft-num"><em>This run</em><b>{inr(total, 0)}</b></span>
             </div>
           ) : null}
         </div>

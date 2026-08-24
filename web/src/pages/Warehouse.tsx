@@ -56,7 +56,6 @@ export function WarehouseIntakePage() {
       { key: 'veh', label: 'vehicle', of: (g: any) => g.vehicle_reg_captured },
     ],
     totals: [
-      { label: 'Vehicles', of: () => 1 },
       { label: 'Net kg', of: (g: any) => Number(g.net_kg ?? 0), decimals: 1 },
     ],
   });

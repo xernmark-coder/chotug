@@ -5,6 +5,8 @@ import {
   AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, Steps, useApi, useToast,  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
+import { SupplierModal } from './Finance';
+import { ProductModal } from './Catalogue';
 
 /* ========================================================= PO LIST ======= */
 export function PoListPage() {
@@ -20,7 +22,10 @@ export function PoListPage() {
       { key: 'status', label: 'status', of: (o) => o.status },
       { key: 'supplier', label: 'supplier', of: (o) => o.supplier_name ?? o.supplier_legal_name },
       { key: 'source', label: 'kind of supplier', of: (o) => o.source_type },
-      { key: 'answer', label: 'answer', of: (o) => o.supplier_response },
+      { key: 'answer', label: 'answer', all: 'Any answer', of: (o) => o.supplier_response },
+      { key: 'lorry', label: 'transport', all: 'Any transport', of: (o) =>
+        o.pickup_no ? 'vehicle arranged'
+          : o.transport_requested_at ? 'they want a vehicle' : null },
     ],
     /* Both numbers, because "42 orders" and "₹6.1 lakh" answer different
        questions and somebody filtering by supplier usually wants the second. */
@@ -37,6 +42,7 @@ export function PoListPage() {
         : undefined}>
       <ErrorBanner error={error} />
       <FilterBar f={f} placeholder="Search order number or supplier" />
+      <FilterTotals f={f} noun="order" />
       <div className="card"><div className="card-body tight">
         <DataTable
           rows={f.rows} loading={loading}
@@ -80,12 +86,16 @@ export function PoListPage() {
                 <Chip value={o.status} />
                 {Number(o.pending_approvals) > 0 ? <Chip tone="warn">awaiting approval</Chip> : null}
                 {o.is_urgent ? <Chip tone="danger">urgent</Chip> : null}
+                {/* Somebody is standing next to crates waiting for an answer.
+                    That belongs on the order, not only on Dispatch. */}
+                {o.transport_requested_at && !o.pickup_no
+                  ? <Chip tone="warn">wants a vehicle</Chip> : null}
+                {o.pickup_no ? <Chip tone="ok">vehicle {String(o.pickup_status ?? '').toLowerCase()}</Chip> : null}
               </div>
             ) },
           ]}
           empty={<Empty icon="📦" title="No purchase orders yet" />}
         />
-        <FilterTotals f={f} noun="order" />
       </div></div>
     </Layout>
   );
@@ -101,16 +111,18 @@ type Line = {
 export function PoCreatePage() {
   const nav = useNavigate();
   const toast = useToast();
-  const { branchId, me } = useAuth();
+  const { branchId, me, can } = useAuth();
   const [sp] = useSearchParams();
   const requirementId = sp.get('requirementId');
 
-  const { data: products } = useApi<any[]>('/masters/products');
-  const { data: suppliers } = useApi<any[]>('/masters/suppliers');
+  const { data: products, reload: reloadProducts } = useApi<any[]>('/masters/products');
+  const { data: suppliers, reload: reloadSuppliers } = useApi<any[]>('/masters/suppliers');
   const { data: chargeTypes } = useApi<any[]>('/masters/charge-types');
   const { data: requirement } = useApi<any>(requirementId ? `/planning/requirements/${requirementId}` : null);
 
   const [supplierId, setSupplierId] = useState('');
+  const [addingSupplier, setAddingSupplier] = useState(false);
+  const [addingProduct, setAddingProduct] = useState(false);
   const [expectedDate, setExpectedDate] = useState(addDays(1));
   const [isUrgent, setIsUrgent] = useState(false);
   const [remarks, setRemarks] = useState('');
@@ -190,15 +202,23 @@ export function PoCreatePage() {
             <div className="card-body">
               <div className="grid c2">
                 <Field label="Supplier" hint="Blocked suppliers cannot be selected">
-                  <select value={supplierId} onChange={(e) => setSupplierId(e.target.value)}>
-                    <option value="">Choose a supplier…</option>
-                    {(suppliers ?? []).filter((s) => s.status !== 'BLOCKED').map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.trade_name ?? s.legal_name} — {s.source_type}
-                        {s.performance_score ? ` (score ${Math.round(s.performance_score)})` : ''}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="row" style={{ gap: 6 }}>
+                    <select value={supplierId} onChange={(e) => setSupplierId(e.target.value)}>
+                      <option value="">Choose a supplier…</option>
+                      {(suppliers ?? []).filter((s) => s.status !== 'BLOCKED').map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.trade_name ?? s.legal_name} — {s.source_type}
+                          {s.performance_score ? ` (score ${Math.round(s.performance_score)})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {/* You meet a new aadhti at the mandi and buy from him the
+                        same morning. Making that a trip to a master screen is
+                        how orders end up on the wrong supplier. */}
+                    {can('master.supplier.manage') ? (
+                      <button className="btn sm" onClick={() => setAddingSupplier(true)}>+ New</button>
+                    ) : null}
+                  </div>
                 </Field>
                 <Field label="Expected delivery date">
                   <input type="date" value={expectedDate} onChange={(e) => setExpectedDate(e.target.value)} />
@@ -237,6 +257,9 @@ export function PoCreatePage() {
                 <option value="">Add a product…</option>
                 {(products ?? []).map((p) => <option key={p.id} value={p.id}>{p.name} ({p.sku})</option>)}
               </select>
+              {can('master.product.manage') ? (
+                <button className="btn sm" onClick={() => setAddingProduct(true)}>+ New</button>
+              ) : null}
             </div>
             <div className="card-body tight">
               {lines.length === 0 ? (
@@ -374,6 +397,30 @@ export function PoCreatePage() {
             setSupplierId(supId);
             setLines((s) => s.map((x) => x.productId === compareFor.productId ? { ...x, rate } : x));
             setCompareFor(null);
+          }} />
+      ) : null}
+
+      {addingSupplier ? (
+        <SupplierModal supplier={{}} onClose={() => setAddingSupplier(false)}
+          onDone={() => { setAddingSupplier(false); reloadSuppliers(); toast('Supplier added', 'ok'); }} />
+      ) : null}
+
+      {addingProduct ? (
+        <ProductModal onClose={() => setAddingProduct(false)}
+          onDone={(created?: any) => {
+            setAddingProduct(false);
+            reloadProducts();
+            /* Straight onto the order. Adding a product in order to buy it and
+               then having to find it again in the dropdown is the kind of small
+               indignity that makes people keep a paper list instead. */
+            if (created?.id) {
+              setLines((s) => s.some((l) => l.productId === created.id) ? s : [...s, {
+                productId: created.id, name: created.name, sku: created.sku,
+                uom: created.purchase_uom ?? created.base_uom,
+                qty: 0, rate: 0, expectedWeightKg: null,
+              }]);
+            }
+            toast('Product added', 'ok');
           }} />
       ) : null}
     </Layout>
@@ -549,13 +596,18 @@ export function PoDetailPage() {
             <button className="btn primary" disabled={busy}
               onClick={() => act(`/planning/purchase-orders/${id}/submit`, 'Submitted')}>Submit</button>
           ) : null}
-          {/* Confirming is the moment the company commits to the supplier, so it
-              takes approval authority — not merely the right to raise an order. */}
+          {/* This used to read "Confirm with supplier", which described a phone
+              call and quietly claimed the supplier had agreed. They had not.
+              This button only PLACES the order on their panel; the supplier
+              confirms it there, and that answer comes back on its own. */}
           {data.status === 'APPROVED' && can('purchase.po.approve') ? (
             <button className="btn primary" disabled={busy}
-              onClick={() => act(`/planning/purchase-orders/${id}/confirm`, 'Confirmed with supplier')}>
-              Confirm with supplier
+              onClick={() => act(`/planning/purchase-orders/${id}/confirm`, 'Sent to the supplier')}>
+              Send to supplier
             </button>
+          ) : null}
+          {['APPROVED', 'CONFIRMED'].includes(data.status) && can('logistics.pickup.manage') ? (
+            <button className="btn" onClick={() => nav('/dispatch')}>Arrange a vehicle</button>
           ) : null}
           {['APPROVED', 'CONFIRMED', 'PART_RECEIVED'].includes(data.status) && can('purchase.po.revise') ? (
             <button className="btn" onClick={() => setRevising(true)}>Revise</button>
@@ -565,6 +617,71 @@ export function PoDetailPage() {
       <ErrorBanner error={error} />
       {stepIndex >= 0 ? (
         <Steps steps={['Draft', 'Submitted', 'Approved', 'Confirmed', 'Receiving', 'Received']} current={stepIndex} />
+      ) : null}
+
+      {/* Where the order actually stands with the person who has to supply it.
+          The status chip says CONFIRMED as soon as the buyer sends it, which
+          says nothing about whether the supplier has agreed — this does. */}
+      {data.status === 'CONFIRMED' && data.supplier_response === 'PENDING' ? (
+        <div className="banner info mb">
+          <span><Icon name="clock" size={16} /></span>
+          <div>
+            <b>Waiting for {data.supplier_name ?? 'the supplier'} to accept.</b>{' '}
+            It is on their panel now. They confirm it there — you will be told when they do.
+            {data.supplier_phone ? <> Ring them on{' '}
+              <a href={`tel:${data.supplier_phone}`} className="mono">{data.supplier_phone}</a>{' '}
+              if it is urgent.</> : null}
+          </div>
+        </div>
+      ) : null}
+
+      {data.supplier_response === 'ACCEPTED' ? (
+        <div className={`banner ${data.payment_status === 'PAID' ? 'ok' : 'warn'} mb`}>
+          <span><Icon name={data.payment_status === 'PAID' ? 'check' : 'coins'} size={16} /></span>
+          <div>
+            <b>{data.supplier_name ?? 'The supplier'} has accepted this order.</b>{' '}
+            {data.payment_status === 'PAID'
+              ? `Paid — ${data.payment_request_no}. They can send it.`
+              : data.payment_request_no
+                ? <>They have asked for payment — <b>{data.payment_request_no}</b> is with Finance
+                    ({String(data.payment_status ?? '').toLowerCase() || 'waiting'}).</>
+                : 'Arrange payment so they can dispatch.'}
+            {data.supplier_response_note ? <div className="small">"{data.supplier_response_note}"</div> : null}
+          </div>
+        </div>
+      ) : null}
+
+      {data.transport_requested_at && !data.pickup_no ? (
+        <div className="banner warn mb">
+          <span><Icon name="truck" size={16} /></span>
+          <div>
+            <b>{data.supplier_name ?? 'The supplier'} is asking for a vehicle.</b>{' '}
+            {data.transport_request_note ?? 'No details given.'}{' '}
+            {can('logistics.pickup.manage')
+              ? <>Arrange one on <a href="/dispatch">Dispatch</a>.</>
+              : 'Finance or the office will arrange one.'}
+          </div>
+        </div>
+      ) : null}
+
+      {data.pickup_no ? (
+        <div className="banner ok mb">
+          <span><Icon name="truck" size={16} /></span>
+          <div>
+            <b>Vehicle {data.pickup_no}</b> —{' '}
+            {String(data.pickup_status ?? '').toLowerCase() || 'arranged'}.
+          </div>
+        </div>
+      ) : null}
+
+      {data.supplier_response === 'DECLINED' ? (
+        <div className="banner danger mb">
+          <span><Icon name="alert" size={16} /></span>
+          <div>
+            <b>{data.supplier_name ?? 'The supplier'} declined this order.</b>{' '}
+            {data.supplier_response_note ?? 'No reason given.'} Place it elsewhere.
+          </div>
+        </div>
       ) : null}
 
       {data.approvals?.filter((a: any) => a.status === 'PENDING').length ? (
@@ -659,7 +776,13 @@ export function PoDetailPage() {
             <div className="card-head"><h2>Supplier</h2></div>
             <div className="card-body">
               <div style={{ fontWeight: 600 }}>{data.supplier_name ?? data.supplier_legal_name}</div>
-              <div className="small muted mb">{data.supplier_source_type} · {data.supplier_phone ?? 'no phone'}</div>
+              <div className="small muted mb">
+                {data.supplier_source_type} ·{' '}
+                {/* A number to ring if you want to, not a step in the flow. */}
+                {data.supplier_phone
+                  ? <a href={`tel:${data.supplier_phone}`} className="mono">{data.supplier_phone}</a>
+                  : 'no phone'}
+              </div>
               <div className="row wrap" style={{ gap: 6 }}>
                 {data.performance_score ? <Chip tone={data.performance_score >= 70 ? 'ok' : 'warn'}>
                   performance {Math.round(data.performance_score)}</Chip> : null}
@@ -769,6 +892,24 @@ export function ApprovalsPage() {
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
 
+  const f = useFilters<any>(data, {
+    date: (a: any) => a.requested_at,
+    search: (a: any) => [a.doc_no, a.requester_name, a.doc_summary?.supplier,
+      ...(a.triggers ?? [])].filter(Boolean).join(' '),
+    facets: [
+      { key: 'sup', label: 'supplier', of: (a: any) => a.doc_summary?.supplier },
+      { key: 'by', label: 'raised by', of: (a: any) => a.requester_name },
+      { key: 'lv', label: 'level', of: (a: any) => `L${a.level}` },
+      { key: 'ty', label: 'document', of: (a: any) => a.doc_type },
+      { key: 'sla', label: 'timing', all: 'Early and late', of: (a: any) =>
+        (a.sla_breached ? 'overdue' : 'in time') },
+    ],
+    totals: [
+      { label: 'Waiting', of: () => 1 },
+      { label: 'Value', of: (a: any) => Number(a.doc_summary?.total) || 0, money: true },
+    ],
+  });
+
   const submit = async () => {
     if (!decide) return;
     setBusy(true);
@@ -788,9 +929,11 @@ export function ApprovalsPage() {
     <Layout title="Approvals" subtitle="Approve, hold, or reject — nothing else"
       actions={<button className="btn sm" onClick={reload}>Refresh</button>}>
       <ErrorBanner error={error} />
+      <FilterBar f={f} placeholder="Search document, supplier, person" />
+      <FilterTotals f={f} noun="approval" />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           rowTone={(a: any) => (a.sla_breached ? 'crit' : a.level >= 3 ? 'warn' : undefined)}
           cols={[
             { key: 'd', head: 'Document', render: (a: any) => (
@@ -822,7 +965,8 @@ export function ApprovalsPage() {
             ) },
           ]}
           onRowClick={(a: any) => a.doc_type === 'PO' && nav(`/purchase-orders/${a.doc_id}`)}
-          empty={<Empty icon="✅" title="Nothing waiting for your approval" />}
+          empty={<Empty icon="✅" title={f.active > 0
+            ? 'Nothing matches those filters' : 'Nothing waiting for your approval'} />}
         />
       </div></div>
 

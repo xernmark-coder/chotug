@@ -38,7 +38,7 @@ export function FinanceDeskPage() {
 function TheDesk() {
   const toast = useToast();
   const { can } = useAuth();
-  const [tab, setTab] = useState<'verify' | 'pay' | 'in' | 'spent'>('verify');
+  const [tab, setTab] = useState<'verify' | 'pay' | 'in' | 'paid' | 'spent'>('verify');
   const [range, setRange] = useState(30);
 
   const from = useMemo(() => {
@@ -51,6 +51,11 @@ function TheDesk() {
   const toPay = useApi<any[]>('/finance/requests?status=VERIFIED');
   const partPaid = useApi<any[]>('/finance/requests?status=PART_PAID');
   const receipts = useApi<any[]>('/finance/receipts');
+  /* Everything already paid. Until this was here the desk could show that
+     ₹4 lakh had gone out and offer no way to see a single payment that made it
+     up — or to reverse one paid by mistake, though the endpoint existed. */
+  const paid = useApi<any[]>('/finance/requests?status=PAID');
+  const [opening, setOpening] = useState<any>(null);
 
   const [verifying, setVerifying] = useState<any>(null);
   const [paying, setPaying] = useState<any>(null);
@@ -73,6 +78,10 @@ function TheDesk() {
       { label: 'Asked for', of: (r: any) => Number(r.amount), money: true },
       { label: 'Outstanding', of: (r: any) => Number(r.amount) - Number(r.paid_amount), money: true },
     ],
+  });
+  const fPaid = useFilters<any>(paid.data, {
+    ...requestFilterSpec(),
+    totals: [{ label: 'Paid out', of: (r: any) => Number(r.paid_amount) || 0, money: true }],
   });
   const fIn = useFilters<any>(openReceipts, receiptFilterSpec());
   const fSettled = useFilters<any>(settledReceipts, receiptFilterSpec());
@@ -142,6 +151,7 @@ function TheDesk() {
         {([['verify', `To verify (${k.to_verify ?? 0})`],
            ['pay', `To pay (${payable.length})`],
            ['in', `Coming in (${openReceipts.length})`],
+           ['paid', `Paid (${(paid.data ?? []).length})`],
            ['spent', 'Where it went']] as const).map(([key, label]) => (
           <button key={key} className={`tab ${tab === key ? 'active' : ''}`}
             onClick={() => setTab(key)}>{label}</button>
@@ -235,6 +245,34 @@ function TheDesk() {
             </div>
           </div>
         </>
+      ) : null}
+
+      {tab === 'paid' ? (
+        <>
+          <FilterBar f={fPaid} placeholder="Search payee, request no, note" />
+          <FilterTotals f={fPaid} noun="payment" />
+          <div className="card"><div className="card-body tight">
+            <DataTable
+              loading={paid.loading}
+              rows={fPaid.rows}
+              onRowClick={(r: any) => setOpening(r)}
+              cols={[
+                ...requestCols(),
+                { key: 'pd', head: 'Paid', num: true, render: (r: any) => (
+                  <b>{inr(r.paid_amount, 0)}</b>) },
+                { key: 'go', head: '', width: 90,
+                  render: () => <span className="btn sm ghost">Open</span> },
+              ]}
+              empty={<Empty icon="💸" title={fPaid.active > 0
+                ? 'Nothing matches those filters' : 'Nothing paid out yet'} />}
+            />
+          </div></div>
+        </>
+      ) : null}
+
+      {opening ? (
+        <PaymentsModal request={opening} onClose={() => setOpening(null)}
+          onDone={(m) => { setOpening(null); paid.reload(); overview.reload(); toast(m, 'ok'); }} />
       ) : null}
 
       {tab === 'spent' ? (
@@ -355,7 +393,7 @@ function receiptFilterSpec() {
       .filter(Boolean).join(' '),
     facets: [
       { key: 'payer', label: 'payer', of: (r: any) => r.payer_name },
-      { key: 'src', label: 'source', of: (r: any) => r.source },
+      { key: 'src', label: 'source', all: 'Any source', of: (r: any) => r.source },
       { key: 'mode', label: 'mode', of: (r: any) => r.mode },
       { key: 'wh', label: 'place', of: (r: any) => r.warehouse_name },
       { key: 'st', label: 'status', of: (r: any) => r.status },
@@ -615,8 +653,9 @@ function ConfirmReceiptModal({ receipt, onClose, onDone }: {
 }
 
 function RaiseRequestModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const { me } = useAuth();
-  const { data: cats } = useApi<any[]>('/finance/expense-categories');
+  const { me, can } = useAuth();
+  const { data: cats, reload: reloadCats } = useApi<any[]>('/finance/expense-categories');
+  const [addingCat, setAddingCat] = useState(false);
   const [kind, setKind] = useState('EXPENSE');
   const [categoryId, setCategoryId] = useState('');
   const [payee, setPayee] = useState('');
@@ -628,6 +667,18 @@ function RaiseRequestModal({ onClose, onDone }: { onClose: () => void; onDone: (
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
   const needsCat = kind === 'EXPENSE';
+
+  /* One modal at a time. */
+  if (addingCat) {
+    return (
+      <ExpenseTypeModal onClose={() => setAddingCat(false)}
+        onDone={(created?: any) => {
+          setAddingCat(false);
+          reloadCats();
+          if (created?.id) setCategoryId(created.id);
+        }} />
+    );
+  }
 
   return (
     <Modal
@@ -669,10 +720,18 @@ function RaiseRequestModal({ onClose, onDone }: { onClose: () => void; onDone: (
         </Field>
         {needsCat ? (
           <Field label="Expense type">
-            <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-              <option value="">Choose…</option>
-              {(cats ?? []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
+            <div className="row" style={{ gap: 6 }}>
+              <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+                <option value="">Choose…</option>
+                {(cats ?? []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              {/* An expense nobody anticipated — a broken shutter, a fine. The
+                  alternative is filing it under something it is not, and then
+                  the "where the money went" chart lies. */}
+              {can('admin.settings.manage') ? (
+                <button className="btn sm" onClick={() => setAddingCat(true)}>+ New</button>
+              ) : null}
+            </div>
           </Field>
         ) : <Field label="Priority">
           <select value={priority} onChange={(e) => setPriority(e.target.value)}>
@@ -845,5 +904,185 @@ function MyRequests() {
           onDone={() => { setRaising(false); mine.reload(); toast('Sent to Finance', 'ok'); }} />
       ) : null}
     </Layout>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * A KIND OF EXPENSE NOBODY ANTICIPATED
+ *
+ * A broken shutter, a fine, a one-off hire. Without this the clerk files it
+ * under something it is not, and then "where the money went" quietly lies for
+ * the rest of the year.
+ * ------------------------------------------------------------------------ */
+function ExpenseTypeModal({ onClose, onDone }: {
+  onClose: () => void; onDone: (created?: any) => void;
+}) {
+  const [name, setName] = useState('');
+  const [landed, setLanded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  return (
+    <Modal
+      title="A new kind of expense"
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy || name.trim().length < 2}
+          onClick={async () => {
+            setBusy(true); setError(null);
+            try {
+              onDone(await api.post<any>('/finance/expense-categories', {
+                name: name.trim(), affectsLandedCost: landed,
+              }));
+            } catch (e: any) { setError(e); } finally { setBusy(false); }
+          }}>Add</button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+      <Field label="What is it" hint="How it will read on the spending chart.">
+        <input value={name} autoFocus onChange={(e) => setName(e.target.value)}
+          placeholder="Shutter repair" />
+      </Field>
+      <label className="check">
+        <input type="checkbox" checked={landed} onChange={(e) => setLanded(e.target.checked)} />
+        <span>
+          <b className="small">Counts towards the cost of the goods</b>
+          <div className="small muted">
+            Tick for transport, loading, commission — anything that makes a crate
+            cost more than its rate. Leave it for rent, wages and electricity:
+            those are the cost of the business, not of a mango, and mixing them
+            makes every landed cost wrong.
+          </div>
+        </span>
+      </label>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * THE PAYMENTS BEHIND ONE REQUEST — AND UNDOING ONE
+ *
+ * A payment made to the wrong person, or twice, is not a hypothetical: it is
+ * the single most expensive mistake this desk can make. The endpoint to undo
+ * one has existed all along and nothing on any screen called it, so the only
+ * remedy was a database console.
+ *
+ * Reversing does not delete anything. It marks the payment reversed and gives
+ * the request its balance back, so the money is owed again and the trail shows
+ * what happened and who said so.
+ * ------------------------------------------------------------------------ */
+function PaymentsModal({ request, onClose, onDone }: {
+  request: any; onClose: () => void; onDone: (m: string) => void;
+}) {
+  const { can } = useAuth();
+  const { data, loading, reload } = useApi<any>(`/finance/requests/${request.id}`, [request.id]);
+  const [reversing, setReversing] = useState<any>(null);
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  const payments = data?.payments ?? [];
+
+  if (reversing) {
+    return (
+      <Modal
+        title={`Reverse ${inr(reversing.amount, 0)} to ${request.payee_name}?`}
+        onClose={() => { setReversing(null); setReason(''); }}
+        footer={<>
+          <button className="btn" onClick={() => { setReversing(null); setReason(''); }}>
+            Keep it
+          </button>
+          <button className="btn danger" disabled={busy || reason.trim().length < 4}
+            onClick={async () => {
+              setBusy(true); setError(null);
+              try {
+                await api.post(`/finance/payments/${reversing.id}/reverse`, {
+                  reason: reason.trim(),
+                });
+                setReversing(null); setReason(''); reload();
+                onDone(`Reversed. ${request.payee_name} is owed ${inr(reversing.amount, 0)} again.`);
+              } catch (e: any) { setError(e); } finally { setBusy(false); }
+            }}>Reverse it</button>
+        </>}
+      >
+        <ErrorBanner error={error} />
+        <div className="banner warn mb">
+          <span><Icon name="alert" size={16} /></span>
+          <div className="small">
+            This does not move money back — somebody still has to get it back from{' '}
+            <b>{request.payee_name}</b>. What it does is put the amount back on the
+            request, so it shows as owed again and nobody pays it a second time
+            thinking the first went astray.
+          </div>
+        </div>
+        <dl className="kv mb">
+          <dt>Paid</dt><dd>{dateTime(reversing.paid_at)}</dd>
+          <dt>How</dt><dd>{String(reversing.mode).toLowerCase()}
+            {reversing.transaction_ref ? ` · ${reversing.transaction_ref}` : ''}</dd>
+          <dt>By</dt><dd>{reversing.paid_by_name ?? '—'}</dd>
+        </dl>
+        <Field label="Why is it being reversed? (required)">
+          <input value={reason} autoFocus onChange={(e) => setReason(e.target.value)}
+            placeholder="Paid to the wrong account" />
+        </Field>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal
+      title={`${request.request_no} · ${request.payee_name}`}
+      onClose={onClose}
+      footer={<button className="btn" onClick={onClose}>Close</button>}
+    >
+      <dl className="kv mb">
+        <dt>Asked for</dt><dd>{inr(request.amount, 0)}</dd>
+        <dt>Paid</dt><dd><b>{inr(request.paid_amount, 0)}</b></dd>
+        <dt>What for</dt>
+        <dd>{request.expense_category ?? String(request.kind).replace(/_/g, ' ').toLowerCase()}</dd>
+        {request.note ? <><dt>Note</dt><dd>{request.note}</dd></> : null}
+      </dl>
+
+      {loading ? <Loading /> : (
+        <table className="mini">
+          <tbody>
+            {payments.map((p: any) => (
+              <tr key={p.id} className={p.status === 'REVERSED' ? 'row-crit' : ''}>
+                <td>
+                  <b>{inr(p.amount, 0)}</b>
+                  <div className="small muted">
+                    {String(p.mode).toLowerCase()}
+                    {p.transaction_ref ? ` · ${p.transaction_ref}` : ''}
+                  </div>
+                </td>
+                <td className="small muted">
+                  {dateTime(p.paid_at)}
+                  <div>{p.paid_by_name ?? '—'}</div>
+                </td>
+                <td>
+                  {p.status === 'REVERSED' ? (
+                    <div>
+                      <Chip tone="danger">reversed</Chip>
+                      <div className="small muted">{p.reverse_reason}</div>
+                    </div>
+                  ) : <Chip tone="ok">paid</Chip>}
+                </td>
+                <td className="num">
+                  {p.status !== 'REVERSED' && can('finance.payment.reverse') ? (
+                    <button className="btn sm danger" onClick={() => setReversing(p)}>
+                      Reverse
+                    </button>
+                  ) : null}
+                </td>
+              </tr>
+            ))}
+            {!payments.length ? (
+              <tr><td className="muted small">Nothing paid against this yet.</td></tr>
+            ) : null}
+          </tbody>
+        </table>
+      )}
+    </Modal>
   );
 }

@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, useAuth, inr, num, addDays } from '../lib/api';
+import { api, useAuth, inr, num, date, ago, addDays } from '../lib/api';
 import {
-  Chip, Empty, ErrorBanner, Field, Layout, Loading, ReasonPicker, Steps,
+  Chip, DataTable, Empty, ErrorBanner, Field, Layout, Loading, ReasonPicker, Steps,
   useApi, useReasonBank, useToast,
 } from '../components/ui';
 import { Icon } from '../components/icons';
+import { SupplierModal } from './Finance';
 import { CompareModal } from './Purchase';
 
 /* ===========================================================================
@@ -40,7 +41,7 @@ type PlacedOrder = {
   po: any; supplierId: string; outcome: any; confirmed: any; confirming?: boolean;
 };
 
-const STEPS = ['What to buy', 'Confirm need', 'Supplier & rates', 'Raise orders', 'Confirm with suppliers'];
+const STEPS = ['What to buy', 'Confirm need', 'Supplier & rates', 'Raise orders', 'Send to suppliers'];
 
 export function QuickOrderPage() {
   const nav = useNavigate();
@@ -55,7 +56,7 @@ export function QuickOrderPage() {
     return (
       <Layout title="Order in one flow">
         <Empty icon="lock" title="This shortcut is for the owner only"
-          hint="Raising an order, approving it and confirming it with the supplier are
+          hint="Raising an order, approving it and sending it to the supplier are
                 separate jobs for separate people. Use What to Buy, then Requirements,
                 then Purchase Orders." />
       </Layout>
@@ -116,9 +117,23 @@ export function QuickOrderPage() {
   const suppliers = useApi<any[]>('/masters/suppliers');
   const [allocs, setAllocs] = useState<Record<string, Alloc[]>>({});
   const [compareFor, setCompareFor] = useState<{ line: Pick; index: number } | null>(null);
+  const [addingSupplier, setAddingSupplier] = useState<{ line: Pick; index: number } | null>(null);
   // The compare endpoint is permission-gated server-side; hide the button
   // rather than offer a click that can only 403.
   const canCompare = can('purchase.quote.compare');
+
+  /* What the suppliers are asking, posted by them from their own panel. The
+     buyer used to type a rate he had been told on the phone; now the number
+     is already here and he picks one. */
+  /* Orders raised on an earlier run of this flow and never sent. Leaving the
+     page half way used to lose them: the flow restarted at step 0 and the
+     orders sat in APPROVED with nobody looking at them. */
+  const unsent = useApi<any[]>('/planning/purchase-orders?status=APPROVED');
+
+  const askedRates = useApi<any[]>(
+    can('purchase.rate.compare') ? '/planning/supplier-rates' : null, []);
+  const ratesFor = (productId: string) =>
+    (askedRates.data ?? []).filter((r: any) => r.product_id === productId);
   const [expectedDate, setExpectedDate] = useState(addDays(1));
 
   const supplierOf = (id: string) => (suppliers.data ?? []).find((s) => s.id === id);
@@ -328,9 +343,9 @@ export function QuickOrderPage() {
     } catch (e: any) { setError(e); } finally { setBusy(false); }
   };
 
-  /** Only after somebody has actually spoken to that supplier. Each order is
-   *  confirmed on its own — one supplier agreeing says nothing about another. */
-  const confirmWithSupplier = async (o: PlacedOrder) => {
+  /** Places one order on its supplier's panel. Each goes on its own — one
+   *  supplier is not the others, and a decline should not hold up the rest. */
+  const sendToSupplier = async (o: PlacedOrder) => {
     setOrders((s2) => s2.map((x) => (x.po.id === o.po.id ? { ...x, confirming: true } : x)));
     setError(null);
     try {
@@ -612,6 +627,26 @@ export function QuickOrderPage() {
                     </Chip>
                   </div>
                   <div className="card-body tight">
+                    {/* Everybody's asking price for this product, side by side.
+                        Cheapest first; click one to take it. */}
+                    {ratesFor(l.productId).length ? (
+                      <div className="rate-strip">
+                        <span className="small muted">They are asking</span>
+                        {ratesFor(l.productId).map((q: any) => (
+                          <button key={q.quote_id} className={`rate-chip ${q.is_stale ? 'stale' : ''}`}
+                            title={q.is_stale ? `Rate expired ${date(q.valid_till)}` : q.note ?? ''}
+                            onClick={() => patchRow(l, 0, {
+                              supplierId: q.supplier_id, rate: Number(q.quoted_rate),
+                            })}>
+                            <b>{inr(q.quoted_rate)}</b>
+                            <span>{q.supplier_name}</span>
+                            {q.available_qty != null ? (
+                              <em>{num(q.available_qty, 0)} {q.uom}</em>
+                            ) : null}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
                     <div className="table-wrap">
                       <table className="data">
                         <thead>
@@ -628,7 +663,18 @@ export function QuickOrderPage() {
                             <tr key={i}>
                               <td>
                                 <select value={r.supplierId}
-                                  onChange={(e) => patchRow(l, i, { supplierId: e.target.value })}>
+                                  onChange={(e) => {
+                                    const sid = e.target.value;
+                                    /* Picking a supplier brings their posted
+                                       rate with it. Choosing a name and then
+                                       typing a number that is already on file
+                                       is two jobs where there is one. */
+                                    const asked = ratesFor(l.productId)
+                                      .find((x: any) => x.supplier_id === sid);
+                                    patchRow(l, i, asked
+                                      ? { supplierId: sid, rate: Number(asked.quoted_rate) }
+                                      : { supplierId: sid });
+                                  }}>
                                   <option value="">Choose a supplier…</option>
                                   {(suppliers.data ?? []).filter((s2) => s2.status !== 'BLOCKED').map((s2) => (
                                     <option key={s2.id} value={s2.id}>
@@ -637,6 +683,13 @@ export function QuickOrderPage() {
                                     </option>
                                   ))}
                                 </select>
+                                {/* A supplier met this morning. Without this the
+                                    only way to buy from him is to leave the
+                                    order half made and go to a master screen. */}
+                                {can('master.supplier.manage') ? (
+                                  <button className="btn sm ghost" title="Add a supplier"
+                                    onClick={() => setAddingSupplier({ line: l, index: i })}>+ New</button>
+                                ) : null}
                               </td>
                               <td className="num">
                                 <input className="inline num" type="number" style={{ width: 100 }}
@@ -711,6 +764,11 @@ export function QuickOrderPage() {
               )}
             </div>
           </div>
+
+          {addingSupplier ? (
+            <SupplierModal supplier={{}} onClose={() => setAddingSupplier(null)}
+              onDone={() => { setAddingSupplier(null); suppliers.reload(); toast('Supplier added', 'ok'); }} />
+          ) : null}
 
           {compareFor ? (
             <CompareModal
@@ -796,7 +854,7 @@ export function QuickOrderPage() {
             <div>
               This raises {bySupplier().length === 1 ? 'the order' : `${bySupplier().length} orders`} and
               runs {bySupplier().length === 1 ? 'it' : 'each'} through the approval rules. It does
-              {' '}<b>not</b> tell any supplier anything — that is the next step, and it is a phone call.
+              {' '}<b>not</b> place anything with a supplier — that is the next step.
             </div>
           </div>
 
@@ -811,28 +869,31 @@ export function QuickOrderPage() {
         </>
       ) : null}
 
-      {/* ================================ 4 — CONFIRM WITH SUPPLIERS ==== */}
+      {/* ================================== 4 — SEND TO SUPPLIERS ====== */}
       {step === 4 ? (
         <>
           {orders.length > 0 && orders.every((o) => o.confirmed) ? (
             <div className="banner ok mb">
               <span>&#10003;</span>
               <div>
-                <b>All {orders.length} order(s) confirmed.</b>
-                <div className="small">The gate has been told to expect them on {expectedDate}.</div>
+                <b>All {orders.length} order(s) sent.</b>
+                <div className="small">
+                  Each supplier accepts or declines on their own panel. You will be told
+                  when they answer, and the gate is expecting them on {expectedDate}.
+                </div>
               </div>
             </div>
           ) : (
-            <div className="banner warn mb">
-              <span>&#128222;</span>
+            <div className="banner info mb">
+              <span>&#8505;</span>
               <div>
                 <b>
-                  {orders.filter((o) => !o.confirmed).length} of {orders.length} order(s) still
-                  need a call.
+                  {orders.filter((o) => !o.confirmed).length} of {orders.length} order(s) not
+                  sent yet.
                 </b>
                 <div className="small">
-                  This panel is internal. Each supplier knows nothing about their order until
-                  somebody speaks to them — confirm each one only once they have agreed.
+                  Sending puts the order on the supplier's panel. They confirm it there —
+                  nobody has to ring round and agree it first.
                 </div>
               </div>
             </div>
@@ -854,6 +915,8 @@ export function QuickOrderPage() {
                       <dt>Value</dt><dd><b>{inr(o.po.grand_total)}</b></dd>
                       <dt>Phone</dt>
                       <dd>
+                        {/* Kept so you can ring them if you want to, not
+                            because the flow needs a call. */}
                         {sup?.phone
                           ? <a href={`tel:${sup.phone}`}>{sup.phone}</a>
                           : <span className="muted">No number on file</span>}
@@ -866,12 +929,15 @@ export function QuickOrderPage() {
                     <div className="btn-row mt">
                       {o.confirmed ? (
                         <span className="small" style={{ color: 'var(--ok)' }}>
-                          &#10003; Confirmed — the gate is expecting this
+                          &#10003; Sent — waiting for {supplierName(o.supplierId)} to accept
                         </span>
                       ) : approved ? (
+                        /* Was "<supplier> has agreed", which claimed an
+                           agreement nobody had obtained. This only places the
+                           order on their panel; agreeing is their act. */
                         <button className="btn primary" disabled={!!o.confirming}
-                          onClick={() => confirmWithSupplier(o)}>
-                          {o.confirming ? 'Confirming…' : `${supplierName(o.supplierId)} has agreed`}
+                          onClick={() => sendToSupplier(o)}>
+                          {o.confirming ? 'Sending…' : `Send to ${supplierName(o.supplierId)}`}
                         </button>
                       ) : (
                         <span className="small muted">
@@ -899,6 +965,43 @@ export function QuickOrderPage() {
             </button>
           </div>
         </>
+      ) : null}
+
+      {/* ============================ ORDERS LEFT PART-WAY THROUGH ===== */}
+      {step === 0 && (unsent.data ?? []).length ? (
+        <div className="card mt">
+          <div className="card-head">
+            <h2>Left part-way through</h2>
+            <span className="small muted">
+              raised on an earlier run and never sent to the supplier
+            </span>
+          </div>
+          <div className="card-body tight">
+            <DataTable
+              rows={unsent.data ?? []}
+              onRowClick={(o: any) => nav(`/purchase-orders/${o.id}`)}
+              cols={[
+                { key: 'n', head: 'Order', render: (o: any) => (
+                  <div><b className="mono">{o.po_no}</b>
+                    <div className="small muted">{date(o.order_date)}</div></div>) },
+                { key: 's', head: 'Supplier', render: (o: any) => o.supplier_name },
+                { key: 'l', head: 'Items', num: true, render: (o: any) => o.line_count },
+                { key: 'v', head: 'Value', num: true, render: (o: any) => inr(o.grand_total, 0) },
+                { key: 'w', head: 'Waiting', render: (o: any) => (
+                  <span className="small muted">{ago(o.created_at ?? o.order_date)}</span>) },
+                { key: 'a', head: '', width: 150, render: () => (
+                  <span className="btn sm primary">Pick it up &rarr;</span>) },
+              ]}
+            />
+          </div>
+          <div className="card-body">
+            <p className="small muted" style={{ margin: 0 }}>
+              These are approved and waiting to be sent. Opening one takes you to the
+              order, where <b>Send to supplier</b> finishes the job — you do not have to
+              start this flow again.
+            </p>
+          </div>
+        </div>
       ) : null}
 
     </Layout>

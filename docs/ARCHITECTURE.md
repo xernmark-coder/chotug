@@ -491,6 +491,26 @@ Each exists because the same number was about to be computed in two places.
 Two screens that disagree about a number are worse than either being wrong,
 because nobody can tell which to believe.
 
+## Endpoints with no caller
+
+The single most repeated fault in this codebase has been working server code
+that no screen reaches. It hid the send-to-centre flow, the supplier price
+list, the invoice comparison, payment reversal and the password change — five
+features that were built, tested with `curl`, and invisible to every user.
+
+`scripts/verify-client-update.sh` now asserts a caller exists for the ones that
+matter. What legitimately has no browser caller:
+
+| Route | Why |
+|---|---|
+| `/devices/*` | A site agent posts weighbridge and scanner readings. Machine-to-machine by design |
+| `/costing/payments/sync`, `/insights/ai/*`, `/masters/qc-templates`, `/farming/traceability/:batchId` | Called from other server code |
+| `/farming/losses`, `/farming/supply-plan` | Farm reports with no screen. Farming was outside this round of client changes |
+| `/inventory/bins`, `/masters/bins` | Two bin listings. Put-away was the only caller of the second, and put-away is gone; the packing bench gets its shelves from `/inventory/pack-bench/:batchId`. Both are harmless GETs — delete when the warehouse map is next touched |
+
+When adding an endpoint, add its caller in the same change, or write down here
+why there is not one.
+
 ## Scannable codes, drawn rather than fetched
 
 `components/barcode.tsx` (Code 128-B, on pack labels) and `components/qr.tsx`

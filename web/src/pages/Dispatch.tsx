@@ -5,6 +5,7 @@ import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
   FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
+import { Icon } from '../components/icons';
 
 /* ===========================================================================
  * DISPATCH
@@ -41,9 +42,13 @@ export function LogisticsDispatchPage() {
   const fCand = useFilters<any>(candidates.data, {
     date: (c: any) => c.expected_date,
     search: (c: any) => [c.po_no, c.supplier_name, c.pickup_address].filter(Boolean).join(' '),
-    facets: [{ key: 'sup', label: 'supplier', of: (c: any) => c.supplier_name }],
+    facets: [
+      { key: 'sup', label: 'supplier', of: (c: any) => c.supplier_name },
+      { key: 'ask', label: 'request', all: 'Asked or not', of: (c: any) =>
+        (c.transport_requested_at ? 'they asked for one' : 'nobody asked') },
+      { key: 'st', label: 'order', of: (c: any) => c.status },
+    ],
     totals: [
-      { label: 'Orders', of: () => 1 },
       { label: 'Value', of: (c: any) => Number(c.grand_total) || 0, money: true },
     ],
   });
@@ -94,18 +99,35 @@ export function LogisticsDispatchPage() {
       {canManage ? (
         <>
           <div className="section-head"><h2>Needs a vehicle</h2><span className="rule" /></div>
+          {(candidates.data ?? []).some((c: any) => c.transport_requested_at) ? (
+            <div className="banner warn mb">
+              <span><Icon name="truck" size={16} /></span>
+              <div>
+                <b>{(candidates.data ?? []).filter((c: any) => c.transport_requested_at).length} supplier(s)
+                have asked for a vehicle.</b> They are at the top of the list — somebody is
+                standing next to crates waiting for an answer.
+              </div>
+            </div>
+          ) : null}
           <FilterBar f={fCand} placeholder="Search order or supplier" />
           <FilterTotals f={fCand} noun="order" />
           <div className="card mb"><div className="card-body tight">
             <DataTable
               loading={candidates.loading}
               rows={fCand.rows}
-              rowTone={() => 'warn'}
+              rowTone={(c: any) => (c.transport_requested_at ? 'crit' : 'warn')}
               cols={[
                 { key: 'o', head: 'Order', render: (c: any) => (
                   <div><b className="mono">{c.po_no}</b>
-                    <div className="small muted">wanted {date(c.expected_date)}</div></div>
+                    <div className="small muted">
+                      wanted {date(c.expected_date)} · {String(c.status).toLowerCase().replace('_', ' ')}
+                    </div></div>
                 ) },
+                { key: 'ask', head: '', render: (c: any) => c.transport_requested_at ? (
+                  <div><Chip tone="warn">they asked</Chip>
+                    {c.transport_request_note
+                      ? <div className="small muted">{c.transport_request_note}</div> : null}</div>
+                ) : null },
                 { key: 's', head: 'Collect from', render: (c: any) => (
                   <div>{c.supplier_name}
                     <div className="small muted">{c.pickup_address ?? '—'}</div></div>

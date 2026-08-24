@@ -56,8 +56,21 @@ async function profile(userId: string) {
             (SELECT json_agg(json_build_object('id',b.id,'code',b.code,'name',b.name,'type',b.type)
                              ORDER BY b.code)
                FROM branches b WHERE b.company_id = u.company_id AND b.is_active) AS branches,
-            (SELECT json_agg(json_build_object('id',w.id,'code',w.code,'name',w.name,'branchId',w.branch_id)
-                             ORDER BY w.code)
+            /* Ordered so that whoever signs in lands where they actually
+             * stand. The web app takes warehouses[0] as the default place, and
+             * plain alphabetical order made a shop called CTR-KOT the "current
+             * warehouse" of every warehouse executive in the company — which
+             * is how a screen for sending stock to a shop opened with no shop
+             * to send to. The place you manage first, then real warehouses,
+             * then shops. */
+            (SELECT json_agg(json_build_object('id',w.id,'code',w.code,'name',w.name,
+                                               'branchId',w.branch_id,'isCentre',w.is_centre)
+                             /* COALESCE, not a bare comparison: a warehouse
+                              * with no manager gives NULL, and DESC sorts
+                              * NULLS FIRST — which put everybody else's place
+                              * ahead of the one you actually run. */
+                             ORDER BY COALESCE(w.manager_user_id = u.id, false) DESC,
+                                      w.is_centre, w.code)
                FROM warehouses w WHERE w.company_id = u.company_id AND w.is_active) AS warehouses
        FROM users u JOIN companies c ON c.id = u.company_id
       WHERE u.id = $1`, [userId]);

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { query, withTx } from '../db.js';
+import { query, withTx, type Actor, type Tx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
 import { authenticate, staffOnly, requires } from '../platform/auth.js';
 import { emit, getSetting, nextDocNo, pushTask, raiseAlert, requestApprovals, resolveTask } from '../platform/services.js';
@@ -372,24 +372,53 @@ costingRouter.post('/invoices', requires('finance.invoice.create'), h(async (req
       systemRaised: true,
     });
 
-    await pushTask(tx, req.actor, {
-      branchId: input.branchId, queueKey: 'INVOICE_MATCH',
-      docType: 'INVOICE', docId: inv.id, docNo: input.invoiceNo,
-      title: `Match invoice ${input.invoiceNo}`,
-      subtitle: `₹${Number(input.total).toLocaleString('en-IN')}`,
-      severity: dup[0] ? 'critical' : 'normal',
-      requiredPermission: 'finance.invoice.match', slaMinutes: 480,
-    });
+    /* Compare it against the order and the receipt now, rather than waiting
+     * for somebody to press a button labelled with a phrase they do not use.
+     * A bill that ties needs nobody's attention; only the ones that do not
+     * should reach a person's queue. */
+    let check: any = null;
+    try {
+      check = await checkInvoiceAgainstReceipts(tx, req.actor, inv.id);
+    } catch {
+      /* A bill can arrive before the lorry — there is simply nothing to
+       * compare it with yet. That is not an error, and it must not stop the
+       * invoice being filed. Finance can check again later from the invoice. */
+    }
 
-    return { ...inv, possibleDuplicate: dup[0] ?? null, arithmeticOk };
+    const troubles = (check?.findings ?? []).length;
+    if (dup[0] || troubles) {
+      await pushTask(tx, req.actor, {
+        branchId: input.branchId, queueKey: 'INVOICE_MATCH',
+        docType: 'INVOICE', docId: inv.id, docNo: input.invoiceNo,
+        title: dup[0]
+          ? `${input.invoiceNo} may be a duplicate`
+          : `${input.invoiceNo} does not agree with what we received`,
+        subtitle: dup[0]
+          ? `Same supplier as ${dup[0].invoice_no}`
+          : `₹${Number(input.total).toLocaleString('en-IN')} · ${troubles} thing(s) to look at`,
+        severity: dup[0] ? 'critical' : 'normal',
+        requiredPermission: 'finance.invoice.match', slaMinutes: 480,
+      });
+    }
+
+    return { ...inv, possibleDuplicate: dup[0] ?? null, arithmeticOk, check };
   });
 }));
 
-costingRouter.post('/invoices/:id/match', requires('finance.invoice.match'), h(async (req) =>
-  withTx(req.actor, async (tx) => {
+/**
+ * Compare a bill against what was ordered and what actually arrived.
+ *
+ * This is reconciliation, not a gate. The client pays the supplier when the
+ * order is accepted, so an invoice that differs from the receipt by a kilo
+ * still gets paid — somebody just needs to know about the kilo. It runs on its
+ * own when the invoice is filed, so nobody has to know the phrase "3-way
+ * match" to get the answer.
+ */
+export async function checkInvoiceAgainstReceipts(tx: Tx, actor: Actor, invoiceId: string) {
+  {
     const { rows: iRows } = await tx.query(
       `SELECT * FROM supplier_invoices WHERE id=$1 AND company_id=$2 FOR UPDATE`,
-      [req.params.id, req.actor.companyId]);
+      [invoiceId, actor.companyId]);
     const inv = iRows[0];
     if (!inv) throw ApiError.notFound('Invoice not found');
 
@@ -404,7 +433,7 @@ costingRouter.post('/invoices/:id/match', requires('finance.invoice.match'), h(a
 
     const { rows: tolRows } = await tx.query(
       `SELECT * FROM tolerance_profiles WHERE company_id=$1 AND is_default LIMIT 1`,
-      [req.actor.companyId]);
+      [actor.companyId]);
     const t = tolRows[0];
     if (!t) throw ApiError.rule('No default tolerance profile is configured.');
 
@@ -433,7 +462,7 @@ costingRouter.post('/invoices/:id/match', requires('finance.invoice.match'), h(a
             qty_result, rate_result, tax_result, charge_result, qty_variance, rate_variance_pct,
             findings, is_latest)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,true) RETURNING *`,
-      [req.actor.companyId, inv.id, req.actor.userId, t.id, result.overall,
+      [actor.companyId, inv.id, actor.userId, t.id, result.overall,
        result.qtyResult, result.rateResult, result.taxResult, result.chargeResult,
        result.qtyVariance, result.rateVariancePct, JSON.stringify(result.findings)]);
 
@@ -446,25 +475,25 @@ costingRouter.post('/invoices/:id/match', requires('finance.invoice.match'), h(a
         WHERE id=$1`,
       [inv.id, newStatus,
        result.findings.filter((f) => f.severity === 'FAIL').map((f) => f.message).join('; ') || null,
-       req.actor.userId]);
+       actor.userId]);
 
     if (newStatus === 'MATCHED') {
       await tx.query(
         `UPDATE supplier_invoices SET status='PAYABLE', approved_by=$2, approved_at=now() WHERE id=$1`,
-        [inv.id, req.actor.userId]);
+        [inv.id, actor.userId]);
       await tx.query(
         `INSERT INTO payment_status (invoice_id, company_id, supplier_id, payable_amount,
               balance, due_date, sync_source)
          VALUES ($1,$2,$3,$4,$4,$5,'PURCHASE_MODULE')
          ON CONFLICT (invoice_id) DO UPDATE SET payable_amount=EXCLUDED.payable_amount,
               balance=EXCLUDED.balance, due_date=EXCLUDED.due_date, last_synced_at=now()`,
-        [inv.id, req.actor.companyId, inv.supplier_id, inv.total, inv.due_date]);
+        [inv.id, actor.companyId, inv.supplier_id, inv.total, inv.due_date]);
 
-      await resolveTask(tx, req.actor, 'INVOICE_MATCH', 'INVOICE', inv.id);
-      await emit(tx, req.actor, 'supplier_invoice', inv.id, 'invoice.payable',
+      await resolveTask(tx, actor, 'INVOICE_MATCH', 'INVOICE', inv.id);
+      await emit(tx, actor, 'supplier_invoice', inv.id, 'invoice.payable',
         { invoiceNo: inv.invoice_no, total: inv.total });
     } else {
-      await raiseAlert(tx, req.actor, {
+      await raiseAlert(tx, actor, {
         branchId: inv.branch_id, alertType: 'INVOICE_MISMATCH',
         severity: newStatus === 'HOLD' ? 'CRITICAL' : 'HIGH',
         entityType: 'supplier_invoice', entityId: inv.id,
@@ -472,7 +501,7 @@ costingRouter.post('/invoices/:id/match', requires('finance.invoice.match'), h(a
         message: result.findings.slice(0, 3).map((f) => f.message).join('; '),
         meta: { overall: result.overall },
       });
-      await requestApprovals(tx, req.actor,
+      await requestApprovals(tx, actor,
         { docType: 'INVOICE', docId: inv.id, docNo: inv.invoice_no, branchId: inv.branch_id },
         { value: Number(inv.total) });
 
@@ -481,7 +510,7 @@ costingRouter.post('/invoices/:id/match', requires('finance.invoice.match'), h(a
       const shortLines = result.findings.filter(
         (f) => f.field === 'qty' && f.expected != null && f.actual > f.expected);
       if (shortLines.length > 0) {
-        const noteNo = await nextDocNo(tx, req.actor, inv.branch_id, 'DN');
+        const noteNo = await nextDocNo(tx, actor, inv.branch_id, 'DN');
         const amount = money(shortLines.reduce((a, f) => {
           const l = matchLines.find((m) => m.lineNo === f.lineNo);
           return a + ((f.actual - (f.expected ?? 0)) * (l?.invoiceRate ?? 0));
@@ -491,14 +520,18 @@ costingRouter.post('/invoices/:id/match', requires('finance.invoice.match'), h(a
             `INSERT INTO credit_debit_notes (company_id, branch_id, note_no, note_type, supplier_id,
                   invoice_id, reason_code, amount, total, status, auto_drafted, remarks, created_by)
              VALUES ($1,$2,$3,'DEBIT',$4,$5,'SHORT_SUPPLY',$6,$6,'DRAFT',true,$7,$8)`,
-            [req.actor.companyId, inv.branch_id, noteNo, inv.supplier_id, inv.id, amount,
-             'Auto-drafted from 3-way match: billed more than received.', req.actor.userId]);
+            [actor.companyId, inv.branch_id, noteNo, inv.supplier_id, inv.id, amount,
+             'Raised automatically: this bill charges for more than we received.', actor.userId]);
         }
       }
     }
 
     return { ...mr[0], invoiceStatus: newStatus, findings: result.findings };
-  })));
+  }
+}
+
+costingRouter.post('/invoices/:id/match', requires('finance.invoice.match'), h(async (req) =>
+  withTx(req.actor, (tx) => checkInvoiceAgainstReceipts(tx, req.actor, req.params.id))));
 
 costingRouter.get('/invoices', h(async (req) =>
   query(req.actor,

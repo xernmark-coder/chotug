@@ -65,10 +65,10 @@ export function CataloguePage() {
       { key: 'sup', label: 'supplier', of: (r: any) => r.supplier_name },
       { key: 'cat', label: 'category', of: (r: any) => r.category_name },
       { key: 'prod', label: 'product', of: (r: any) => r.product_name },
-      { key: 'pref', label: 'preference', of: (r: any) =>
+      { key: 'pref', label: 'preference', all: 'Preferred or not', of: (r: any) =>
         (r.is_preferred ? 'preferred' : 'other') },
     ],
-    totals: [{ label: 'Codes', of: () => 1 }],
+    totals: [],
   });
 
   const renderCat = (c: any, depth = 0): React.ReactNode => {
@@ -290,45 +290,78 @@ function CategoryModal({ parent, onClose, onDone }: {
   );
 }
 
-function ProductModal({ category, onClose, onDone }: {
-  category: any; onClose: () => void; onDone: () => void;
+/** Exported so a product can be added from wherever one is being picked. */
+/**
+ * Adding a product.
+ *
+ * On the catalogue you are already standing inside a category, so it is passed
+ * in. Opened from a product dropdown somewhere else — a centre asking for
+ * stock, say — there is no category in hand, so it asks for one. A modal that
+ * demands context the caller does not have is a modal that cannot be reused,
+ * which is how "add new to every dropdown" ends up meaning "on one screen".
+ */
+export function ProductModal({ category, onClose, onDone }: {
+  category?: any; onClose: () => void; onDone: (created?: any) => void;
 }) {
+  const cats = useApi<any>(category ? null : '/masters/categories');
+  const [categoryId, setCategoryId] = useState(category?.id ?? '');
   const [name, setName] = useState('');
   const [nameHi, setNameHi] = useState('');
-  const [icon, setIcon] = useState(category.icon ?? 'produce');
+  const [icon, setIcon] = useState(category?.icon ?? 'produce');
   const [shelf, setShelf] = useState('');
   const [reorder, setReorder] = useState('');
   const [storage, setStorage] = useState('AMBIENT');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
 
+  /* The tree comes back nested; a dropdown wants it flat, indented so the
+     shape is still readable. */
+  const flat: { id: string; label: string }[] = [];
+  const walk = (list: any[], depth = 0) => {
+    for (const c of list ?? []) {
+      flat.push({ id: c.id, label: `${'\u00a0\u00a0'.repeat(depth)}${c.name}` });
+      walk(c.children ?? [], depth + 1);
+    }
+  };
+  walk(cats.data?.tree ?? []);
+
   return (
     <Modal
-      title={`Add to ${category.name}`}
+      title={category ? `Add to ${category.name}` : 'Add a product'}
       onClose={onClose}
       footer={<>
         <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn primary" disabled={busy || !name.trim()} onClick={async () => {
+        <button className="btn primary" disabled={busy || !name.trim() || !categoryId}
+          onClick={async () => {
           setBusy(true); setError(null);
           try {
-            await api.post('/masters/products', {
-              categoryId: category.id, name: name.trim(),
+            const created = await api.post<any>('/masters/products', {
+              categoryId, name: name.trim(),
               nameHi: nameHi.trim() || undefined,
               variety: name.trim(), icon,
               storageType: storage,
               shelfLifeDays: shelf ? Number(shelf) : undefined,
               reorderPoint: reorder ? Number(reorder) : undefined,
             });
-            onDone();
+            onDone(created);
           } catch (e: any) { setError(e); } finally { setBusy(false); }
         }}>Add</button>
       </>}
     >
       <ErrorBanner error={error} />
-      <p className="small muted mb">
-        A breed goes in here. <b>{name.trim() || 'Alphonso'}</b> will hold its own
-        stock and its own price, and still count towards {category.name}.
-      </p>
+      {category ? (
+        <p className="small muted mb">
+          A breed goes in here. <b>{name.trim() || 'Alphonso'}</b> will hold its own
+          stock and its own price, and still count towards {category.name}.
+        </p>
+      ) : (
+        <Field label="Which category" hint="A breed sits under the product it is a breed of.">
+          <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+            <option value="">Choose…</option>
+            {flat.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+          </select>
+        </Field>
+      )}
       <div className="grid c2">
         <Field label="Name"><input value={name} autoFocus
           onChange={(e) => setName(e.target.value)} placeholder="Alphonso" /></Field>

@@ -60,4 +60,23 @@ also the option to do packing should be with the quality check  only they do qua
 
 also there is one option of the dispatch , it should be there when the order is places if supplier reuqest for vehical or admin or purchase executive voluntarily can assign vehical to them .
 
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+there is one product MANGO-ALPHON in low stock still ai isnt suggesting it why , is it only seeing categoryies instead of the individual products.
 
+in what to buy add the search bar to search the product , 'also there should some place to add the new product as well into it directly ' 
+
+in the order in one flow that thing of call supplier and confirm is still there , please update it so that it should asks to confirm from the supplier as purchase order page send to supplier . 
+
+also if the admin leave the order on one flow page in middle of flow , it starts from begining so at the bottom there add the list of the orders that were before in flow and then admin can start from where he stopped .
+
+also supplier can add the new product that are availabe to at their shop they will be updated in system properly . 
+
+make the cards on the supplier panel also clickable .
+
+please once make the flow clean on this purchase for both the purchase in one flow and panel wise also , 
+
+on what to buy the the popup aksing reason comes immediately on small change in the quantity because of this user experience is bad and unable to update it properly.
+
+when the supplier asks for the vehical it should be reflected on the everypanel and finance or admin will send them vehical .
+
+remove direct put away of the product , they want that they will inspect and at that time they should be able to take the weigth of each , like in a vehical multiple items will come , so for each item there will be multiple boxes they will weight each box and sysytem will accumate the net wight of each item , thenat same time they will make there boxes and place qr on them and then put those boxes in the warehouse at particular location this should be flow , please remove old flow , it is confusing ,

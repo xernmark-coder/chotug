@@ -942,17 +942,292 @@ type it, shows the arithmetic per person, takes a bonus with a reason, and sends
 one request per person to Finance. A period already sent shows as *sent* and
 cannot be run twice.
 
+## Receiving, end to end — one path, not two
+
+The floor does one continuous job, so the screens follow it:
+
+```
+gate    types the supplier's invoice number      vehicle and driver fill themselves in
+unload  weighs every box, product by product     the system adds up net weight per item
+receipt those weights ARE the received quantity  editable, but nobody retypes them
+bench   makes the boxes that will be sold,       a label per box, scanned onto a shelf
+        grades and prices each one
+```
+
+### The packing phase
+
+What comes off the vehicle is not what gets stored. Two crates holding 50 kg
+each become twenty 5 kg boxes, every one with its own grade, its own price and
+its own QR label — and it is those boxes that go on a shelf.
+
+The bench does it in one action: **how much in each box, how many boxes, what
+grade, what price**, and optionally the shelf, because the trolley is usually
+right there. It shows the arithmetic as you type — *15 × 5 KG = 75 KG · 2 KG
+left loose on the bench* — because "how many fit in what is left" is the
+question being answered, and it offers the answer (*15 fit — use that*) rather
+than making you work it out. Packing more than exists is refused.
+
+Single boxes are still one at a time, for the odd ones at the end of a lot.
+Mixed sizes out of one batch are groups within a single run.
+
+There used to be a second path — a **Bulk** button raising "make me 40 crates of
+5 kg". It is gone, for two reasons: it sat beside *Grade & pack* as a rival way
+to do the same job, so the floor had to choose before knowing which they needed;
+and it stamped **the lot's grade** on every crate — the grade given to the whole
+lorry — which is the one grade a packed box should never carry, since the whole
+point of grading at the bench is that the person holding the box can see what
+the vehicle inspection could not. `POST /pack-runs` was deleted with it.
+
+### When labels outlive their stock
+
+Sending a batch to a shop takes the produce and leaves its boxes' labels
+behind, so *available − packed* can go negative. It was displayed raw, and the
+bench read **"−6.0 KG still loose"** — a quantity that cannot exist, on the one
+screen whose job is deciding how much more can be packed. The bench now reports
+nothing loose and says how far the labels overrun the stock, so the stale ones
+can be voided.
+
+**Put-away has been removed.** There used to be a second path: a task list
+telling somebody to move a whole batch into a bin, raised automatically when a
+receipt was posted. The floor already places the stock box by box at the bench,
+so keeping both meant the same crates were placed twice — once as a batch and
+once as boxes — and the second placement silently disagreed with the first.
+
+Posting a receipt now raises **Grade & pack** for the batch instead, pointing at
+the bench. The bin the old put-away would have suggested is still computed and
+still used, as the bench's default shelf: the arithmetic about where a product
+belongs was useful, it was only the second placement step that was not.
+`/putaway` redirects to the packing screen so old links land somewhere sensible.
+
+## What to buy
+
+Three things were wrong here and one of them made the whole screen look broken.
+
+**The reorder point was ignored.** It was returned to the screen and never
+handed to the planner, so a product sitting below the level its owner set —
+nothing on order, no sales history to forecast from — suggested buying nothing.
+A reorder point is not a forecast, it is an instruction, and it now acts like
+one: *Kokani, 0 on hand, floor 150 → buy 150.*
+
+**A suggestion of zero never said why.** Alphonso shows as *low stock* with 0 on
+the shelf and suggests nothing, which reads as a broken system. It is not: there
+are 2,350 kg on eleven open orders. The row says so now — *"2,350 already on
+order"*, or *"enough on the shelf"*, or *"no demand recorded"*.
+
+**The search box searched nothing.** It matched `productName` and
+`categoryName`; the endpoint returns `name` and returned no category at all. So
+the box was inert and the category dropdown never appeared. Both fixed, and the
+row now carries the product's picture and category like every other list.
+
+The reason dialog also used to open on **every keystroke** — typing 150 over a
+suggested 20 threw it up at "1", then again at "15", and nobody could get a
+number in. It waits for blur or Enter, which is the first moment the number
+means anything.
+
+**+ New product** sits on the bar, because this is the screen where you notice
+one is missing.
+
+## The supplier posts their own rates
+
+Rates used to travel one way: the buyer rang round, wrote down what he was
+told, and typed it into the comparison. That is the buyer's memory of a price,
+collected only when somebody happened to be buying, and a supplier who dropped
+his rate this morning had no way of saying so.
+
+**Supplier portal → My rates.** Every product they are set up to sell, or have
+sold us before. Four fields — rate, how much they have, grade, good-until —
+because a supplier updating a price is standing in a mandi on a phone and every
+extra box is a reason to do it tomorrow. Typing a rate well above the last one
+we paid says so before it is sent, not after.
+
+**Office → Suppliers → What they are asking.** One row per supplier and
+product, cheapest flagged, next to *what we last actually paid them* and the
+movement between the two. `supplier_products.last_rate` was read in three
+places and written in none, so that column would have been permanently blank;
+it is now recorded when a goods receipt is posted, which is the only moment the
+figure is certain.
+
+**While ordering.** Every supplier's price for that product appears as a strip
+above the allocation table. Clicking one takes the supplier *and* the rate.
+
+**"I also sell this."** The list is what the buyer set them up for plus what
+they have actually delivered — neither covers the line they started growing this
+season. They pick from the catalogue rather than typing a name: a supplier
+inventing "Aphonso" would sit beside Alphonso in every report from then on, and
+no report would ever add the two together again. Adding a genuinely new product
+stays the buyer's job.
+
+Their KPI cards are clickable — each one opens the tab that answers it.
+
+Changing a rate supersedes the old row rather than overwriting it — "what were
+they asking last week" is a question a buyer asks constantly, and an `UPDATE`
+would have thrown the answer away.
+
+## Order in one flow
+
+The same wording problem as the order page, and the same fix: the last step was
+called **Confirm with suppliers** and its button read *"Sahyadri has agreed"*,
+which claimed an agreement nobody had obtained. It is now **Send to suppliers**
+and *"Send to Sahyadri"* — the supplier agrees on their own panel.
+
+Leaving the page half way used to lose the work: the flow restarted at step 0
+and the orders sat in APPROVED with nobody looking at them. The first step now
+ends with **Left part-way through** — every order raised on an earlier run and
+never sent, with a way straight to it. You do not start again.
+
+## Who confirms an order
+
+The buyer's button used to say **Confirm with supplier**, which described a
+phone call and quietly claimed the supplier had agreed. They had not. It now
+says **Send to supplier**, and does only that: the order appears on their
+panel, they accept or decline it there, and the answer comes back on its own —
+into the buyer's queue as *"PO/55 accepted by the supplier — arrange
+payment"*. The supplier's phone number is on the order as a link, to ring if
+you want to, not as a step in the flow.
+
+The order page says where it actually stands, because the status chip reads
+CONFIRMED the moment the buyer sends it and that says nothing about whether the
+supplier has agreed.
+
+## The bill against what arrived
+
+There is no **Run 3-way match** button. The comparison runs on its own when an
+invoice is filed — by the office or by the supplier — and the result reads *How
+this bill compares*: either it agrees, or here are the things that do not, with
+what it should have been and what was billed. It is never a gate; Finance
+decides. A bill that ties reaches nobody's queue, because manufacturing a task
+that says "check this, it is fine" is how a queue stops being read.
+
+## Transport
+
+A vehicle can be arranged from the moment an order is **placed**, not only once
+the supplier has answered — waiting for the acceptance loses a day.
+
+Three ways in, for the three people who might notice it is needed:
+
+| Who | Where |
+|---|---|
+| The supplier | *Ask for a vehicle* on their order — a request, not a booking |
+| The buyer | *Arrange a vehicle* on the order |
+| Anyone with the permission | The Dispatch page |
+
+A supplier's request goes to the top of the Dispatch list in red, with what
+they said, and into the queue as *"the supplier wants a vehicle"*. Arranging
+one answers the request and clears both. Until this existed their only recourse
+was the telephone, and whether anything happened depended on who picked up.
+
+## Quality and packing are one job
+
+The pack bench already did both — grade each box as you pack it, then scan a
+shelf — but it could only be reached from a screen gated on `inventory.stock.issue`,
+which the QC role does not hold. They had the permissions to grade and store
+and no way to open the screen. Packing is now reachable by anyone who can
+grade, the page is called **Quality & packing**, and a posted goods receipt
+offers *Grade & pack* on each line, which is where the batch comes from.
+
+## Sending stock to a shop
+
+The warehouse sends; the shop books it in and counts it. Two acts, two people,
+and the gap between them is the point — a load that never turns up must look
+different from one sitting on a shelf.
+
+**Where the button is.** On **Stock & batches**, because that is the page a
+warehouse person is standing on when they decide to send something; and on a
+**centre's own page** as *Send stock here*, pre-filled, because that is the page
+you are on when you notice a shop is empty. Both open the same modal.
+
+Not to be confused with **Ask for stock** on the same centre page: that raises a
+requirement for the purchase manager to *buy* more. Sending moves what is
+already on a shelf. Different act, different person, different screen.
+
+**What the modal insists on**
+
+| | Why |
+|---|---|
+| Cannot send more than is free | The cap is per batch and uses *available*, so reserved stock stays reserved. The limit is shown, not just enforced. |
+| One lorry, one transport cost | The cost belongs to the trip, not the line. It goes to Finance as a `TRANSPORT` request rather than a number nobody pays. |
+| Nothing arrives until the shop says so | Sending sets the load **in transit**. It becomes the shop's stock only when somebody there books it in — and what leaves and what lands are allowed to differ. |
+| A shortfall needs a note | Fewer crates than were sent is a fact about the trip, recorded against it and alerted, not quietly absorbed by the shop. |
+
+**A vehicle request is visible wherever the order is.** It used to live only on
+the Dispatch screen. The order list flags *wants a vehicle*, the order itself
+carries a banner with what the supplier said, and the request raises an alert as
+well as a queue task — because a queue task only reaches whoever holds one
+permission, and alerts are what every panel already reads. Finance can now
+arrange a pickup as well as purchase and the gate: they pay for the transport,
+so they can commit to it.
+
+**Where you land when you sign in.** The app takes your first warehouse as your
+current place, so the profile now orders them: the place you *manage* first,
+then real warehouses, then shops. Before this, plain alphabetical order made a
+shop called `CTR-KOT` the current warehouse of every warehouse executive in the
+company — which is how a screen for sending stock to a shop opened with no shop
+left to send to.
+
+## Add one, wherever you are picking one
+
+The client asked for *"every dropdown should have option to add new things to
+it"*. Every picker that can meet something new now has a **+ New** beside it,
+gated on the permission that owns that master:
+
+| Where | Adds | Then |
+|---|---|---|
+| Order form | supplier, product | the product goes straight onto the order |
+| Order in one flow | supplier | selected on that line |
+| Selling, Customers | customer | selected at the till |
+| Gate entry | vehicle, driver | filled into the entry |
+| Centre asking for stock | product | selected in the request |
+| Ask Finance to pay | kind of expense | selected on the request |
+
+`ProductModal` asks for a category when it is not opened from inside one — a
+modal that demands context the caller does not have is a modal that cannot be
+reused, which is how "everywhere" quietly becomes "on one screen".
+
+## What people did — `/settings`
+
+Every write already landed in `audit_log`, and `GET /masters/audit` already read
+it. There was no screen, so three thousand entries sat unreadable and the answer
+to "who changed that rate" was a database console. It is now a tab on Settings
+for anyone with `admin.audit.view`: who, when, what action, on which record,
+why, and the raw diff. Nothing on any screen can edit or delete it — which is
+the only thing that makes it worth reading.
+
+## Undoing a payment
+
+Paying the wrong person, or paying twice, is the most expensive mistake this
+desk can make. `POST /finance/payments/:id/reverse` had existed all along with
+nothing calling it, so the only remedy was a database console.
+
+The Finance desk now has a **Paid** tab. Opening a request shows the payments
+behind it, and each one can be reversed with a reason. Reversing does not delete
+anything and does not move money: it marks the payment reversed and gives the
+request its balance back, so the amount shows as owed again and nobody pays it a
+second time thinking the first went astray.
+
+Everyone can also change their own password from their profile — it used to be
+set once from an invite link and never again, by anybody.
+
 ## Filters, everywhere, with the numbers under them
 
 One hook and one bar (`useFilters`, `FilterBar`, `FilterTotals` in `ui.tsx`),
 used by every list, so a filter behaves the same on the order list as on the
-requirement list. Six hand-rolled filter bars would be six sets of slightly
-different behaviour and five of them would be subtly wrong.
+requirement list. Seventy hand-rolled filter bars would be seventy sets of
+slightly different behaviour and sixty-nine of them would be subtly wrong.
 
 Every bar has **a time window** (the client's must-have), facet dropdowns built
 from the data itself — a supplier never ordered from does not appear, one added
 this morning does — a search box, and a **Clear N filters** button that only
 shows when something is on.
+
+A bar over an empty list hides itself, the way the totals strip already did: a
+search box and five dropdowns above nothing at all are controls that cannot do
+anything. The exception is a bar with **children** — a date range, a branch
+picker — because those are server-side and the list may be empty *because* of
+them; hiding those would strand somebody with no way to widen the search.
+
+Facets whose values are states rather than things name their own "all" option.
+`Every supplier` reads correctly; `Every priced` and `Every freshness` do not,
+so those say *Priced or not* and *Current and out of date*.
 
 Under every filtered table is the strip that is the point of the exercise:
 
@@ -962,3 +1237,51 @@ Under every filtered table is the strip that is the point of the exercise:
 
 A filtered list without it answers "which ones" but not "how much", and "how
 much" is the question somebody filtered in order to ask.
+
+### Where they are
+
+Every browsable list in the app: the work queue, requirements, the buy list,
+purchase orders, approvals, expected arrivals, the gate pipeline, warehouse
+intake, goods receipts, put-away, stock on hand, what has left the warehouse,
+packing (batches, packs, runs), sell-and-profit (packs, suggestions, sales),
+the Finance desk (all four queues), payment status, credit and debit notes,
+supplier performance, the supplier master, the supplier's own portal (orders,
+deliveries, invoices), alerts, centres, the centre-day screen, customers,
+audits and their counts, people and access, HR (workers, attendance, wages,
+runs), fleet (vehicles, drivers), the catalogue's supplier codes, product and
+category performance, farming (crops, crop jobs, harvests, expenses, dispatch,
+plots, machines, planning, staff), and every report.
+
+Three deliberate exceptions:
+
+- **Unload** and **the pack bench** are one-vehicle, one-batch touch screens
+  with a number pad. Their lists are short and already scoped to the document
+  in front of the person. A filter bar there costs a glove-width of screen and
+  buys nothing.
+- **The warehouse map** is a tree, not a list, so its filter *prunes* instead
+  of narrowing: a floor survives if anything under it matches. It has the same
+  totals strip, counting shelves rather than rows.
+- **Line-item tables inside one document** — the lines of a purchase order, the
+  lines of a goods receipt — are part of that document, not a list to browse.
+
+### Filtering changes what buttons do
+
+Where a bulk action sits above a filtered list, it acts on **what is on the
+screen**, not on everything the server returned:
+
+| Screen | Button | Acts on |
+|---|---|---|
+| Packing | Print all labels | the packs left after filtering |
+| HR attendance | Everyone in | the people left after filtering |
+| HR wages | Send N to Finance | the people left after filtering |
+| Reports | Download CSV | the rows left after filtering |
+
+Narrowing to one shed and then marking the whole company present is the kind of
+mistake nobody notices until payroll does.
+
+### Reports
+
+Report columns depend on which report is picked, so each report declares its own
+date column, facets and totals (`ReportDef` in `Finance.tsx`). A facet only
+appears if that report has the column **and** more than one value is present — a
+supplier dropdown holding one supplier is a control that cannot do anything.

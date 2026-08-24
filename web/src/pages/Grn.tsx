@@ -6,6 +6,7 @@ import {
   FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
+import { SendToCentreModal } from './Centres';
 
 /* ====================================================== GRN LIST ========= */
 export function GrnListPage() {
@@ -20,7 +21,7 @@ export function GrnListPage() {
       { key: 'sup', label: 'supplier', of: (g: any) => g.supplier_name },
       { key: 'st', label: 'status', of: (g: any) => g.status },
       { key: 'veh', label: 'vehicle', of: (g: any) => g.vehicle_reg_captured },
-      { key: 'lc', label: 'costing', of: (g: any) =>
+      { key: 'lc', label: 'costing', all: 'Costed or not', of: (g: any) =>
         (Number(g.has_landing_cost) > 0 ? 'computed' : 'pending') },
     ],
     totals: [
@@ -72,6 +73,7 @@ export function GrnListPage() {
 /* ==================================================== GRN DETAIL ======== */
 export function GrnDetailPage() {
   const { id } = useParams();
+  const nav = useNavigate();
   const toast = useToast();
   const { can } = useAuth();
   const { data, loading, error, reload } = useApi<any>(`/receiving/grns/${id}`, [id]);
@@ -140,6 +142,15 @@ export function GrnDetailPage() {
                   { key: 'q', head: 'QC score', num: true, render: (l: any) =>
                     l.quality_score != null ? num(l.quality_score, 0) : '—' },
                   { key: 'v', head: 'Value', num: true, render: (l: any) => inr(l.line_value) },
+                  /* Straight from the receipt to the bench. Quality and packing
+                     are one job, and the person who does it should not have to
+                     go and find the batch on another screen. */
+                  { key: 'pk', head: '', width: 120, render: (l: any) =>
+                    l.batch_id && can('inventory.pack.grade') && data.status === 'POSTED' ? (
+                      <button className="btn sm" onClick={() => nav(`/pack-bench/${l.batch_id}`)}>
+                        Grade &amp; pack
+                      </button>
+                    ) : null },
                 ]}
               />
             </div>
@@ -348,123 +359,28 @@ function ReverseModal({ grnId, grnNo, onClose, onDone }: {
   );
 }
 
-/* ====================================================== PUT-AWAY ======== */
-export function PutawayPage() {
-  const toast = useToast();
-  const { warehouseId, can } = useAuth();
-  const { data, loading, error, reload } = useApi<any[]>(
-    `/receiving/putaway?warehouseId=${warehouseId ?? ''}`, [warehouseId]);
-  const { data: bins } = useApi<any[]>(`/masters/bins?warehouseId=${warehouseId ?? ''}`, [warehouseId]);
-  const [task, setTask] = useState<any>(null);
-  const [binId, setBinId] = useState('');
-  const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState(false);
+/* ===========================================================================
+ * Put-away used to live here: a task list telling somebody to move a whole
+ * batch into a bin, raised automatically when a receipt was posted.
+ *
+ * It is gone. The client's floor grades each box as they pack it, sticks a
+ * label on it and scans it onto a shelf — that is the packing bench, and it
+ * already placed the stock. Keeping both meant the same crates were placed
+ * twice, once as a batch and once as boxes, and the second placement silently
+ * disagreed with the first.
+ *
+ * Posting a receipt now raises a "grade & pack" job instead, pointing at the
+ * bench for that batch. See receiving.ts, postGrn().
+ * ======================================================================== */
 
-  const f = useFilters<any>(data, {
-    search: (t: any) => [t.product_name, t.sku, t.batch_no, t.suggested_zone_code,
-      t.suggested_rack_code, t.suggested_bin_code].filter(Boolean).join(' '),
-    facets: [
-      { key: 'p', label: 'product', of: (t: any) => t.product_name },
-      { key: 'z', label: 'zone', of: (t: any) => t.suggested_zone_code },
-      { key: 'st', label: 'storage', of: (t: any) => t.storage_type },
-    ],
-    totals: [
-      { label: 'Crates', of: (t: any) => Number(t.qty) || 0 },
-      { label: 'Weight kg', of: (t: any) => Number(t.weight_kg) || 0, decimals: 1 },
-    ],
-  });
-
-  const confirm = async () => {
-    setBusy(true);
-    try {
-      await api.post(`/receiving/putaway/${task.id}/confirm`, {
-        actualBinId: binId, mismatchReason: reason || null,
-      });
-      toast('Put-away confirmed', 'ok');
-      setTask(null); setBinId(''); setReason('');
-      reload();
-    } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(false); }
-  };
-
-  const mismatch = task && task.suggested_bin_id && binId && binId !== task.suggested_bin_id;
-
-  return (
-    <Layout title="Put-away" subtitle="Move received stock to its bin" touch
-      actions={<button className="btn sm" onClick={reload}>Refresh</button>}>
-      <ErrorBanner error={error} />
-      <FilterBar f={f} placeholder="Search product, batch, bin" />
-      <FilterTotals f={f} noun="task" />
-      <div className="card"><div className="card-body tight">
-        <DataTable
-          rows={f.rows} loading={loading}
-          onRowClick={(t: any) => { setTask(t); setBinId(t.suggested_bin_id ?? ''); }}
-          cols={[
-            { key: 'p', head: 'Product', render: (t: any) => (
-              <div><b>{t.product_name}</b><div className="small muted">{t.sku} · {t.storage_type}</div></div>
-            ) },
-            { key: 'b', head: 'Batch', render: (t: any) => (
-              <div className="small"><span className="mono">{t.batch_no}</span>
-                {t.expiry_date ? <div className="muted">expires {date(t.expiry_date)}</div> : null}</div>
-            ) },
-            { key: 'q', head: 'Quantity', num: true, render: (t: any) => (
-              <div>{num(t.qty, 0)}<div className="small muted">{num(t.weight_kg, 1)} kg</div></div>
-            ) },
-            { key: 'r', head: 'Rule', render: (t: any) => <Chip tone="neutral">{t.rotation_rule}</Chip> },
-            { key: 's', head: 'Put it here', render: (t: any) => (
-              <b className="mono">{t.suggested_zone_code}/{t.suggested_rack_code}/{t.suggested_bin_code ?? '—'}</b>
-            ) },
-            { key: 'a', head: '', width: 110, render: () => <span className="btn sm primary">Confirm</span> },
-          ]}
-          empty={<Empty icon="🏷️" title={f.active > 0
-            ? 'Nothing matches those filters' : 'Nothing waiting to be put away'} />}
-        />
-      </div></div>
-
-      {task ? (
-        <Modal title={`Put away ${task.product_name}`} onClose={() => setTask(null)}
-          footer={<>
-            <button className="btn" onClick={() => setTask(null)}>Cancel</button>
-            <button className="btn primary" disabled={busy || !binId || (!!mismatch && reason.length < 3)}
-              onClick={confirm}>Confirm put-away</button>
-          </>}>
-          <dl className="kv mb">
-            <dt>Batch</dt><dd className="mono">{task.batch_no}</dd>
-            <dt>Quantity</dt><dd>{num(task.qty, 0)} ({num(task.weight_kg, 1)} kg)</dd>
-            <dt>Expires</dt><dd>{date(task.expiry_date)}</dd>
-            <dt>Rotation</dt><dd>{task.rotation_rule} — oldest goes out first</dd>
-            <dt>Suggested bin</dt>
-            <dd className="mono">{task.suggested_zone_code}/{task.suggested_rack_code}/{task.suggested_bin_code}</dd>
-          </dl>
-          <Field label="Which bin did you actually use?">
-            <select value={binId} onChange={(e) => setBinId(e.target.value)}>
-              <option value="">Choose a bin…</option>
-              {(bins ?? []).map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.zone_code}/{b.rack_code}/{b.code} — {b.storage_type}
-                  {b.capacity_kg ? ` (${num(b.current_fill_kg, 0)}/${num(b.capacity_kg, 0)} kg)` : ''}
-                </option>
-              ))}
-            </select>
-          </Field>
-          {mismatch ? (
-            <Field label="Why a different bin?" hint="This is recorded and reviewed">
-              <input value={reason} onChange={(e) => setReason(e.target.value)}
-                placeholder="e.g. Suggested bin was full" />
-            </Field>
-          ) : null}
-        </Modal>
-      ) : null}
-    </Layout>
-  );
-}
-
-/* ==================================================== STOCK & TRACE ===== */
 export function StockPage() {
   const { warehouseId, can } = useAuth();
   const [code, setCode] = useState('');
   const [trace, setTrace] = useState<any>(null);
   const [issuing, setIssuing] = useState<any>(null);
   const [tab, setTab] = useState<'stock' | 'out'>('stock');
+  const [sending, setSending] = useState(false);
+  const centres = useApi<any[]>('/centres');
   const toast = useToast();
   const { data, loading, error, reload } = useApi<any[]>(
     `/insights/stock?warehouseId=${warehouseId ?? ''}`, [warehouseId]);
@@ -479,7 +395,7 @@ export function StockPage() {
       { key: 's', label: 'status', of: (x: any) => x.status },
       /* Not a column on the row — a question the warehouse asks daily and
        * could not previously answer without reading every line. */
-      { key: 'exp', label: 'shelf life', of: (x: any) =>
+      { key: 'exp', label: 'shelf life', all: 'Any shelf life', of: (x: any) =>
         x.days_to_expiry == null ? null
           : x.days_to_expiry <= 1 ? 'goes today'
           : x.days_to_expiry <= 3 ? 'this week' : 'plenty of time' },
@@ -500,7 +416,7 @@ export function StockPage() {
       { key: 'why', label: 'reason', of: (r: any) => r.reason },
       { key: 'to', label: 'destination', of: (r: any) => r.party_name },
       { key: 'by', label: 'posted by', of: (r: any) => r.posted_by_name },
-      { key: 'st', label: 'state', of: (r: any) =>
+      { key: 'st', label: 'state', all: 'Any state', of: (r: any) =>
         (r.status === 'CANCELLED' ? 'cancelled' : 'posted') },
     ],
     totals: [
@@ -518,7 +434,15 @@ export function StockPage() {
   };
 
   return (
-    <Layout title="Stock &amp; batches" subtitle="What is in the warehouse, where it came from, and where it went">
+    <Layout title="Stock &amp; batches"
+      subtitle="What is in the warehouse, where it came from, and where it went"
+      /* The warehouse person stands on this page. Sending a load to a shop is
+         something they do from here, not from a screen about shops. */
+      actions={can('inventory.stock.issue') ? (
+        <button className="btn sm primary" onClick={() => setSending(true)}>
+          Send to a centre
+        </button>
+      ) : undefined}>
       <ErrorBanner error={error} />
       <div className="tabs">
         <button className={`tab ${tab === 'stock' ? 'active' : ''}`} onClick={() => setTab('stock')}>
@@ -529,14 +453,18 @@ export function StockPage() {
         </button>
       </div>
       {tab === 'out' ? <IssuedOutTable f={fOut} /> : <>
-      <div className="search-bar">
-        <input placeholder="Scan or type a label code to trace…" value={code}
+      {/* Tracing and filtering are different questions — "show me this exact
+          label" against "show me these batches" — and two identical-looking
+          boxes stacked one above the other made people type into the wrong one.
+          One bar, with the scanner box marked as its own thing. */}
+      <FilterBar f={f} placeholder="Search product, batch, grade">
+        <span className="spacer" />
+        <input className="mono" style={{ maxWidth: 230 }} value={code}
+          placeholder="Scan a label to trace…"
           onChange={(e) => setCode(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && lookup()} />
-        <button className="btn" onClick={lookup}>Trace</button>
-      </div>
-
-      <FilterBar f={f} placeholder="Search product, batch, grade" />
+        <button className="btn" disabled={!code.trim()} onClick={lookup}>Trace</button>
+      </FilterBar>
       <FilterTotals f={f} noun="batch" />
       <div className="card"><div className="card-body tight">
         <DataTable
@@ -574,6 +502,14 @@ export function StockPage() {
         />
       </div></div>
       </>}
+
+      {sending ? (
+        <SendToCentreModal
+          centres={(centres.data ?? []).filter((c: any) => c.is_centre)}
+          fromWarehouseId={warehouseId ?? ''}
+          onClose={() => setSending(false)}
+          onDone={(m) => { setSending(false); reload(); reloadIssues(); toast(m, 'ok'); setTab('out'); }} />
+      ) : null}
 
       {trace ? (
         <Modal title={`Label ${trace.code}`} onClose={() => setTrace(null)}

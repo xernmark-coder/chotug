@@ -5,6 +5,7 @@ import { ApiError, body, h } from '../platform/http.js';
 import { authenticate, requires } from '../platform/auth.js';
 import { emit, pushTask, resolveTask, raiseAlert } from '../platform/services.js';
 import { createRequest } from './finance.js';
+import { checkInvoiceAgainstReceipts } from './costing.js';
 
 /* ===========================================================================
  * SUPPLIER PORTAL
@@ -73,7 +74,13 @@ supplierRouter.get('/orders', requires('supplier.order.view'), h(async (req) => 
             pr.reject_reason AS payment_reject_reason,
             ea.supplier_marked_sent_at,
             ea.vehicle_hint,
-            ea.expected_date AS arrival_date
+            ea.expected_date AS arrival_date,
+            /* Transport: whether they have asked, and whether one is coming.
+             * Both, so the button can say the right thing instead of offering
+             * to ask again for a lorry that is already on its way. */
+            o.transport_by, o.transport_requested_at, o.transport_request_note,
+            pk.pickup_no, pk.status AS pickup_status, pk.pickup_on,
+            pk.driver_name AS pickup_driver, pk.vehicle_reg AS pickup_vehicle
        FROM purchase_orders o
        JOIN branches b ON b.id = o.branch_id
        LEFT JOIN expected_arrivals ea ON ea.po_id = o.id AND ea.status <> 'CANCELLED'
@@ -90,6 +97,14 @@ supplierRouter.get('/orders', requires('supplier.order.view'), h(async (req) => 
                     SELECT id FROM supplier_invoices
                      WHERE po_id = o.id AND status <> 'CANCELLED')))
           ORDER BY x.requested_at LIMIT 1) pr ON true
+       LEFT JOIN LATERAL (
+         SELECT p.pickup_no, p.status, p.pickup_on,
+                d.full_name AS driver_name, v.reg_no AS vehicle_reg
+           FROM pickups p
+           LEFT JOIN drivers d  ON d.id = p.driver_id
+           LEFT JOIN vehicles v ON v.id = p.vehicle_id
+          WHERE p.po_id = o.id AND p.status <> 'CANCELLED'
+          ORDER BY p.created_at DESC LIMIT 1) pk ON true
       WHERE o.company_id = $1 AND o.supplier_id = $2
         /* Approved and onwards only. NOT IN ('DRAFT','CANCELLED') also showed
            SUBMITTED — an order still inside our own approval that we might
@@ -300,6 +315,20 @@ supplierRouter.post('/orders/:id/respond', requires('supplier.order.accept'), h(
       });
     } else {
       await resolveTask(tx, req.actor, 'PO_CONFIRM', 'PO', o.id);
+
+      /* The supplier has said yes. That is the buyer's cue to get the money
+       * moving, and until this existed the only way they learnt of it was by
+       * opening the order and looking. An acceptance that nobody is told about
+       * is a lorry that leaves a day late. */
+      await pushTask(tx, req.actor, {
+        branchId: o.branch_id, warehouseId: o.warehouse_id,
+        queueKey: 'PO_CONFIRM', docType: 'PO', docId: o.id, docNo: o.po_no,
+        title: `${o.po_no} accepted by the supplier`,
+        subtitle: invoiceNo
+          ? `Invoice ${invoiceNo} · ₹${Number(o.grand_total).toFixed(0)} — arrange payment`
+          : `₹${Number(o.grand_total).toFixed(0)} — arrange payment`,
+        requiredPermission: 'purchase.po.create', slaMinutes: 240,
+      });
     }
 
     await emit(tx, req.actor, 'purchase_order', o.id,
@@ -678,10 +707,295 @@ supplierRouter.post('/invoices', requires('supplier.invoice.submit'), h(async (r
     });
 
 
+    /* The message below promised a check. It now happens, here, rather than
+     * waiting for somebody in the office to press a button — and the supplier
+     * sees the result on their own screen, which is the only way a rate
+     * disagreement gets settled before it becomes an argument about money. */
+    let check: any = null;
+    try {
+      check = await checkInvoiceAgainstReceipts(tx, req.actor, inv.id);
+    } catch { /* nothing to compare against yet — Finance can check later */ }
+    const troubles = (check?.findings ?? []).length;
+
+    if (troubles) {
+      await pushTask(tx, req.actor, {
+        branchId: inv.branch_id, queueKey: 'INVOICE_MATCH',
+        docType: 'INVOICE', docId: inv.id, docNo: inv.invoice_no,
+        title: `${inv.invoice_no} does not agree with what we received`,
+        subtitle: `₹${Number(total).toLocaleString('en-IN')} · ${troubles} thing(s) to look at`,
+        requiredPermission: 'finance.invoice.match', slaMinutes: 480,
+      });
+    }
+
     return {
       id: inv.id, invoiceNo: inv.invoice_no, total, subtotal,
-      status: inv.status,
-      message: 'Filed. It will be checked against the order and the receipt, and you will see the result here.',
+      status: inv.status, findings: check?.findings ?? [],
+      message: troubles
+        ? `Filed. ${troubles} thing(s) do not agree with what we received — the office will be in touch.`
+        : 'Filed. It agrees with what we received, and is with the office for payment.',
     };
   });
 }));
+
+/* ===========================================================================
+ * THE SUPPLIER'S OWN PRICE LIST
+ *
+ * Rates used to travel one way: the buyer rang round, wrote down what he was
+ * told, and typed it into the comparison. That is the buyer's memory of a
+ * price, collected only when somebody happened to be buying. Here the supplier
+ * posts his own number and keeps it current, and the office compares.
+ *
+ * Changing a rate supersedes the old row rather than overwriting it — "what
+ * were they asking last week" is a question a buyer asks constantly, and an
+ * UPDATE would have thrown the answer away.
+ * ======================================================================== */
+
+/** The products this supplier is set up to sell us, with whatever they last asked. */
+supplierRouter.get('/rates', requires('supplier.rate.update'), h(async (req) => {
+  const supplierId = await mySupplier(req.actor);
+  /* Two ways a product belongs on this list: the buyer set the supplier up to
+   * sell it, or they have actually sold it to us before. Only the first was
+   * considered at first, and a supplier who had delivered mangoes for a year
+   * opened this screen to nothing at all, with no way to fix it themselves. */
+  return query(req.actor,
+    `WITH mine AS (
+        SELECT sp.product_id
+          FROM supplier_products sp
+         WHERE sp.company_id = $1 AND sp.supplier_id = $2 AND sp.is_active
+        UNION
+        SELECT pl.product_id
+          FROM po_lines pl
+          JOIN purchase_orders o ON o.id = pl.po_id
+         WHERE o.company_id = $1 AND o.supplier_id = $2
+           AND o.status NOT IN ('DRAFT','CANCELLED')
+     )
+     SELECT p.id AS product_id, p.name AS product_name, p.sku, p.base_uom, p.icon,
+            c.name AS category_name,
+            sp.tracking_code, sp.supplier_code, sp.typical_grade,
+            sp.last_rate AS last_paid_rate, sp.last_purchase_at,
+            (sp.id IS NOT NULL) AS on_my_list,
+            r.quote_id, r.quoted_rate, r.uom, r.available_qty, r.offered_grade,
+            r.valid_till, r.note, r.quoted_at, r.is_stale, r.change_pct
+       FROM mine m
+       JOIN products p ON p.id = m.product_id
+       LEFT JOIN product_categories c ON c.id = p.category_id
+       LEFT JOIN supplier_products sp
+              ON sp.supplier_id = $2 AND sp.product_id = m.product_id AND sp.is_active
+       LEFT JOIN v_supplier_rates r
+              ON r.supplier_id = $2 AND r.product_id = m.product_id
+      WHERE p.is_active
+      ORDER BY p.name`,
+    [req.actor.companyId, supplierId]);
+}));
+
+/**
+ * "I also sell this."
+ *
+ * The list above is what the buyer set them up for, plus what they have
+ * actually delivered. Neither covers the thing they have started growing this
+ * season, and a supplier who cannot say so has to telephone somebody to be
+ * allowed to quote — which is the phone call this whole panel exists to
+ * remove.
+ *
+ * They pick from the catalogue rather than typing a name: a supplier inventing
+ * "Aphonso" would sit next to Alphonso in every report forever. Adding a
+ * genuinely new product stays the buyer's job.
+ */
+supplierRouter.get('/catalogue', requires('supplier.rate.update'), h(async (req) => {
+  const supplierId = await mySupplier(req.actor);
+  return query(req.actor,
+    `SELECT p.id, p.name, p.sku, p.base_uom, p.icon, c.name AS category_name,
+            EXISTS (SELECT 1 FROM supplier_products sp
+                     WHERE sp.supplier_id = $2 AND sp.product_id = p.id AND sp.is_active)
+              AS already_mine
+       FROM products p
+       LEFT JOIN product_categories c ON c.id = p.category_id
+      WHERE p.company_id = $1 AND p.is_active
+      ORDER BY c.name NULLS LAST, p.name`,
+    [req.actor.companyId, supplierId]);
+}));
+
+supplierRouter.post('/catalogue', requires('supplier.rate.update'), h(async (req) => {
+  const i = body(z.object({
+    productId: z.string().uuid(),
+    supplierCode: z.string().trim().max(40).optional(),
+    typicalGrade: z.string().trim().max(12).optional(),
+  }), req.body);
+
+  const supplierId = await mySupplier(req.actor);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows: p } = await tx.query(
+      `SELECT id, name FROM products WHERE id=$1 AND company_id=$2 AND is_active`,
+      [i.productId, req.actor.companyId]);
+    if (!p[0]) throw ApiError.notFound('No such product.');
+
+    /* is_active = true on conflict: a product the buyer once took off this
+     * supplier's list and the supplier now says they stock again should come
+     * back rather than silently do nothing. The tracking code is generated by
+     * a trigger, so the pair keeps the one it already had. */
+    await tx.query(
+      `INSERT INTO supplier_products
+         (company_id, supplier_id, product_id, supplier_code, typical_grade,
+          created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$6)
+       ON CONFLICT (supplier_id, product_id) DO UPDATE
+          SET is_active = true,
+              supplier_code = COALESCE(EXCLUDED.supplier_code, supplier_products.supplier_code),
+              typical_grade = COALESCE(EXCLUDED.typical_grade, supplier_products.typical_grade),
+              updated_by = EXCLUDED.updated_by, updated_at = now()`,
+      [req.actor.companyId, supplierId, i.productId,
+       i.supplierCode ?? null, i.typicalGrade ?? null, req.actor.userId]);
+
+    await emit(tx, req.actor, 'supplier_product', i.productId, 'supplier.product.added',
+      { productId: i.productId });
+
+    return { ok: true, message: `${p[0].name} added to your list. Put a rate against it.` };
+  });
+}));
+
+/** Today's price for one product. */
+supplierRouter.post('/rates', requires('supplier.rate.update'), h(async (req) => {
+  const i = body(z.object({
+    productId: z.string().uuid(),
+    /* Zero is not a price, it is a mistake somebody will pay against. */
+    rate: z.coerce.number().positive('What are you asking for it?'),
+    uom: z.string().trim().max(12).optional(),
+    availableQty: z.coerce.number().nonnegative().optional(),
+    grade: z.string().trim().max(12).optional(),
+    validTill: z.string().optional(),
+    note: z.string().trim().max(200).optional(),
+  }), req.body);
+
+  const supplierId = await mySupplier(req.actor);
+
+  return withTx(req.actor, async (tx) => {
+    /* The same two ways in as the list above. A screen that offers a product
+     * and then refuses to take its price is worse than not offering it. */
+    const { rows: link } = await tx.query(
+      `SELECT p.id, p.name, p.base_uom
+         FROM products p
+        WHERE p.id = $3 AND p.company_id = $1 AND p.is_active
+          AND (EXISTS (SELECT 1 FROM supplier_products sp
+                        WHERE sp.supplier_id=$2 AND sp.product_id=p.id AND sp.is_active)
+            OR EXISTS (SELECT 1 FROM po_lines pl JOIN purchase_orders o ON o.id=pl.po_id
+                        WHERE o.supplier_id=$2 AND pl.product_id=p.id
+                          AND o.status NOT IN ('DRAFT','CANCELLED')))`,
+      [req.actor.companyId, supplierId, i.productId]);
+    if (!link[0]) {
+      throw ApiError.rule(
+        'You are not set up to supply that product. Ask the buyer to add it to your list.');
+    }
+
+    /* Retire the standing price before writing the new one, inside the same
+     * transaction, so the unique index can never see two live rows. */
+    await tx.query(
+      `UPDATE supplier_quotes SET superseded_at = now(), updated_by = $4
+        WHERE company_id=$1 AND supplier_id=$2 AND product_id=$3
+          AND is_standing AND superseded_at IS NULL`,
+      [req.actor.companyId, supplierId, i.productId, req.actor.userId]);
+
+    const { rows: ins } = await tx.query(
+      `INSERT INTO supplier_quotes
+         (company_id, supplier_id, source_type, product_id, quoted_rate, uom,
+          available_qty, offered_grade, valid_till, note, payment_terms_days,
+          is_standing, quoted_by_supplier, created_by, updated_by)
+       SELECT $1, $2, s.source_type, $3, $4, $5, $6, $7, $8, $9,
+              COALESCE(s.payment_terms_days, 0), true, true, $10, $10
+         FROM suppliers s WHERE s.id = $2
+       RETURNING id`,
+      [req.actor.companyId, supplierId, i.productId, i.rate,
+       i.uom ?? link[0].base_uom, i.availableQty ?? null, i.grade ?? null,
+       i.validTill ?? null, i.note ?? null, req.actor.userId]);
+
+    await emit(tx, req.actor, 'supplier_quote', ins[0].id, 'supplier.rate.posted', {
+      productId: i.productId, rate: i.rate,
+    });
+
+    return {
+      quoteId: ins[0].id,
+      message: `${link[0].name} — ₹${i.rate} recorded. The buyer sees it straight away.`,
+    };
+  });
+}));
+
+/* ---------------------------------------------------------------------------
+ * "SEND ME A LORRY"
+ *
+ * The person who knows whether transport is needed is usually the one standing
+ * next to the crates. Until now his only option was the telephone, and whether
+ * anything happened depended on who picked up.
+ *
+ * This is a request, not a booking: the office still arranges the vehicle and
+ * may say no. What it guarantees is that the asking is on record and in
+ * somebody's queue.
+ * ------------------------------------------------------------------------ */
+supplierRouter.post('/orders/:id/request-vehicle',
+  requires('supplier.transport.request'), h(async (req) => {
+    const i = body(z.object({
+      note: z.string().trim().max(300).optional(),
+      readyOn: z.string().optional(),
+    }), req.body ?? {});
+
+    const supplierId = await mySupplier(req.actor);
+
+    return withTx(req.actor, async (tx) => {
+      const { rows } = await tx.query(
+        `SELECT o.id, o.po_no, o.status, o.branch_id, o.warehouse_id, o.transport_by,
+                o.transport_requested_at,
+                (SELECT p.pickup_no FROM pickups p
+                  WHERE p.po_id = o.id AND p.status <> 'CANCELLED' LIMIT 1) AS pickup_no
+           FROM purchase_orders o
+          WHERE o.id = $1 AND o.company_id = $2 AND o.supplier_id = $3
+          FOR UPDATE`,
+        [req.params.id, req.actor.companyId, supplierId]);
+      const o = rows[0];
+      if (!o) throw ApiError.notFound('Order not found');
+      if (!['APPROVED', 'CONFIRMED'].includes(o.status)) {
+        throw ApiError.rule(
+          `This order is ${o.status.replace(/_/g, ' ').toLowerCase()} — there is nothing to collect.`);
+      }
+      if (o.pickup_no) {
+        throw ApiError.rule(`A vehicle is already arranged — ${o.pickup_no}.`);
+      }
+      if (o.transport_requested_at) {
+        throw ApiError.rule('You have already asked. The buyer has it on their list.');
+      }
+
+      await tx.query(
+        `UPDATE purchase_orders
+            SET transport_requested_at = now(), transport_requested_by = $2,
+                transport_request_note = $3, updated_by = $2
+          WHERE id = $1`,
+        [o.id, req.actor.userId, i.note ?? null]);
+
+      await pushTask(tx, req.actor, {
+        branchId: o.branch_id, warehouseId: o.warehouse_id,
+        queueKey: 'TRANSPORT_REQUEST', docType: 'PO', docId: o.id, docNo: o.po_no,
+        title: `${o.po_no} — the supplier wants a vehicle`,
+        subtitle: [i.readyOn ? `ready ${i.readyOn}` : null, i.note].filter(Boolean).join(' · ')
+          || 'No details given',
+        requiredPermission: 'logistics.pickup.manage',
+        severity: 'normal', slaMinutes: 240,
+      });
+
+      /* And an alert, because a queue task only reaches whoever holds one
+       * permission. The client wants this in front of Finance and the admin
+       * as well as the buyer, and alerts are what every panel already reads. */
+      await raiseAlert(tx, req.actor, {
+        alertType: 'TRANSPORT_REQUESTED', severity: 'MEDIUM', branchId: o.branch_id,
+        title: `${o.po_no} — the supplier wants a vehicle`,
+        message: [i.readyOn ? `Ready ${i.readyOn}.` : null, i.note].filter(Boolean).join(' ')
+          || 'No details given.',
+        entityType: 'purchase_order', entityId: o.id,
+      });
+
+      await emit(tx, req.actor, 'purchase_order', o.id, 'supplier.transport.requested',
+        { poNo: o.po_no, note: i.note ?? null });
+
+      return {
+        ok: true,
+        message: 'Asked. The buyer will arrange a vehicle and you will see it here.',
+      };
+    });
+  }));

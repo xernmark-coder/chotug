@@ -55,6 +55,7 @@ passes any gate.
 | POST | `/planning/purchase-orders/:id/confirm` | purchase.po.submit |
 | POST | `/planning/purchase-orders/:id/revise` | purchase.po.revise |
 | GET | `/planning/expected-arrivals` | — |
+| GET | `/planning/supplier-rates` | purchase.rate.compare |
 
 
 ## receiving
@@ -446,6 +447,36 @@ never disagree about which step the order is at.
 The buyer's `GET /planning/purchase-orders` carries the same fields: our status
 says where the paperwork is, theirs says whether anybody is going to load a
 lorry.
+
+Accepting also pushes a task to the **buyer** — *"PO/55 accepted by the
+supplier — arrange payment"*. Note that `pushTask` upserts on
+`(queue_key, doc_type, doc_id)` and now updates `required_permission` and
+`sla_due_at` along with the words. It did not, so this task inherited
+`purchase.po.approve` from the earlier "needs confirming" row and went to
+approvers instead of the buyer it was written for: present in the table,
+correct on inspection, invisible to the one person who had to act.
+
+### The supplier's own price list
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/supplier/rates` | `supplier.rate.update` | Products they are set up to sell **or have sold us before**. The second half matters: a supplier who had delivered for a year opened this to nothing at all, with no way to fix it themselves |
+| POST | `/supplier/rates` | `supplier.rate.update` | One live standing price per supplier and product (`uq_standing_quote`). A change supersedes rather than overwrites, so last week's asking price is still answerable |
+| GET | `/planning/supplier-rates` | `purchase.rate.compare` | The office side, from `v_supplier_rates`: asking price, what we last paid, and the movement between them |
+
+`supplier_products.last_rate` is written when a goods receipt is posted — the
+only moment the figure is certain. It was read in three places and written in
+none, so "what we last paid them" was permanently blank.
+
+### Transport
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| POST | `/supplier/orders/:id/request-vehicle` | `supplier.transport.request` | A request, not a booking. Refused if a pickup already exists or they have already asked. Lands in the `TRANSPORT_REQUEST` queue and puts the order at the top of Dispatch |
+
+`GET /receiving/pickups/candidates` covers `APPROVED` and `CONFIRMED` orders —
+a lorry takes arranging, and waiting for the supplier's answer loses a day.
+Arranging a pickup clears the request and resolves the task.
 
 ## receiving — invoice-first entry and per-box weighing
 

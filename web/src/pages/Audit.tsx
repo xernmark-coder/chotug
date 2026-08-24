@@ -60,12 +60,11 @@ export function AuditPage() {
       { key: 'pr', label: 'product', of: (t: any) => t.product_name },
       { key: 'pi', label: 'priority', of: (t: any) => t.priority },
       { key: 'by', label: 'asked by', of: (t: any) => t.raised_by_name },
-      { key: 'st', label: 'state', of: (t: any) => t.status },
-      { key: 'ls', label: 'outcome', of: (t: any) =>
+      { key: 'st', label: 'state', all: 'Any state', of: (t: any) => t.status },
+      { key: 'ls', label: 'outcome', all: 'Any outcome', of: (t: any) =>
         (Number(t.loss_qty) > 0 ? 'loss found' : Number(t.counts) > 0 ? 'matched' : null) },
     ],
     totals: [
-      { label: 'Audits', of: () => 1 },
       { label: 'Shelves counted', of: (t: any) => Number(t.counts) || 0 },
       { label: 'Loss', of: (t: any) => Number(t.loss_value) || 0, money: true },
     ],
@@ -213,6 +212,24 @@ export function AuditDetailPage() {
   const [scanning, setScanning] = useState(false);
   const [closing, setClosing] = useState(false);
 
+  /* Above the loading guard — a hook cannot sit behind an early return. */
+  const fCounts = useFilters<any>(data?.counts, {
+    search: (c: any) => [c.bin_code, c.rack_code, c.product_name, c.batch_no, c.note]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'p', label: 'product', of: (c: any) => c.product_name },
+      { key: 'r', label: 'rack', of: (c: any) => c.rack_code },
+      { key: 'cd', label: 'condition', of: (c: any) => c.condition },
+      { key: 'm', label: 'match', of: (c: any) =>
+        (Math.abs(Number(c.variance_qty)) < 0.001 ? 'matches the books' : 'does not match') },
+    ],
+    totals: [
+      { label: 'Books said', of: (c: any) => Number(c.expected_qty) || 0, decimals: 1 },
+      { label: 'Counted', of: (c: any) => Number(c.counted_qty) || 0, decimals: 1 },
+      { label: 'Difference', of: (c: any) => Number(c.variance_qty) || 0, decimals: 1 },
+    ],
+  });
+
   if (loading) return <Layout title="Audit"><Loading /></Layout>;
   if (error) return <Layout title="Audit"><ErrorBanner error={error} /></Layout>;
 
@@ -261,8 +278,10 @@ export function AuditDetailPage() {
       <div className="card">
         <div className="card-head"><h2>Every shelf counted</h2></div>
         <div className="card-body tight">
+          <FilterBar f={fCounts} placeholder="Search shelf, product, batch" />
+          <FilterTotals f={fCounts} noun="count" />
           <DataTable
-            rows={data.counts ?? []}
+            rows={fCounts.rows}
             rowTone={(c: any) => (Number(c.loss_qty) > 0 ? 'crit'
               : Math.abs(Number(c.variance_qty)) > 0.001 ? 'warn' : undefined)}
             cols={[

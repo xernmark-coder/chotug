@@ -4,7 +4,10 @@ import {
   Tooltip, XAxis, YAxis,
 } from 'recharts';
 import { inr, num, date } from '../lib/api';
-import { Chip, Empty, ErrorBanner, Kpi, Layout, Loading, useApi } from '../components/ui';
+import {
+  Chip, Empty, ErrorBanner, Kpi, Layout, Loading, useApi,
+  FilterBar, FilterTotals, useFilters,
+} from '../components/ui';
 import { Icon } from '../components/icons';
 
 /* ===========================================================================
@@ -39,6 +42,44 @@ export function PerformancePage() {
     waste: a.waste + Number(p.wasteValue),
     bought: a.bought + Number(p.boughtValue),
   }), { revenue: 0, margin: 0, waste: 0, bought: 0 }), [products]);
+
+  /* The supplier facet reads a list, not a column: a product bought from three
+   * people should appear when any one of them is picked. */
+  const fProducts = useFilters<any>(products, {
+    search: (p2: any) => [p2.name, p2.sku, p2.categoryName,
+      ...(p2.suppliers ?? []).map((x: any) => x.name),
+      ...(p2.places ?? []).map((x: any) => x.name)].filter(Boolean).join(' '),
+    facets: [
+      { key: 'cat', label: 'category', of: (p2: any) => p2.categoryName ?? 'uncategorised' },
+      { key: 'res', label: 'result', all: 'Any result', of: (p2: any) =>
+        (Number(p2.netMargin) < 0 ? 'losing money' : 'making money') },
+      { key: 'st', label: 'sell-through', all: 'Any sell-through', of: (p2: any) =>
+        p2.sellThrough == null ? null : p2.sellThrough < 60 ? 'under 60%' : 'over 60%' },
+      { key: 'ws', label: 'wastage', all: 'Any wastage', of: (p2: any) =>
+        (Number(p2.wasteValue) > 0 ? 'some lost' : 'nothing lost') },
+    ],
+    totals: [
+      { label: 'Products', of: () => 1 },
+      { label: 'Bought', of: (p2: any) => Number(p2.boughtValue) || 0, money: true },
+      { label: 'Revenue', of: (p2: any) => Number(p2.revenue) || 0, money: true },
+      { label: 'Net margin', of: (p2: any) => Number(p2.netMargin) || 0, money: true },
+      { label: 'Lost', of: (p2: any) => Number(p2.wasteValue) || 0, money: true },
+    ],
+  });
+  const fCats = useFilters<any>(categories, {
+    search: (c: any) => String(c.name ?? ''),
+    facets: [
+      { key: 'res', label: 'result', all: 'Any result', of: (c: any) =>
+        (Number(c.margin) < 0 ? 'losing money' : 'making money') },
+      { key: 'st', label: 'sell-through', all: 'Any sell-through', of: (c: any) =>
+        c.sellThrough == null ? null : c.sellThrough < 60 ? 'under 60%' : 'over 60%' },
+    ],
+    totals: [
+      { label: 'Revenue', of: (c: any) => Number(c.revenue) || 0, money: true },
+      { label: 'Margin', of: (c: any) => Number(c.margin) || 0, money: true },
+      { label: 'Lost', of: (c: any) => Number(c.wasteValue) || 0, money: true },
+    ],
+  });
 
   if (loading) return <Layout title="Performance"><Loading /></Layout>;
 
@@ -122,8 +163,10 @@ export function PerformancePage() {
             </div>
           </div>
 
+          <FilterBar f={fCats} placeholder="Search category" />
+          <FilterTotals f={fCats} noun="category" />
           <div className="grid c3">
-            {categories.map((c: any) => (
+            {fCats.rows.map((c: any) => (
               <div className="card" key={c.categoryId ?? 'none'}>
                 <div className="card-head"><h2>{c.name}</h2>
                   <span className="small muted">{c.products} products</span></div>
@@ -151,11 +194,16 @@ export function PerformancePage() {
         </>
       ) : (
         <div className="stack">
-          {!products.length ? (
-            <Empty icon="📊" title="Nothing moved in this period"
-              hint="Buy or sell something and it appears here." />
+          <FilterBar f={fProducts} placeholder="Search product, category, supplier, shop" />
+          <FilterTotals f={fProducts} noun="product" />
+          {!fProducts.rows.length ? (
+            <Empty icon="📊"
+              title={fProducts.active > 0 ? 'No product matches those filters'
+                : 'Nothing moved in this period'}
+              hint={fProducts.active > 0 ? 'Clear a filter to widen the search.'
+                : 'Buy or sell something and it appears here.'} />
           ) : null}
-          {products.map((p: any) => {
+          {fProducts.rows.map((p: any) => {
             const open = openCard === p.productId;
             const bad = p.netMargin < 0;
             return (

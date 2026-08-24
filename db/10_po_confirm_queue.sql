@@ -15,14 +15,28 @@
 
 BEGIN;
 
-ALTER TABLE work_queue DROP CONSTRAINT IF EXISTS work_queue_queue_key_check;
-ALTER TABLE work_queue ADD  CONSTRAINT work_queue_queue_key_check
-      CHECK (queue_key IN ('REQUIREMENT_REVIEW','AI_SUGGESTION','APPROVAL',
-                           'EXPECTED_ARRIVAL','WEIGH_PENDING','QC_PENDING',
-                           'GRN_PENDING','PUTAWAY_PENDING','INVOICE_MATCH',
-                           'FINANCE_EXCEPTION','ALERT',
-                           'FARM_TASK','FARM_HARVEST','FARM_RECEIVE',
-                           'PO_CONFIRM'));
+-- Only widen it if this file is the newest word on the subject. These
+-- migrations re-run from the top every time, so a later file that adds a queue
+-- key would be undone here — and then the ADD fails, because rows using the
+-- new key already exist. Re-running the migrations stopped working entirely
+-- the day TRANSPORT_REQUEST was added in db/36. Skip if the constraint already
+-- covers more than this file knows about.
+DO $$
+DECLARE def text;
+BEGIN
+    SELECT pg_get_constraintdef(oid) INTO def
+      FROM pg_constraint WHERE conname = 'work_queue_queue_key_check';
+    IF def IS NULL OR def NOT LIKE '%PO_CONFIRM%' THEN
+        ALTER TABLE work_queue DROP CONSTRAINT IF EXISTS work_queue_queue_key_check;
+        ALTER TABLE work_queue ADD  CONSTRAINT work_queue_queue_key_check
+              CHECK (queue_key IN ('REQUIREMENT_REVIEW','AI_SUGGESTION','APPROVAL',
+                                   'EXPECTED_ARRIVAL','WEIGH_PENDING','QC_PENDING',
+                                   'GRN_PENDING','PUTAWAY_PENDING','INVOICE_MATCH',
+                                   'FINANCE_EXCEPTION','ALERT',
+                                   'FARM_TASK','FARM_HARVEST','FARM_RECEIVE',
+                                   'PO_CONFIRM'));
+    END IF;
+END $$;
 
 -- Back-fill: orders already sitting in APPROVED were raised before this queue
 -- existed and are exactly the ones nobody is looking at.

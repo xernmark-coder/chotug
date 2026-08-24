@@ -40,6 +40,7 @@ const inrText = (n: number) =>
 export async function buyList(actor: Actor, branchId: string) {
   const rows = await query(actor,
     `SELECT p.id AS product_id, p.sku, p.name, p.name_hi, p.base_uom, p.purchase_uom,
+            p.icon, c.name AS category_name,
             p.min_stock, p.max_stock, p.reorder_point, p.safety_stock_days,
             p.lead_time_days, p.moq, p.order_multiple, p.default_wastage_pct,
             p.is_perishable, p.shelf_life_days,
@@ -51,6 +52,7 @@ export async function buyList(actor: Actor, branchId: string) {
             COALESCE(adv.qty, 0)         AS advance_order_qty,
             lp.last_rate
        FROM products p
+       LEFT JOIN product_categories c ON c.id = p.category_id
        LEFT JOIN (
             SELECT sb.product_id, SUM(sb.qty) qty, SUM(sb.reserved_qty) reserved
               FROM stock_balances sb
@@ -100,6 +102,11 @@ export async function buyList(actor: Actor, branchId: string) {
       safetyStockDays: Number(r.safety_stock_days ?? 1),
       serviceLevelZ,
       minStock: r.min_stock, maxStock: r.max_stock,
+      /* The buyer's own floor. It was returned to the screen but never handed
+       * to the planner, so a product sitting below the level its owner set —
+       * with nothing on order and no sales history to forecast from —
+       * suggested buying nothing at all. */
+      reorderPoint: r.reorder_point,
       moq: r.moq, orderMultiple: r.order_multiple,
       wastagePct: Number(r.default_wastage_pct ?? 0),
       advanceOrderQty: Number(r.advance_order_qty),
@@ -119,6 +126,7 @@ export async function buyList(actor: Actor, branchId: string) {
 
     return {
       productId: r.product_id, sku: r.sku, name: r.name, nameHi: r.name_hi,
+      icon: r.icon, categoryName: r.category_name,
       uom: r.purchase_uom, baseUom: r.base_uom,
       currentStock: Number(r.current_stock), availableStock: plan.availableStock,
       reservedQty: Number(r.reserved_qty), openPoQty: Number(r.open_po_qty),
@@ -653,6 +661,13 @@ planningRouter.get('/purchase-orders', h(async (req) =>
              * order the supplier has declined looks identical to one they are
              * loading right now unless the buyer can see the answer. */
             o.supplier_response, o.supplier_responded_at, o.supplier_response_note,
+            o.transport_by, o.transport_requested_at, o.transport_request_note,
+            (SELECT pk.pickup_no FROM pickups pk
+              WHERE pk.po_id = o.id AND pk.status <> 'CANCELLED'
+              ORDER BY pk.created_at DESC LIMIT 1) AS pickup_no,
+            (SELECT pk.status FROM pickups pk
+              WHERE pk.po_id = o.id AND pk.status <> 'CANCELLED'
+              ORDER BY pk.created_at DESC LIMIT 1) AS pickup_status,
             pay.request_no AS payment_request_no, pay.status AS payment_status,
             pay.amount AS payment_amount, pay.paid_amount AS payment_paid,
             pr.received_qty, pr.ordered_qty, pr.fill_pct,
@@ -688,6 +703,12 @@ planningRouter.get('/purchase-orders/:id', h(async (req) => {
             pay.amount AS payment_amount, pay.paid_amount AS payment_paid,
             s.trade_name AS supplier_name, s.legal_name AS supplier_legal_name,
             s.source_type AS supplier_source_type, s.phone AS supplier_phone,
+            (SELECT pk.pickup_no FROM pickups pk
+              WHERE pk.po_id = o.id AND pk.status <> 'CANCELLED'
+              ORDER BY pk.created_at DESC LIMIT 1) AS pickup_no,
+            (SELECT pk.status FROM pickups pk
+              WHERE pk.po_id = o.id AND pk.status <> 'CANCELLED'
+              ORDER BY pk.created_at DESC LIMIT 1) AS pickup_status,
             s.trust_score, s.performance_score, b.name AS branch_name,
             u.full_name AS created_by_name, ua.full_name AS approved_by_name
        FROM purchase_orders o
@@ -1091,3 +1112,22 @@ planningRouter.get('/expected-arrivals', h(async (req) =>
       WHERE e.company_id = $1 AND e.status IN ('EXPECTED','ARRIVED')
       ORDER BY e.expected_date, e.window_start NULLS LAST`,
     [req.actor.companyId])));
+
+/* ---------------------------------------------------------------------------
+ * WHAT EACH SUPPLIER IS ASKING
+ *
+ * The other half of the supplier's price list. The buyer no longer types what
+ * he was told on the phone — he reads what the supplier posted, next to what
+ * we last actually paid them for it.
+ * ------------------------------------------------------------------------ */
+planningRouter.get('/supplier-rates', requires('purchase.rate.compare'), h(async (req) =>
+  query(req.actor,
+    `SELECT r.*, p.icon
+       FROM v_supplier_rates r
+       JOIN products p ON p.id = r.product_id
+      WHERE r.company_id = $1
+        AND ($2::uuid IS NULL OR r.product_id = $2)
+        AND ($3::uuid IS NULL OR r.supplier_id = $3)
+        AND r.supplier_status <> 'BLOCKED'
+      ORDER BY p.name, r.quoted_rate`,
+    [req.actor.companyId, req.query.productId ?? null, req.query.supplierId ?? null])));

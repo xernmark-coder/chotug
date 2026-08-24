@@ -51,7 +51,9 @@ export type QueueKey =
   | 'INVOICE_MATCH' | 'FINANCE_EXCEPTION' | 'ALERT'
   | 'FARM_TASK' | 'FARM_HARVEST' | 'FARM_RECEIVE'
   // Approved, but the supplier has not been told yet. See db/10.
-  | 'PO_CONFIRM';
+  | 'PO_CONFIRM'
+  // The supplier is standing next to the crates asking for a lorry. See db/36.
+  | 'TRANSPORT_REQUEST';
 
 export async function pushTask(
   tx: Tx,
@@ -77,9 +79,19 @@ export async function pushTask(
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
              CASE WHEN $12::int IS NULL THEN NULL ELSE now() + ($12::int || ' minutes')::interval END,
              $13)
+     /* The audience and the clock move with the task, not just its words.
+      * Without this a row re-pushed for a different job kept whoever the FIRST
+      * push was addressed to: "PO/55 accepted by the supplier — arrange
+      * payment" inherited purchase.po.approve from the earlier "needs
+      * confirming" task, so it went to approvers and the buyer it was written
+      * for never saw it. The task existed, looked right in the table, and was
+      * invisible to the one person who had to act. */
      ON CONFLICT (queue_key, doc_type, doc_id) DO UPDATE
         SET title = EXCLUDED.title, subtitle = EXCLUDED.subtitle,
-            severity = EXCLUDED.severity, payload = EXCLUDED.payload, resolved_at = NULL`,
+            severity = EXCLUDED.severity, payload = EXCLUDED.payload,
+            required_permission = EXCLUDED.required_permission,
+            sla_due_at = EXCLUDED.sla_due_at,
+            resolved_at = NULL`,
     [
       actor.companyId, t.branchId, t.warehouseId ?? null, t.queueKey, t.docType, t.docId,
       t.docNo ?? null, t.title, t.subtitle ?? null, t.severity ?? 'normal',

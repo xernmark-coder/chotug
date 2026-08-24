@@ -65,7 +65,6 @@ export function SalesPage() {
       { key: 'batch', label: 'batch', of: (p: any) => p.batch_no },
     ],
     totals: [
-      { label: 'Packs', of: () => 1 },
       { label: 'Worth', of: (p: any) => Number(p.price) || 0, money: true },
     ],
   });
@@ -79,6 +78,14 @@ export function SalesPage() {
     totals: [
       { label: 'On hand', of: (x: any) => Number(x.available_qty) || 0 },
       { label: 'Money on it', of: (x: any) => Number(x.valueAtRisk) || 0, money: true },
+    ],
+  });
+  const fByProduct = useFilters<any>(summary.data?.byProduct, {
+    search: (p2: any) => [p2.name, p2.sku].filter(Boolean).join(' '),
+    facets: [],
+    totals: [
+      { label: 'Products', of: () => 1 },
+      { label: 'Sold', of: (p2: any) => Number(p2.sold_qty ?? p2.sold) || 0 },
     ],
   });
   const fRecent = useFilters<any>(recent.data, {
@@ -275,9 +282,11 @@ export function SalesPage() {
           <div className="card">
             <div className="card-head"><h2>Sold, and what is left</h2></div>
             <div className="card-body tight">
+              <FilterBar f={fByProduct} placeholder="Search product" />
+              <FilterTotals f={fByProduct} noun="product" />
               <DataTable
                 loading={summary.loading}
-                rows={summary.data?.byProduct ?? []}
+                rows={fByProduct.rows}
                 cols={[
                   { key: 'p', head: 'Product', render: (p: any) => (
                     <div><b>{p.name}</b><div className="small muted">{p.sku}</div></div>

@@ -20,11 +20,10 @@ export function ArrivalsPage() {
     facets: [
       { key: 'sup', label: 'supplier', of: (a: any) => a.supplier_name },
       { key: 'wh', label: 'warehouse', of: (a: any) => a.warehouse_name },
-      { key: 'src', label: 'source', of: (a: any) => a.source_type },
-      { key: 'late', label: 'timing', of: (a: any) => (a.overdue ? 'not arrived' : 'on time') },
+      { key: 'src', label: 'source', all: 'Any source', of: (a: any) => a.source_type },
+      { key: 'late', label: 'timing', all: 'Early and late', of: (a: any) => (a.overdue ? 'not arrived' : 'on time') },
     ],
     totals: [
-      { label: 'Vehicles', of: () => 1 },
       { label: 'Products', of: (a: any) => Number(a.line_count) || 0 },
       { label: 'Value', of: (a: any) => Number(a.grand_total) || 0, money: true },
     ],
@@ -89,7 +88,7 @@ export function GatePipelinePage() {
       { key: 'sup', label: 'supplier', of: (g: any) => g.supplier_name },
       { key: 'st', label: 'stage', of: (g: any) => g.status },
       { key: 'nx', label: 'next step', of: (g: any) => NEXT[stage(g)] },
-      { key: 'fl', label: 'flag', of: (g: any) =>
+      { key: 'fl', label: 'flag', all: 'Any flag', of: (g: any) =>
         g.critical_fail ? 'hygiene fail' : g.is_unplanned ? 'unplanned' : null },
     ],
     totals: [

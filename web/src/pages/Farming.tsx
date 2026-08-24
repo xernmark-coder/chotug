@@ -22,7 +22,7 @@ import {
 import { api, date, idempotencyKey, inr, num, today, useAuth } from '../lib/api';
 import {
   Chip, Col, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal,
-  Steps, useApi, useToast,
+  Steps, useApi, useToast, FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
 import { CHART, compact, Meter, TrendArea } from '../components/charts';
@@ -618,6 +618,23 @@ export function CropListPage() {
   const [status, setStatus] = useState('');
   const { data, loading, error } = useApi<any[]>(`/farming/crop-cycles?status=${status}`, [status]);
 
+  const f = useFilters<any>(data, {
+    search: (c: any) => [c.plot_code, c.farm_name, c.crop_name, c.cycle_no]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'farm', label: 'farm', of: (c: any) => c.farm_name },
+      { key: 'crop', label: 'crop', of: (c: any) => c.crop_name },
+      { key: 'h', label: 'health', all: 'Any health', of: (c: any) => c.health },
+      { key: 'w', label: 'work', all: 'Any workload', of: (c: any) =>
+        c.overdue_tasks > 0 ? 'work is late'
+          : c.today_tasks > 0 ? 'work due today' : 'clear' },
+    ],
+    totals: [
+      { label: 'Acres', of: (c: any) => Number(c.area_acre) || 0, decimals: 2 },
+      { label: 'Harvested kg', of: (c: any) => Number(c.harvested_kg) || 0 },
+    ],
+  });
+
   const cols: Col<any>[] = [
     { key: 'h', head: '', width: 34, render: (c) => <Light c={c.health} /> },
     { key: 'p', head: 'Plot', render: (c) => (
@@ -645,16 +662,17 @@ export function CropListPage() {
         Start a crop
       </button>}>
       <ErrorBanner error={error} />
-      <div className="search-bar">
+      <FilterBar f={f} placeholder="Search plot, farm, crop">
         <select value={status} onChange={(e) => setStatus(e.target.value)}>
           <option value="">All crops</option>
           <option value="GROWING">Growing</option>
           <option value="HARVESTING">Harvesting</option>
           <option value="CLOSED">Closed</option>
         </select>
-      </div>
+      </FilterBar>
+      <FilterTotals f={f} noun="crop" />
       <div className="card"><div className="card-body tight">
-        <DataTable rows={data ?? []} cols={cols} loading={loading}
+        <DataTable rows={f.rows} cols={cols} loading={loading}
           rowTone={(c) => (c.health === 'RED' ? 'crit' : c.health === 'YELLOW' ? 'warn' : undefined)}
           onRowClick={(c) => nav(`/farm/crops/${c.cycle_id}`)}
           empty={<Empty icon="🌾" title="No crops yet"
@@ -675,6 +693,36 @@ export function CropDetailPage() {
   const [checking, setChecking] = useState(false);
   const [closing, setClosing] = useState(false);
   const [expensing, setExpensing] = useState(false);
+
+  /* Above the loading guard — a hook cannot sit behind an early return. */
+  const fTasks = useFilters<any>(data?.tasks, {
+    date: (t: any) => t.due_date,
+    search: (t: any) => [t.title, t.note, t.task_type, t.done_by_name].filter(Boolean).join(' '),
+    facets: [
+      { key: 'ty', label: 'job', of: (t: any) => t.task_type },
+      { key: 'st', label: 'status', of: (t: any) => t.status },
+      { key: 'by', label: 'done by', of: (t: any) => t.done_by_name },
+    ],
+    totals: [],
+  });
+  const fHarv = useFilters<any>(data?.harvests, {
+    date: (h: any) => h.harvest_date,
+    search: (h: any) => String(h.harvest_no ?? ''),
+    facets: [{ key: 'st', label: 'status', of: (h: any) => h.status }],
+    totals: [
+      { label: 'Harvests', of: () => 1 },
+      { label: 'Net kg', of: (h: any) => Number(h.net_weight_kg) || 0, decimals: 1 },
+      { label: 'Crates', of: (h: any) => Number(h.crate_count) || 0 },
+    ],
+  });
+  const fExp = useFilters<any>(data?.expenses, {
+    date: (e: any) => e.expense_date,
+    search: (e: any) => [e.expense_type, e.note].filter(Boolean).join(' '),
+    facets: [{ key: 't', label: 'type', of: (e: any) => e.expense_type }],
+    totals: [
+      { label: 'Spent', of: (e: any) => Number(e.amount) || 0, money: true },
+    ],
+  });
 
   if (loading) return <Layout title="Crop"><Loading /></Layout>;
   if (!data?.cycle) return <Layout title="Crop"><ErrorBanner error={error} /></Layout>;
@@ -739,7 +787,9 @@ export function CropDetailPage() {
 
       {tab === 'work' ? (
         <div className="card"><div className="card-body tight">
-          <DataTable rows={data.tasks} cols={[
+          <FilterBar f={fTasks} placeholder="Search job or note" />
+          <FilterTotals f={fTasks} noun="job" />
+          <DataTable rows={fTasks.rows} cols={[
             { key: 'l', head: '', width: 34, render: (t: any) => <Light c={t.colour} /> },
             { key: 'd', head: 'Due', render: (t: any) => (
               <div>{date(t.due_date)}<div className="small muted">day {t.day_number}</div></div>) },
@@ -753,7 +803,8 @@ export function CropDetailPage() {
                 : t.planned_qty != null ? <span className="muted">{num(t.planned_qty, 1)} planned</span> : '—' },
             { key: 's', head: 'Status', render: (t: any) => <Chip value={t.status} /> },
             { key: 'b', head: 'By', render: (t: any) => <span className="small muted">{t.done_by_name ?? '—'}</span> },
-          ]} empty={<Empty title="No jobs scheduled" />} />
+          ]} empty={<Empty title={fTasks.active > 0
+            ? 'No job matches those filters' : 'No jobs scheduled'} />} />
         </div></div>
       ) : null}
 
@@ -774,7 +825,9 @@ export function CropDetailPage() {
 
       {tab === 'harvest' ? (
         <div className="card"><div className="card-body tight">
-          <DataTable rows={data.harvests} cols={[
+          <FilterBar f={fHarv} placeholder="Search harvest number" />
+          <FilterTotals f={fHarv} noun="harvest" />
+          <DataTable rows={fHarv.rows} cols={[
             { key: 'n', head: 'Harvest', render: (h: any) => (
               <div><b className="mono">{h.harvest_no}</b>
                 <div className="small muted">{date(h.harvest_date)} · day {h.crop_age_days}</div></div>) },
@@ -818,12 +871,15 @@ export function CropDetailPage() {
           <div className="card">
             <div className="card-head"><h2>Expenses</h2></div>
             <div className="card-body tight">
-              <DataTable rows={data.expenses} cols={[
+              <FilterBar f={fExp} placeholder="Search type or note" />
+              <FilterTotals f={fExp} noun="entry" />
+              <DataTable rows={fExp.rows} cols={[
                 { key: 'd', head: 'Date', render: (e: any) => date(e.expense_date) },
                 { key: 't', head: 'Type', render: (e: any) => <Chip tone="neutral">{e.expense_type}</Chip> },
                 { key: 'n', head: 'Note', render: (e: any) => <span className="small">{e.note ?? '—'}</span> },
                 { key: 'a', head: 'Amount', num: true, render: (e: any) => inr(e.amount, 0) },
-              ]} empty={<Empty title="No expenses recorded" />} />
+              ]} empty={<Empty title={fExp.active > 0
+                ? 'No expense matches those filters' : 'No expenses recorded'} />} />
             </div>
           </div>
         </div>
@@ -1260,6 +1316,32 @@ export function DispatchPage() {
 
   const sendable = [...(ready ?? []), ...(partial ?? [])];
 
+  const fOpen = useFilters<any>(open, {
+    date: (d: any) => d.dispatch_date,
+    search: (d: any) => [d.dispatch_no, d.farm_name, d.vehicle_reg,
+      ...(d.lines ?? []).map((l: any) => l.productName)].filter(Boolean).join(' '),
+    facets: [
+      { key: 'farm', label: 'farm', of: (d: any) => d.farm_name },
+      { key: 'veh', label: 'vehicle', of: (d: any) => d.vehicle_reg },
+    ],
+    totals: [
+      { label: 'Sent kg', of: (d: any) => Number(d.dispatch_weight_kg) || 0, decimals: 1 },
+    ],
+  });
+  const fRecent = useFilters<any>(recent, {
+    date: (d: any) => d.dispatch_date,
+    search: (d: any) => [d.dispatch_no, d.farm_name, d.variance_reason].filter(Boolean).join(' '),
+    facets: [
+      { key: 'farm', label: 'farm', of: (d: any) => d.farm_name },
+      { key: 'band', label: 'variance', all: 'Any variance', of: (d: any) => d.variance_band },
+    ],
+    totals: [
+      { label: 'Sent kg', of: (d: any) => Number(d.dispatch_weight_kg) || 0, decimals: 1 },
+      { label: 'Received kg', of: (d: any) => Number(d.received_weight_kg) || 0, decimals: 1 },
+      { label: 'Lost kg', of: (d: any) => Number(d.variance_kg) || 0, decimals: 1 },
+    ],
+  });
+
   return (
     <Layout title="Farm to warehouse" subtitle="Send, then weigh what actually arrived"
       actions={can('farming.dispatch.create') && sendable.length ? (
@@ -1269,7 +1351,9 @@ export function DispatchPage() {
       <div className="card mb">
         <div className="card-head"><h2>Waiting to be received</h2></div>
         <div className="card-body tight">
-          <DataTable rows={open ?? []} cols={[
+          <FilterBar f={fOpen} placeholder="Search note, farm, vehicle" />
+          <FilterTotals f={fOpen} noun="note" />
+          <DataTable rows={fOpen.rows} cols={[
             { key: 'n', head: 'Note', render: (d: any) => (
               <div><b className="mono">{d.dispatch_no}</b>
                 <div className="small muted">{date(d.dispatch_date)} · {d.farm_name}</div></div>) },
@@ -1285,14 +1369,17 @@ export function DispatchPage() {
               can('farming.dispatch.receive')
                 ? <button className="btn sm primary" onClick={() => setReceiving(d)}>Weigh &amp; receive</button>
                 : <Chip value="DISPATCHED" /> },
-          ]} empty={<Empty icon="🚜" title="Nothing on the road" />} />
+          ]} empty={<Empty icon="🚜" title={fOpen.active > 0
+            ? 'Nothing matches those filters' : 'Nothing on the road'} />} />
         </div>
       </div>
 
       <div className="card">
         <div className="card-head"><h2>Received</h2></div>
         <div className="card-body tight">
-          <DataTable rows={recent ?? []} cols={[
+          <FilterBar f={fRecent} placeholder="Search note or farm" />
+          <FilterTotals f={fRecent} noun="note" />
+          <DataTable rows={fRecent.rows} cols={[
             { key: 'n', head: 'Note', render: (d: any) => <b className="mono">{d.dispatch_no}</b> },
             { key: 'd', head: 'Date', render: (d: any) => date(d.dispatch_date) },
             { key: 's', head: 'Farm sent', num: true, render: (d: any) => num(d.dispatch_weight_kg, 1) },
@@ -1304,7 +1391,8 @@ export function DispatchPage() {
             { key: 'x', head: 'Reason', render: (d: any) => <span className="small muted">{d.variance_reason ?? '—'}</span> },
           ]} rowTone={(d: any) => (['RED', 'CRITICAL'].includes(d.variance_band) ? 'crit'
             : d.variance_band === 'AMBER' ? 'warn' : undefined)}
-            empty={<Empty title="Nothing received yet" />} />
+            empty={<Empty title={fRecent.active > 0
+              ? 'Nothing matches those filters' : 'Nothing received yet'} />} />
         </div>
       </div>
 
@@ -1470,6 +1558,31 @@ export function FarmDashboardPage() {
   const nav = useNavigate();
   const { data, loading, error } = useApi<any>('/farming/dashboard');
 
+  /* Declared above the loading guard — a hook cannot sit behind an early
+   * return. */
+  const fCrops = useFilters<any>(data?.crops, {
+    search: (c: any) => [c.plot_code, c.crop_name].filter(Boolean).join(' '),
+    facets: [
+      { key: 'c', label: 'crop', of: (c: any) => c.crop_name },
+      { key: 'h', label: 'health', all: 'Any health', of: (c: any) => c.health },
+      { key: 'w', label: 'jobs', all: 'Any workload', of: (c: any) =>
+        (c.overdue_tasks > 0 ? 'jobs are late' : 'clear') },
+    ],
+    totals: [
+      { label: 'Expected kg', of: (c: any) => Number(c.expected_yield_kg) || 0 },
+    ],
+  });
+  const fProblems = useFilters<any>(data?.problems, {
+    search: (p2: any) => [p2.plot_code, p2.crop_name, p2.problem_code, p2.note, p2.by_name]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'p', label: 'problem', of: (p2: any) => p2.problem_code },
+      { key: 'c', label: 'crop', of: (p2: any) => p2.crop_name },
+      { key: 'b', label: 'reported by', of: (p2: any) => p2.by_name },
+    ],
+    totals: [{ label: 'Reports', of: () => 1 }],
+  });
+
   if (loading) return <Layout title="Farm"><Loading /></Layout>;
   const k = data?.kpis ?? {};
 
@@ -1532,7 +1645,9 @@ export function FarmDashboardPage() {
               <button className="btn sm ghost" onClick={() => nav('/farm/crops')}>All →</button>
             </div>
             <div className="card-body tight">
-              <DataTable rows={data?.crops ?? []} cols={[
+              <FilterBar f={fCrops} placeholder="Search plot or crop" />
+              <FilterTotals f={fCrops} noun="crop" />
+              <DataTable rows={fCrops.rows} cols={[
                 { key: 'l', head: '', width: 34, render: (c: any) => <Light c={c.health} /> },
                 { key: 'p', head: 'Plot', render: (c: any) => <b>Plot-{c.plot_code}</b> },
                 { key: 'c', head: 'Crop', render: (c: any) => (
@@ -1545,7 +1660,8 @@ export function FarmDashboardPage() {
                 { key: 'w', head: 'Late jobs', num: true, render: (c: any) =>
                   c.overdue_tasks > 0 ? <Chip tone="danger">{c.overdue_tasks}</Chip> : '—' },
               ]} onRowClick={(c: any) => nav(`/farm/crops/${c.cycle_id}`)}
-                empty={<Empty icon="🌾" title="No crops growing" />} />
+                empty={<Empty icon="🌾" title={fCrops.active > 0
+                  ? 'No crop matches those filters' : 'No crops growing'} />} />
             </div>
           </div>
         </div>
@@ -1553,14 +1669,17 @@ export function FarmDashboardPage() {
         <div className="card">
           <div className="card-head"><h2>Problems reported</h2></div>
           <div className="card-body tight">
-            <DataTable rows={data?.problems ?? []} cols={[
+            <FilterBar f={fProblems} placeholder="Search plot, crop, problem" />
+            <FilterTotals f={fProblems} noun="report" />
+            <DataTable rows={fProblems.rows} cols={[
               { key: 'p', head: 'Where', render: (p: any) => (
                 <div><b>Plot-{p.plot_code}</b><div className="small muted">{p.crop_name}</div></div>) },
               { key: 'w', head: 'What', render: (p: any) => (
                 <div><Chip tone="danger">{p.problem_code}</Chip>
                   {p.note ? <div className="small muted">{p.note}</div> : null}</div>) },
               { key: 'b', head: 'By', render: (p: any) => <span className="small muted">{p.by_name}</span> },
-            ]} empty={<Empty icon="👍" title="Nothing reported" />} />
+            ]} empty={<Empty icon="👍" title={fProblems.active > 0
+              ? 'Nothing matches those filters' : 'Nothing reported'} />} />
           </div>
         </div>
       </div>
@@ -1577,6 +1696,37 @@ export function FarmPlanningPage() {
   const { data: forecast } = useApi<any>('/farming/harvest-forecast?days=14');
   const { data: staff } = useApi<any[]>('/farming/staff-performance');
   const [tab, setTab] = useState<'next' | 'buy' | 'forecast' | 'staff'>('next');
+
+  const fSugg = useFilters<any>(planning?.suggestions, {
+    search: (x: any) => [x.cropName, ...(x.blockers ?? [])].filter(Boolean).join(' '),
+    facets: [
+      { key: 'w', label: 'water', of: (x: any) => x.waterNeed },
+      { key: 'r', label: 'verdict', of: (x: any) =>
+        (x.recommended ? 'clear to plant' : 'held back') },
+    ],
+    totals: [
+      { label: 'Demand kg', of: (x: any) => Number(x.demandKg) || 0 },
+      { label: 'Shortfall kg', of: (x: any) => Number(x.shortageKg) || 0 },
+    ],
+  });
+  const fCompare = useFilters<any>(planning?.comparison, {
+    search: (x: any) => [x.cropName, x.sku, x.message].filter(Boolean).join(' '),
+    facets: [{ key: 'v', label: 'verdict', of: (x: any) => x.verdict }],
+    totals: [],
+  });
+  const fForecast = useFilters<any>(forecast?.byProduct, {
+    search: (x: any) => String(x.productName ?? ''),
+    facets: [],
+    totals: [
+      { label: 'Products', of: () => 1 },
+      { label: 'Expected kg', of: (x: any) => Number(x.kg) || 0 },
+    ],
+  });
+  const fStaff = useFilters<any>(staff, {
+    search: (x: any) => String(x.name ?? ''),
+    facets: [{ key: 'r', label: 'rating', of: (x: any) => x.rating }],
+    totals: [{ label: 'People', of: () => 1 }],
+  });
 
   if (loading) return <Layout title="Farm planning"><Loading /></Layout>;
 
@@ -1599,7 +1749,9 @@ export function FarmPlanningPage() {
           <div className="card-body tight">
             {/* §26 §30 — demand the business already has, against production it
                 already expects, with rotation and season as vetoes. */}
-            <DataTable rows={planning?.suggestions ?? []} cols={[
+            <FilterBar f={fSugg} placeholder="Search crop" />
+            <FilterTotals f={fSugg} noun="crop" />
+            <DataTable rows={fSugg.rows} cols={[
               { key: 'c', head: 'Crop', render: (s: any) => (
                 <div><b>{s.cropName}</b>
                   <div className="small muted">{s.durationDays} days · {s.waterNeed.toLowerCase()} water</div></div>) },
@@ -1617,7 +1769,8 @@ export function FarmPlanningPage() {
               { key: 'x', head: 'Score', num: true, render: (s: any) => (
                 <Chip tone={s.recommended ? 'ok' : 'neutral'}>{num(s.score, 0)}</Chip>) },
             ]} rowTone={(s: any) => (s.recommended ? undefined : 'warn')}
-              empty={<Empty title="No crops configured" />} />
+              empty={<Empty title={fSugg.active > 0
+                ? 'No crop matches those filters' : 'No crops configured'} />} />
           </div>
         </div>
       ) : null}
@@ -1628,7 +1781,9 @@ export function FarmPlanningPage() {
           <div className="card-body tight">
             {/* §27 — own measured cost against today's market, with a risk
                 premium on growing. The owner still decides. */}
-            <DataTable rows={planning?.comparison ?? []} cols={[
+            <FilterBar f={fCompare} placeholder="Search crop" />
+            <FilterTotals f={fCompare} noun="crop" />
+            <DataTable rows={fCompare.rows} cols={[
               { key: 'c', head: 'Crop', render: (c: any) => (
                 <div><b>{c.cropName}</b><div className="small muted">{c.sku ?? '—'}</div></div>) },
               { key: 'o', head: 'Own cost/kg', num: true, render: (c: any) =>
@@ -1644,7 +1799,8 @@ export function FarmPlanningPage() {
                     : c.verdict === 'EITHER' ? 'Either works' : 'Not enough history'}
                 </Chip>) },
               { key: 'w', head: '', render: (c: any) => <span className="small muted">{c.message}</span> },
-            ]} empty={<Empty title="No crops configured" />} />
+            ]} empty={<Empty title={fCompare.active > 0
+              ? 'No crop matches those filters' : 'No crops configured'} />} />
           </div>
         </div>
       ) : null}
@@ -1669,10 +1825,13 @@ export function FarmPlanningPage() {
           <div className="card">
             <div className="card-head"><h2>By product</h2></div>
             <div className="card-body tight">
-              <DataTable rows={forecast?.byProduct ?? []} cols={[
+              <FilterBar f={fForecast} placeholder="Search product" />
+              <FilterTotals f={fForecast} noun="product" />
+              <DataTable rows={fForecast.rows} cols={[
                 { key: 'p', head: 'Product', render: (p: any) => <b>{p.productName}</b> },
                 { key: 'k', head: 'Expected', num: true, render: (p: any) => `${num(p.kg, 0)} kg` },
-              ]} empty={<Empty title="No harvest expected" />} />
+              ]} empty={<Empty title={fForecast.active > 0
+                ? 'No product matches those filters' : 'No harvest expected'} />} />
             </div>
           </div>
         </div>
@@ -1683,7 +1842,9 @@ export function FarmPlanningPage() {
           <div className="card-head"><h2>Staff performance — computed, not scored by hand</h2></div>
           <div className="card-body tight">
             {/* §22 — a manager's memory is not an appraisal system. */}
-            <DataTable rows={staff ?? []} cols={[
+            <FilterBar f={fStaff} placeholder="Search name" />
+            <FilterTotals f={fStaff} noun="person" />
+            <DataTable rows={fStaff.rows} cols={[
               { key: 'l', head: '', width: 34, render: (s: any) => <Light c={s.rating} /> },
               { key: 'n', head: 'Name', render: (s: any) => <b>{s.name}</b> },
               { key: 'd', head: 'Jobs done', num: true, render: (s: any) => s.tasksDone },
@@ -1698,7 +1859,8 @@ export function FarmPlanningPage() {
                 <Chip tone={s.rating === 'GREEN' ? 'ok' : s.rating === 'YELLOW' ? 'warn' : 'danger'}>
                   {num(s.score, 0)}
                 </Chip>) },
-            ]} empty={<Empty icon="👥" title="Nobody has recorded farm work yet" />} />
+            ]} empty={<Empty icon="👥" title={fStaff.active > 0
+              ? 'Nobody matches those filters' : 'Nobody has recorded farm work yet'} />} />
           </div>
         </div>
       ) : null}
@@ -1722,6 +1884,27 @@ export function FarmSetupPage() {
   const selected = farmId ?? farms?.[0]?.id ?? null;
   const { data: detail, reload: reloadDetail } = useApi<any>(
     selected ? `/farming/farms/${selected}` : null, [selected]);
+
+  const fPlots = useFilters<any>(detail?.plots, {
+    search: (p2: any) => [p2.code, p2.name, p2.crop_name, p2.qr_code].filter(Boolean).join(' '),
+    facets: [
+      { key: 'c', label: 'crop', of: (p2: any) => p2.crop_name ?? 'free' },
+      { key: 'h', label: 'health', all: 'Any health', of: (p2: any) => p2.health },
+    ],
+    totals: [
+      { label: 'Acres', of: (p2: any) => Number(p2.area_acre) || 0, decimals: 2 },
+    ],
+  });
+  const fMachines = useFilters<any>(machines, {
+    search: (m: any) => [m.name, m.code, m.machine_type].filter(Boolean).join(' '),
+    facets: [
+      { key: 't', label: 'type', of: (m: any) => m.machine_type },
+      { key: 's', label: 'status', of: (m: any) => m.status },
+      { key: 'sv', label: 'service', all: 'Any service state', of: (m: any) =>
+        (m.service_overdue ? 'overdue' : 'in date') },
+    ],
+    totals: [{ label: 'Machines', of: () => 1 }],
+  });
 
   return (
     <Layout title="Farm setup" subtitle="Fill this in once — the rest is automatic"
@@ -1760,7 +1943,9 @@ export function FarmSetupPage() {
                 ? <button className="btn sm" onClick={() => setAddingPlot(true)}>Add plot</button> : null}
             </div>
             <div className="card-body tight">
-              <DataTable rows={detail.plots} cols={[
+              <FilterBar f={fPlots} placeholder="Search plot or crop" />
+              <FilterTotals f={fPlots} noun="plot" />
+              <DataTable rows={fPlots.rows} cols={[
                 { key: 'c', head: 'Plot', render: (p: any) => (
                   <div><b>Plot-{p.code}</b><div className="small muted">{p.name ?? ''}</div></div>) },
                 { key: 'a', head: 'Area', num: true, render: (p: any) => `${p.area_acre} ac` },
@@ -1770,7 +1955,8 @@ export function FarmSetupPage() {
                   : <Chip tone="neutral">free</Chip> },
                 { key: 'q', head: 'QR code', render: (p: any) => (
                   <a className="mono small" href={`/farm/plot/${p.qr_code}`}>{p.qr_code}</a>) },
-              ]} empty={<Empty title="No plots yet" />} />
+              ]} empty={<Empty title={fPlots.active > 0
+                ? 'No plot matches those filters' : 'No plots yet'} />} />
               <div className="small muted" style={{ padding: '10px 14px' }}>
                 Print each QR and stick it on the plot gate. Scanning it opens
                 that plot's screen — which is what stops entries landing on the
@@ -1783,7 +1969,9 @@ export function FarmSetupPage() {
             <div className="card-head"><h2>Machines</h2></div>
             <div className="card-body tight">
               {/* §23 — three colours, and nothing more to manage. */}
-              <DataTable rows={machines ?? []} cols={[
+              <FilterBar f={fMachines} placeholder="Search machine" />
+              <FilterTotals f={fMachines} noun="machine" />
+              <DataTable rows={fMachines.rows} cols={[
                 { key: 'n', head: 'Machine', render: (m: any) => (
                   <div><b>{m.name}</b><div className="small muted">{m.code} · {m.machine_type}</div></div>) },
                 { key: 's', head: 'Status', render: (m: any) => (
@@ -1814,7 +2002,8 @@ export function FarmSetupPage() {
                     <option value="BREAKDOWN">🔴 Breakdown</option>
                     <option value="SERVICED">Serviced today</option>
                   </select>) },
-              ]} empty={<Empty icon="🚜" title="No machines" />} />
+              ]} empty={<Empty icon="🚜" title={fMachines.active > 0
+                ? 'No machine matches those filters' : 'No machines'} />} />
             </div>
           </div>
         </div>
@@ -2005,22 +2194,35 @@ export function FarmExpensePage() {
   const [adding, setAdding] = useState(false);
   const selected = farmId || farms?.[0]?.id || '';
 
-  const total = (data ?? []).reduce((a, e) => a + Number(e.amount), 0);
+  const f = useFilters<any>(data, {
+    date: (e: any) => e.expense_date,
+    search: (e: any) => [e.expense_type, e.farm_name, e.plot_code, e.crop_name, e.note, e.by_name]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 't', label: 'type', of: (e: any) => e.expense_type },
+      { key: 'f', label: 'farm', of: (e: any) => e.farm_name },
+      { key: 'c', label: 'crop', of: (e: any) => e.crop_name },
+      { key: 'b', label: 'entered by', of: (e: any) => e.by_name },
+    ],
+    totals: [
+      { label: 'Entries', of: () => 1 },
+      { label: 'Spent', of: (e: any) => Number(e.amount) || 0, money: true },
+    ],
+  });
 
   return (
     <Layout title="Farm expenses" subtitle="Type, amount, save — the rest is attached for you"
       actions={<button className="btn primary sm" disabled={!selected}
         onClick={() => setAdding(true)}>Add expense</button>}>
-      <div className="search-bar">
+      <FilterBar f={f} placeholder="Search type, plot, crop, note">
         <select value={farmId} onChange={(e) => setFarmId(e.target.value)}>
           <option value="">All farms</option>
-          {(farms ?? []).map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+          {(farms ?? []).map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
         </select>
-        <span className="spacer" />
-        <Chip tone="neutral">{inr(total, 0)} shown</Chip>
-      </div>
+      </FilterBar>
+      <FilterTotals f={f} noun="entry" />
       <div className="card"><div className="card-body tight">
-        <DataTable rows={data ?? []} loading={loading} cols={[
+        <DataTable rows={f.rows} loading={loading} cols={[
           { key: 'd', head: 'Date', render: (e: any) => date(e.expense_date) },
           { key: 't', head: 'Type', render: (e: any) => <Chip tone="neutral">{e.expense_type}</Chip> },
           { key: 'f', head: 'Where', render: (e: any) => (
@@ -2030,7 +2232,8 @@ export function FarmExpensePage() {
           { key: 'n', head: 'Note', render: (e: any) => <span className="small">{e.note ?? '—'}</span> },
           { key: 'b', head: 'By', render: (e: any) => <span className="small muted">{e.by_name}</span> },
           { key: 'a', head: 'Amount', num: true, render: (e: any) => inr(e.amount, 0) },
-        ]} empty={<Empty icon="₹" title="No expenses recorded" />} />
+        ]} empty={<Empty icon="₹" title={f.active > 0
+          ? 'No expense matches those filters' : 'No expenses recorded'} />} />
       </div></div>
 
       {adding ? (

@@ -6,6 +6,7 @@ import {
   FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
+import { ProductModal } from './Catalogue';
 
 /* ===========================================================================
  * CENTRES — the shops
@@ -22,10 +23,14 @@ import { Icon } from '../components/icons';
 
 export function CentresPage() {
   const nav = useNavigate();
-  const { can } = useAuth();
+  const toast = useToast();
+  const { can, warehouseId } = useAuth();
   const centres = useApi<any[]>('/centres');
-  const perf = useApi<any>('/centres/performance?days=30');
+  const mayCompare = can('centre.performance.view');
+  const perf = useApi<any>(mayCompare ? '/centres/performance?days=30' : null, [mayCompare]);
+  const { data: warehouses } = useApi<any[]>('/masters/warehouses');
   const [tab, setTab] = useState<'centres' | 'compare'>('centres');
+  const [sending, setSending] = useState<string | null>(null);
 
   const rows = centres.data ?? [];
   const totalStock = rows.reduce((a, c: any) => a + Number(c.stock_value), 0);
@@ -39,13 +44,12 @@ export function CentresPage() {
     facets: [
       { key: 'city', label: 'city', of: (c: any) => c.city },
       { key: 'mgr', label: 'manager', of: (c: any) => c.manager_name },
-      { key: 'cl', label: 'day close', of: (c: any) =>
+      { key: 'cl', label: 'day close', all: 'Closed or not', of: (c: any) =>
         (c.last_closed_on === today ? 'closed today' : 'not closed today') },
-      { key: 'tr', label: 'in transit', of: (c: any) =>
+      { key: 'tr', label: 'in transit', all: 'Any load', of: (c: any) =>
         (Number(c.in_transit_loads) > 0 ? 'load on the way' : 'nothing coming') },
     ],
     totals: [
-      { label: 'Centres', of: () => 1 },
       { label: 'Stock', of: (c: any) => Number(c.stock_value) || 0, money: true },
       { label: 'Sold, 30d', of: (c: any) => Number(c.revenue_30d) || 0, money: true },
     ],
@@ -54,7 +58,7 @@ export function CentresPage() {
     search: (c: any) => [c.name, c.city].filter(Boolean).join(' '),
     facets: [
       { key: 'city', label: 'city', of: (c: any) => c.city },
-      { key: 'net', label: 'result', of: (c: any) =>
+      { key: 'net', label: 'result', all: 'Any result', of: (c: any) =>
         (Number(c.netMargin) < 0 ? 'losing money' : 'making money') },
     ],
     totals: [
@@ -68,7 +72,16 @@ export function CentresPage() {
     <Layout
       title="Centres"
       subtitle="Every shop, what it is holding and what it is selling"
-      actions={<button className="btn sm" onClick={() => nav('/customers')}>Customers</button>}
+      actions={
+        <div className="btn-row">
+          <button className="btn sm" onClick={() => nav('/customers')}>Customers</button>
+          {can('inventory.stock.issue') ? (
+            <button className="btn sm primary" onClick={() => setSending('')}>
+              Send stock to a centre
+            </button>
+          ) : null}
+        </div>
+      }
     >
       <ErrorBanner error={centres.error} />
 
@@ -84,9 +97,10 @@ export function CentresPage() {
 
       <div className="tabs">
         {([['centres', `Centres (${rows.length})`],
-           ['compare', 'How they compare']] as const).map(([k, l]) => (
+           ...(mayCompare ? [['compare', 'How they compare'] as const] : []),
+          ] as const).map(([k, l]) => (
           <button key={k} className={`tab ${tab === k ? 'active' : ''}`}
-            onClick={() => setTab(k)}>{l}</button>))}
+            onClick={() => setTab(k as any)}>{l}</button>))}
       </div>
 
       {tab === 'centres' ? (
@@ -167,6 +181,19 @@ export function CentresPage() {
           />
         </div></div>
       )}
+
+      {sending !== null ? (
+        <SendToCentreModal
+          centres={rows}
+          /* The stock is at a warehouse, not at a shop — default to the one the
+             person is signed in to, else the first non-centre place. */
+          fromWarehouseId={warehouseId
+            ?? (warehouses ?? []).find((w: any) => !w.is_centre)?.id
+            ?? ''}
+          defaultCentre={sending || undefined}
+          onClose={() => setSending(null)}
+          onDone={(m) => { setSending(null); centres.reload(); toast(m, 'ok'); }} />
+      ) : null}
     </Layout>
   );
 }
@@ -181,6 +208,10 @@ export function CentreDayPage() {
   const [receiving, setReceiving] = useState<any>(null);
   const [closing, setClosing] = useState(false);
   const [asking, setAsking] = useState(false);
+  const [sending, setSending] = useState(false);
+  const { warehouseId } = useAuth();
+  const centres = useApi<any[]>('/centres');
+  const { data: warehouses } = useApi<any[]>('/masters/warehouses');
 
   /* Above the loading guard — a hook cannot sit behind an early return. */
   const fStock = useFilters<any>(data?.stock, {
@@ -193,6 +224,18 @@ export function CentreDayPage() {
       { label: 'On the shelves', of: (x: any) => Number(x.qty) || 0 },
       { label: 'Worth', of: (x: any) =>
         (Number(x.qty) || 0) * (Number(x.landed_rate) || 0), money: true },
+    ],
+  });
+  const fIncoming = useFilters<any>(data?.incoming, {
+    date: (t: any) => t.dispatched_at,
+    search: (t: any) => [t.issue_no, t.from_warehouse, t.contents, t.vehicle_reg, t.driver_name]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'from', label: 'sent from', of: (t: any) => t.from_warehouse },
+      { key: 'veh', label: 'vehicle', of: (t: any) => t.vehicle_reg },
+    ],
+    totals: [
+      { label: 'Sent', of: (t: any) => Number(t.total_qty) || 0, decimals: 1 },
     ],
   });
   const fBills = useFilters<any>(data?.salesToday, {
@@ -210,7 +253,7 @@ export function CentreDayPage() {
     date: (x: any) => x.close_date,
     search: (x: any) => [x.close_date, x.note].filter(Boolean).join(' '),
     facets: [
-      { key: 'v', label: 'cash', of: (x: any) =>
+      { key: 'v', label: 'cash', all: 'Ties or not', of: (x: any) =>
         (Math.abs(Number(x.variance)) > 0.01 ? 'does not tie' : 'ties') },
     ],
     totals: [
@@ -233,6 +276,13 @@ export function CentreDayPage() {
         <div className="btn-row">
           {can('purchase.requirement.create') ? (
             <button className="btn sm" onClick={() => setAsking(true)}>Ask for stock</button>
+          ) : null}
+          {/* Asking the buyer to purchase more, and sending what is already on
+              a warehouse shelf, are different acts by different people. Both
+              live here because this is the page you are on when you notice the
+              shop is empty. */}
+          {can('inventory.stock.issue') ? (
+            <button className="btn sm" onClick={() => setSending(true)}>Send stock here</button>
           ) : null}
           {can('centre.day.close') ? (
             <button className={`btn sm ${data.closedToday ? '' : 'primary'}`}
@@ -261,8 +311,10 @@ export function CentreDayPage() {
         <div className="card mb">
           <div className="card-head"><h2>Coming to you</h2></div>
           <div className="card-body tight">
+            <FilterBar f={fIncoming} placeholder="Search transfer, vehicle, driver" />
+            <FilterTotals f={fIncoming} noun="load" />
             <DataTable
-              rows={data.incoming}
+              rows={fIncoming.rows}
               rowTone={() => 'warn'}
               cols={[
                 { key: 'n', head: 'Transfer', render: (t: any) => (
@@ -380,7 +432,262 @@ export function CentreDayPage() {
         <AskForStockModal centre={c} onClose={() => setAsking(false)}
           onDone={(m) => { setAsking(false); toast(m, 'ok'); }} />
       ) : null}
+
+      {sending ? (
+        <SendToCentreModal
+          centres={centres.data ?? []}
+          fromWarehouseId={(warehouseId && warehouseId !== c.id) ? warehouseId
+            : ((warehouses ?? []).find((w: any) => !w.is_centre)?.id ?? '')}
+          defaultCentre={c.id}
+          onClose={() => setSending(false)}
+          onDone={(m) => { setSending(false); reload(); toast(m, 'ok'); }} />
+      ) : null}
     </Layout>
+  );
+}
+
+/* ===========================================================================
+ * SENDING STOCK TO A SHOP
+ *
+ * The API for this existed before the screen did, which meant the only way to
+ * put stock on a lorry was a curl command. This is that screen.
+ *
+ * Three things it insists on, because each one is a mistake somebody would
+ * otherwise make and only find out about days later:
+ *
+ *   - You cannot send more than is free. The cap is per batch and it is the
+ *     available figure, not the on-hand one, so reserved stock stays reserved.
+ *   - One lorry, one transport cost. The cost is the trip's, not the line's,
+ *     and it goes to Finance as a claim rather than a number nobody pays.
+ *   - Nothing arrives until the shop says so. This screen dispatches; the
+ *     centre books it in and counts it. What leaves and what lands are
+ *     allowed to differ, and the difference is the point.
+ * ======================================================================== */
+export function SendToCentreModal({ centres, fromWarehouseId, defaultCentre, onClose, onDone }: {
+  centres: any[];
+  fromWarehouseId: string;
+  defaultCentre?: string;
+  onClose: () => void;
+  onDone: (m: string) => void;
+}) {
+  /* Where it is coming FROM is a choice too. It defaults to the place you are
+     signed in to, but a person who moves between the cold store and the main
+     hall should not have to go and change their branch to send a load. */
+  const [from, setFrom] = useState(fromWarehouseId);
+  const [to, setTo] = useState(defaultCentre ?? '');
+  const [qty, setQty] = useState<Record<string, string>>({});
+  const [vehicleReg, setVehicleReg] = useState('');
+  const [driverName, setDriverName] = useState('');
+  const [transportCost, setTransportCost] = useState('');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  const stock = useApi<any[]>(
+    from ? `/inventory/issuable?warehouseId=${from}` : null, [from]);
+  const { data: vehicles } = useApi<any[]>('/masters/vehicles');
+  const { data: places } = useApi<any[]>('/masters/warehouses');
+
+  /* Anywhere that is not where it is going. Usually a warehouse; a shop moving
+     stock to another shop is unusual but not wrong, so it is not forbidden. */
+  const sources = (places ?? []).filter((w: any) => w.id !== to);
+  const targets = centres.filter((c: any) => c.id !== from);
+
+  const rows = stock.data ?? [];
+  const f = useFilters<any>(rows, {
+    search: (b: any) => [b.product_name, b.sku, b.batch_no, b.grade].filter(Boolean).join(' '),
+    facets: [
+      { key: 'p', label: 'product', of: (b: any) => b.product_name },
+      { key: 'g', label: 'grade', of: (b: any) => b.grade },
+      { key: 'e', label: 'shelf life', all: 'Any shelf life', of: (b: any) =>
+        b.days_to_expiry == null ? null
+          : b.days_to_expiry <= 2 ? 'send it today'
+          : b.days_to_expiry <= 5 ? 'this week' : 'plenty of time' },
+    ],
+    totals: [
+      { label: 'Free to send', of: (b: any) => Number(b.available_qty) || 0 },
+    ],
+  });
+
+  const picked = rows
+    .map((b: any) => ({ b, q: Number(qty[b.batch_id]) || 0 }))
+    .filter((x) => x.q > 0);
+  const over = picked.filter((x) => x.q > Number(x.b.available_qty) + 0.0001);
+  const worth = picked.reduce((a, x) => a + x.q * (Number(x.b.landed_rate) || 0), 0);
+  const dest = centres.find((c: any) => c.id === to);
+
+  const send = async () => {
+    setBusy(true); setError(null);
+    try {
+      const r = await api.post<any>('/centres/transfers', {
+        idempotencyKey: idempotencyKey('centre-transfer'),
+        fromWarehouseId: from,
+        toWarehouseId: to,
+        vehicleReg: vehicleReg.trim() || undefined,
+        driverName: driverName.trim() || undefined,
+        transportCost: transportCost ? Number(transportCost) : undefined,
+        note: note.trim() || undefined,
+        lines: picked.map((x) => ({ batchId: x.b.batch_id, qty: x.q })),
+      });
+      onDone(r.message);
+    } catch (e: any) { setError(e); } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal
+      title="Send stock to a centre"
+      wide
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary"
+          disabled={busy || !from || !to || !picked.length || !!over.length}
+          onClick={send}>
+          {busy ? 'Sending…'
+            : picked.length ? `Send ${picked.length} batch${picked.length === 1 ? '' : 'es'}`
+            : 'Send'}
+        </button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+
+      <div className="grid c3 mb">
+        <Field label="Sending from">
+          <select value={from} onChange={(e) => setFrom(e.target.value)}>
+            <option value="">Choose a place…</option>
+            {sources.map((w: any) => (
+              <option key={w.id} value={w.id}>{w.name}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Where is it going" hint="Only shops appear here.">
+          <select value={to} autoFocus onChange={(e) => setTo(e.target.value)}>
+            <option value="">Choose a centre…</option>
+            {targets.map((c: any) => (
+              <option key={c.id} value={c.id}>
+                {c.name}{c.city ? ` — ${c.city}` : ''}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="What is on the lorry" hint="Tell them what to expect.">
+          <input value={note} onChange={(e) => setNote(e.target.value)}
+            placeholder="Morning run" />
+        </Field>
+      </div>
+
+      {/* An empty dropdown is a dead end that explains nothing. If there is
+          nowhere to send, say why and what to do about it. */}
+      {!targets.length ? (
+        <div className="banner warn mb">
+          <span><Icon name="alert" size={16} /></span>
+          <div className="small">
+            {centres.length
+              ? 'The only shop on the list is where this stock already is. Change "sending from".'
+              : 'No shops set up yet. Mark a warehouse as a centre in Settings and it appears here.'}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="section-head"><h2>What to send</h2><span className="rule" /></div>
+      <FilterBar f={f} placeholder="Search product, batch, grade" />
+      <FilterTotals f={f} noun="batch" />
+      <div className="table-wrap" style={{ maxHeight: '38vh', overflowY: 'auto' }}>
+        <table className="data">
+          <thead><tr>
+            <th>Product</th><th>Batch</th><th className="num">Free</th>
+            <th className="num">Shelf life</th><th className="num">Send</th>
+          </tr></thead>
+          <tbody>
+            {f.rows.map((b: any) => {
+              const q = Number(qty[b.batch_id]) || 0;
+              const tooMuch = q > Number(b.available_qty) + 0.0001;
+              return (
+                <tr key={b.batch_id} className={tooMuch ? 'row-crit' : q > 0 ? 'row-ok' : ''}>
+                  <td><b>{b.product_name}</b>
+                    <div className="small muted">{b.sku}</div></td>
+                  <td><span className="mono small">{b.batch_no}</span>
+                    {b.grade ? <Chip tone="neutral">{b.grade}</Chip> : null}</td>
+                  <td className="num mono">{num(b.available_qty, 1)}{' '}
+                    <span className="small muted">{b.base_uom}</span></td>
+                  <td className="num">
+                    {b.days_to_expiry == null ? <span className="muted">—</span>
+                      : <Chip tone={b.days_to_expiry <= 2 ? 'danger'
+                          : b.days_to_expiry <= 5 ? 'warn' : 'neutral'}>
+                          {b.days_to_expiry <= 0 ? 'past date' : `${b.days_to_expiry}d`}
+                        </Chip>}
+                  </td>
+                  <td className="num">
+                    <input className="inline num" type="number" step="0.001" min={0}
+                      max={Number(b.available_qty)} style={{ width: 92 }}
+                      value={qty[b.batch_id] ?? ''}
+                      onChange={(e) => setQty((s) => ({ ...s, [b.batch_id]: e.target.value }))} />
+                    {/* The cap is stated, not just enforced — being told "too
+                        much" after typing is worse than being told the limit. */}
+                    {tooMuch ? (
+                      <div className="small text-danger">only {num(b.available_qty, 1)} free</div>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
+            {!f.rows.length ? (
+              <tr><td colSpan={5} className="muted small" style={{ padding: 14 }}>
+                {!from ? 'Choose where it is coming from.'
+                  : stock.loading ? 'Looking at the shelves…'
+                  : f.active > 0 ? 'Nothing matches those filters.'
+                  : 'Nothing on hand there to send.'}
+              </td></tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="section-head"><h2>The lorry</h2><span className="rule" /></div>
+      <div className="grid c3">
+        <Field label="Vehicle">
+          <input list="veh-list" className="mono" value={vehicleReg}
+            onChange={(e) => setVehicleReg(e.target.value.toUpperCase())}
+            placeholder="MH12AB1234" />
+          <datalist id="veh-list">
+            {(vehicles ?? []).map((v: any) => <option key={v.id} value={v.reg_no} />)}
+          </datalist>
+        </Field>
+        <Field label="Driver">
+          <input value={driverName} onChange={(e) => setDriverName(e.target.value)}
+            placeholder="Kishor" />
+        </Field>
+        <Field label="Transport cost (₹)"
+          hint="Goes to Finance as a claim, against this shop.">
+          <input type="number" step="0.01" min={0} value={transportCost}
+            onChange={(e) => setTransportCost(e.target.value)} placeholder="450" />
+        </Field>
+      </div>
+
+      {picked.length ? (
+        <div className="filter-total">
+          <span>
+            <b>{picked.length}</b> batch{picked.length === 1 ? '' : 'es'}
+            {dest ? <span className="muted"> → {dest.name}</span> : null}
+          </span>
+          <span className="row" style={{ gap: 20 }}>
+            <span className="ft-num"><em>Going</em>
+              <b>{num(picked.reduce((a, x) => a + x.q, 0), 1)}</b></span>
+            <span className="ft-num"><em>Worth</em><b>{inr(worth, 0)}</b></span>
+            {Number(transportCost) > 0 ? (
+              <span className="ft-num"><em>Transport</em>
+                <b>{inr(Number(transportCost), 0)}</b></span>
+            ) : null}
+          </span>
+        </div>
+      ) : null}
+
+      <p className="small muted" style={{ marginTop: 12 }}>
+        This takes the stock off the warehouse shelf now and puts the load{' '}
+        <b>in transit</b>. It becomes the shop's stock only when somebody there
+        books it in and counts it.
+      </p>
+    </Modal>
   );
 }
 
@@ -393,7 +700,11 @@ function ReceiveLoadModal({ transfer, onClose, onDone }: {
   const [error, setError] = useState<any>(null);
   const [got, setGot] = useState<Record<string, string>>({});
 
-  const lines = data?.[0]?.lines ?? [];
+  /* Match on the id rather than trusting position. The endpoint used to ignore
+     ?id= and hand back the newest issue, and this modal cheerfully displayed
+     its crates under another load's number. */
+  const load = (data ?? []).find((x: any) => x.id === transfer.id);
+  const lines = load?.lines ?? [];
   const short = lines.some((l: any) =>
     got[l.id] !== undefined && Number(got[l.id]) < Number(l.qty) - 0.001);
 
@@ -577,13 +888,28 @@ function DayCloseModal({ centre, onClose, onDone }: {
 function AskForStockModal({ centre, onClose, onDone }: {
   centre: any; onClose: () => void; onDone: (m: string) => void;
 }) {
-  const { data: products } = useApi<any[]>('/masters/products');
+  const { can } = useAuth();
+  const { data: products, reload: reloadProducts } = useApi<any[]>('/masters/products');
   const [productId, setProductId] = useState('');
   const [qty, setQty] = useState('');
   const [reasoning, setReasoning] = useState('');
   const [priority, setPriority] = useState('NORMAL');
+  const [addingProduct, setAddingProduct] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
+
+  if (addingProduct) {
+    /* One modal at a time — stacking a second over the first is how a dialog
+       ends up behind the thing that opened it. */
+    return (
+      <ProductModal onClose={() => setAddingProduct(false)}
+        onDone={(created?: any) => {
+          setAddingProduct(false);
+          reloadProducts();
+          if (created?.id) setProductId(created.id);
+        }} />
+    );
+  }
 
   return (
     <Modal
@@ -620,10 +946,17 @@ function AskForStockModal({ centre, onClose, onDone }: {
       </p>
       <div className="grid c2">
         <Field label="What do you need">
-          <select value={productId} autoFocus onChange={(e) => setProductId(e.target.value)}>
-            <option value="">Choose…</option>
-            {(products ?? []).map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+          <div className="row" style={{ gap: 6 }}>
+            <select value={productId} autoFocus onChange={(e) => setProductId(e.target.value)}>
+              <option value="">Choose…</option>
+              {(products ?? []).map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            {/* A shop asks for something we have never stocked. Refusing to
+                let them name it is how the request never gets made at all. */}
+            {can('master.product.manage') ? (
+              <button className="btn sm" onClick={() => setAddingProduct(true)}>+ New</button>
+            ) : null}
+          </div>
         </Field>
         <Field label="How much">
           <input type="number" step="0.001" value={qty} onChange={(e) => setQty(e.target.value)} />
@@ -671,11 +1004,10 @@ export function CustomersPage() {
     facets: [
       { key: 'kind', label: 'kind', of: (c: any) => c.kind },
       { key: 'centre', label: 'shop', of: (c: any) => c.centre_name ?? 'us directly' },
-      { key: 'act', label: 'activity', of: (c: any) =>
+      { key: 'act', label: 'activity', all: 'Any activity', of: (c: any) =>
         (c.last_bought ? 'has bought' : 'never bought') },
     ],
     totals: [
-      { label: 'Customers', of: () => 1 },
       { label: 'Orders', of: (c: any) => Number(c.orders) || 0 },
       { label: 'Spent', of: (c: any) => Number(c.spent) || 0, money: true },
     ],

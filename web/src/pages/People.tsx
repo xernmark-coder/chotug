@@ -125,10 +125,10 @@ export function PeoplePage() {
       { key: 'st', label: 'status', of: (p2) => p2.status },
       { key: 'kind', label: 'kind', of: (p2) =>
         p2.supplier_name ? 'supplier' : p2.driver_name ? 'driver' : 'staff' },
-      { key: 'seen', label: 'sign-in', of: (p2) =>
+      { key: 'seen', label: 'sign-in', all: 'Signed in or not', of: (p2) =>
         (p2.last_login_at ? 'has signed in' : 'never signed in') },
     ],
-    totals: [{ label: 'People', of: () => 1 }],
+    totals: [],
   });
 
   return (

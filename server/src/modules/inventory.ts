@@ -311,8 +311,13 @@ inventoryRouter.post('/issues', requires('inventory.stock.issue'), h(async (req)
 
 inventoryRouter.get('/issues', h(async (req) =>
   query(req.actor,
+    /* Each line carries its own id. Without it the centre could only ever book
+     * a load in whole — the moment somebody said "one crate short" there was
+     * no way to name the line they meant, and the request was rejected. */
     `SELECT si.*, w.name AS warehouse_name, u.full_name AS posted_by_name,
+            dw.name AS dest_warehouse_name,
             (SELECT json_agg(json_build_object(
+                      'id', sil.id, 'productId', sil.product_id, 'batchId', sil.batch_id,
                       'productName', p.name, 'batchNo', b.batch_no, 'grade', b.grade,
                       'qty', sil.qty, 'uom', sil.uom, 'rate', sil.rate, 'value', sil.value)
                       ORDER BY sil.line_no)
@@ -322,13 +327,19 @@ inventoryRouter.get('/issues', h(async (req) =>
               WHERE sil.issue_id = si.id) AS lines
        FROM stock_issues si
        JOIN warehouses w ON w.id = si.warehouse_id
+       LEFT JOIN warehouses dw ON dw.id = si.dest_warehouse_id
        LEFT JOIN users u ON u.id = si.posted_by
       WHERE si.company_id = $1
         AND ($2::uuid IS NULL OR si.warehouse_id = $2)
         AND ($3 = '' OR si.reason = $3)
+        /* ?id= asks for one. It used to be accepted and ignored, so a screen
+         * that asked for a particular load was handed the newest one instead
+         * and showed somebody else's crates. */
+        AND ($4::uuid IS NULL OR si.id = $4)
       ORDER BY si.issue_date DESC, si.posted_at DESC
       LIMIT 200`,
-    [req.actor.companyId, req.query.warehouseId ?? null, String(req.query.reason ?? '')])));
+    [req.actor.companyId, req.query.warehouseId ?? null, String(req.query.reason ?? ''),
+     req.query.id ?? null])));
 
 /* ---------------------------------------------------------------------------
  * Cancelling puts the stock back. The ledger is append-only, so this writes a
@@ -653,91 +664,18 @@ inventoryRouter.get('/packable', h(async (req) =>
       ORDER BY COALESCE(b.predicted_expiry_date, b.expiry_date) NULLS LAST, p.name`,
     [req.actor.companyId, req.query.warehouseId ?? null])));
 
-/**
- * Pack a batch into groups. Each group is "N packs of this size at this price"
- * — the 5 kg premium crates and the 2 kg retail bags off one lot of banana.
- */
-inventoryRouter.post('/pack-runs', requires('inventory.stock.issue'), h(async (req) => {
-  const input = body(z.object({
-    batchId: z.string().uuid(),
-    warehouseId: z.string().uuid(),
-    packedOn: z.string().optional(),
-    note: z.string().optional(),
-    groups: z.array(z.object({
-      label: z.string().trim().optional(),
-      count: z.coerce.number().int().min(1, 'At least one pack').max(500, 'Split this into smaller runs'),
-      qtyPerPack: z.coerce.number().positive('How much goes in each pack?'),
-      price: z.coerce.number().nonnegative('What does one pack sell for?'),
-    })).min(1, 'Add at least one group of packs'),
-  }), req.body);
-
-  return withTx(req.actor, async (tx) => {
-    const { rows: sbRows } = await tx.query(
-      `SELECT sb.qty, sb.reserved_qty, sb.product_id, b.batch_no, b.grade,
-              b.landed_rate, b.status AS batch_status, p.name AS product_name, p.base_uom,
-              w.branch_id
-         FROM stock_balances sb
-         JOIN batches b    ON b.id = sb.batch_id
-         JOIN products p   ON p.id = sb.product_id
-         JOIN warehouses w ON w.id = sb.warehouse_id
-        WHERE sb.batch_id = $1 AND sb.warehouse_id = $2 AND sb.company_id = $3
-        FOR UPDATE OF sb`,
-      [input.batchId, input.warehouseId, req.actor.companyId]);
-    const sb = sbRows[0];
-    if (!sb) throw ApiError.notFound('That batch is not in this warehouse');
-    if (sb.batch_status !== 'ACTIVE') throw ApiError.rule('That batch is not active.');
-
-    const wanted = input.groups.reduce((a, g) => a + g.count * g.qtyPerPack, 0);
-    const { rows: already } = await tx.query(
-      `SELECT COALESCE(SUM(qty), 0) AS q FROM packs
-        WHERE batch_id = $1 AND status = 'IN_STOCK'`, [input.batchId]);
-    const available = Number(sb.qty) - Number(sb.reserved_qty);
-    const free = available - Number(already[0].q);
-
-    /* Packing more than exists is how a shop ends up with a barcode for a
-     * crate nobody can find. The stock is not moved here, so nothing else
-     * would catch it until the sale failed. */
-    if (wanted > free + 0.001) {
-      throw ApiError.rule(
-        `That is ${roundQty(wanted)} ${sb.base_uom} of packs from ${roundQty(free)} ${sb.base_uom} still unpacked on this batch.`,
-        { available: free, wanted });
-    }
-
-    const runNo = await nextDocNo(tx, req.actor, sb.branch_id, 'PCK');
-    const { rows: runRows } = await tx.query(
-      `INSERT INTO pack_runs (company_id, branch_id, warehouse_id, batch_id, product_id,
-              run_no, packed_on, pack_count, total_qty, note, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [req.actor.companyId, sb.branch_id, input.warehouseId, input.batchId, sb.product_id,
-       runNo, input.packedOn ?? new Date().toISOString().slice(0, 10),
-       input.groups.reduce((a, g) => a + g.count, 0), money(wanted),
-       input.note ?? null, req.actor.userId]);
-    const run = runRows[0];
-
-    const made: any[] = [];
-    let packNo = 0;
-    for (const g of input.groups) {
-      for (let i = 0; i < g.count; i++) {
-        packNo += 1;
-        const { rows } = await tx.query(
-          `INSERT INTO packs (company_id, run_id, batch_id, product_id, warehouse_id,
-                  code, pack_no, group_label, qty, uom, price, grade, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-           RETURNING id, code, pack_no, group_label, qty, uom, price, grade, status`,
-          [req.actor.companyId, run.id, input.batchId, sb.product_id, input.warehouseId,
-           packCode(), packNo, g.label ?? null, g.qtyPerPack, sb.base_uom,
-           money(g.price), sb.grade, req.actor.userId]);
-        made.push(rows[0]);
-      }
-    }
-
-    await emit(tx, req.actor, 'pack_run', run.id, 'packs.created',
-      { runNo, packs: made.length, batchNo: sb.batch_no, totalQty: wanted });
-
-    return { ...run, productName: sb.product_name, batchNo: sb.batch_no, packs: made };
-  });
-}));
-
+/* ---------------------------------------------------------------------------
+ * POST /pack-runs used to live here — "make me 40 crates of 5 kg", raised from
+ * the packing list. It was replaced by POST /pack-bench/:batchId/run, which
+ * does the same job and three things it could not: a grade per group set by the
+ * person packing rather than inherited from the lot, a weight per box, and a
+ * shelf to put them on. It also required inventory.stock.issue, which the QC
+ * people who actually pack do not hold.
+ *
+ * Deleted rather than left in place: an endpoint nothing calls is a second way
+ * to do a job, discoverable only by whoever reads the routes, and this one
+ * wrote the wrong grade.
+ * ------------------------------------------------------------------------ */
 /* ===========================================================================
  * PACK AND GRADE, ONE JOB
  *
@@ -824,8 +762,21 @@ inventoryRouter.get('/pack-bench/:batchId', h(async (req) => {
         ORDER BY r.code, bn.code`, [req.actor.companyId]),
   ]);
 
-  const unpacked = Number(b.available_qty) - Number(b.packed_qty);
-  return { ...b, unpacked, byGrade, recent, bins };
+  /* Packs can outlive the stock they were made from: issuing a batch to a
+   * centre takes the produce off the shelf and leaves the labels behind, so
+   * "available minus packed" can go negative. It was shown raw, and the bench
+   * read "-6.0 KG still loose" — a number that cannot exist, on the one screen
+   * whose whole job is deciding how much more can be packed.
+   *
+   * Report both: nothing loose, and how far the labels overrun the stock, so
+   * the floor can void the ones whose boxes have gone. */
+  const raw = Number(b.available_qty) - Number(b.packed_qty);
+  return {
+    ...b,
+    unpacked: Math.max(0, raw),
+    overPacked: raw < 0 ? Math.abs(raw) : 0,
+    byGrade, recent, bins,
+  };
 }));
 
 /**
@@ -918,6 +869,123 @@ inventoryRouter.post('/pack-bench/:batchId/box',
         message: `${pack.code} · grade ${pack.grade} · ${roundQty(input.qty)} ${sb.base_uom}`
           + (binId ? ` · on ${input.binCode}` : ' · on the bench')
           + ` (${tot[0].packs} boxes of ${pack.grade} so far)`,
+      };
+    });
+  }));
+
+/**
+ * THE PACKING PHASE — make a run of boxes out of what came off the vehicle.
+ *
+ * What arrives is not what gets stored. Two crates holding 50 kg each come off
+ * the lorry; the floor turns them into twenty 5 kg boxes, each with its own
+ * grade, its own price and its own QR label, and those boxes are what goes on a
+ * shelf. Recording that one box at a time meant twenty identical taps.
+ *
+ * So: how many, how much in each, what grade, what price. Optionally the shelf,
+ * because the trolley is usually right there. Every box still gets its own code
+ * — they are separate things that will be sold separately, and a shared label
+ * would make the second one untraceable the moment the first is sold.
+ *
+ * Different sizes out of one batch are different groups: 20 × 5 kg of A and
+ * 6 × 2 kg of B is one run, one trip to the shelf, two groups.
+ */
+inventoryRouter.post('/pack-bench/:batchId/run',
+  requires('inventory.pack.grade'), h(async (req) => {
+    const input = body(z.object({
+      warehouseId: z.string().uuid(),
+      groups: z.array(z.object({
+        count: z.coerce.number().int()
+          .min(1, 'How many boxes?').max(500, 'Split this into smaller runs'),
+        qtyPerPack: z.coerce.number().positive('How much goes in each box?'),
+        weightKgPerPack: z.coerce.number().positive().optional(),
+        grade: z.string().trim().min(1, 'What grade are these boxes?').max(12),
+        price: z.coerce.number().nonnegative().default(0),
+        label: z.string().trim().max(40).optional(),
+      })).min(1, 'Nothing to make'),
+      /* Straight onto the shelf if the trolley is there; leave it out and the
+       * boxes wait on the bench for the store step. */
+      binCode: z.string().trim().max(40).optional(),
+      note: z.string().trim().max(200).optional(),
+    }), req.body);
+
+    return withTx(req.actor, async (tx) => {
+      const { rows: sbRows } = await tx.query(
+        `SELECT sb.qty, sb.reserved_qty, sb.product_id, b.batch_no,
+                b.status AS batch_status, p.base_uom, p.name AS product_name
+           FROM stock_balances sb
+           JOIN batches b ON b.id = sb.batch_id
+           JOIN products p ON p.id = sb.product_id
+          WHERE sb.batch_id = $1 AND sb.warehouse_id = $2 AND sb.company_id = $3
+          FOR UPDATE OF sb`,
+        [req.params.batchId, input.warehouseId, req.actor.companyId]);
+      const sb = sbRows[0];
+      if (!sb) throw ApiError.notFound('That batch is not in this warehouse');
+      if (sb.batch_status !== 'ACTIVE') throw ApiError.rule('That batch is not active.');
+
+      const wanted = input.groups.reduce((a, g) => a + g.count * g.qtyPerPack, 0);
+      const { rows: already } = await tx.query(
+        `SELECT COALESCE(SUM(qty),0) AS q FROM packs
+          WHERE batch_id = $1 AND status = 'IN_STOCK'`, [req.params.batchId]);
+      const free = Number(sb.qty) - Number(sb.reserved_qty) - Number(already[0].q);
+      if (wanted > free + 0.001) {
+        throw ApiError.rule(
+          `That makes ${roundQty(wanted)} ${sb.base_uom} of boxes from `
+          + `${roundQty(free)} ${sb.base_uom} still unpacked.`,
+          { available: free, wanted });
+      }
+
+      let binId: string | null = null;
+      if (input.binCode) {
+        const { rows: bin } = await tx.query(
+          `SELECT id FROM bins WHERE company_id = $1 AND lower(code) = lower($2) AND is_active`,
+          [req.actor.companyId, input.binCode]);
+        if (!bin[0]) throw ApiError.rule(`No shelf with the code "${input.binCode}".`);
+        binId = bin[0].id;
+      }
+
+      const run = await openPackRun(tx, req.actor, req.params.batchId, input.warehouseId);
+      const { rows: seq } = await tx.query(
+        `SELECT COALESCE(MAX(pack_no),0) AS n FROM packs WHERE run_id = $1`, [run.id]);
+      let packNo = Number(seq[0].n);
+
+      const made: any[] = [];
+      for (const g of input.groups) {
+        for (let i = 0; i < g.count; i++) {
+          packNo += 1;
+          const { rows } = await tx.query(
+            `INSERT INTO packs (company_id, run_id, batch_id, product_id, warehouse_id,
+                    code, pack_no, group_label, qty, uom, price, grade, weight_kg,
+                    graded_by, graded_at, qc_note, bin_id, stored_at, stored_by, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),$15,$16,
+                     CASE WHEN $16::uuid IS NULL THEN NULL ELSE now() END,
+                     CASE WHEN $16::uuid IS NULL THEN NULL ELSE $14::uuid END,$14)
+             RETURNING id, code, pack_no, group_label, qty, uom, price, grade,
+                       weight_kg, bin_id, status`,
+            [req.actor.companyId, run.id, req.params.batchId, sb.product_id,
+             input.warehouseId, packCode(), packNo,
+             g.label ?? `${g.count} × ${roundQty(g.qtyPerPack)} ${sb.base_uom}`,
+             g.qtyPerPack, sb.base_uom, money(g.price), g.grade.toUpperCase(),
+             g.weightKgPerPack ?? null, req.actor.userId, input.note ?? null, binId]);
+          made.push(rows[0]);
+        }
+      }
+
+      await tx.query(
+        `UPDATE pack_runs SET pack_count = pack_count + $2, total_qty = total_qty + $3
+          WHERE id = $1`, [run.id, made.length, wanted]);
+
+      await emit(tx, req.actor, 'pack_run', run.id, 'packs.created', {
+        runNo: run.run_no, packs: made.length, batchNo: sb.batch_no,
+        totalQty: wanted, stored: !!binId,
+      });
+
+      const sizes = input.groups
+        .map((g) => `${g.count} × ${roundQty(g.qtyPerPack)} ${sb.base_uom} ${g.grade.toUpperCase()}`)
+        .join(', ');
+      return {
+        runNo: run.run_no, packs: made, productName: sb.product_name,
+        message: `${sizes} — ${made.length} label(s) ready`
+          + (binId ? ` and on ${input.binCode}.` : '. They are on the bench.'),
       };
     });
   }));

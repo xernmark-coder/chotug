@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { api, useAuth, inr, num, date } from '../lib/api';
+import { api, useAuth, inr, num, date, ago } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
   FilterBar, FilterTotals, useFilters,
@@ -15,14 +15,18 @@ import { Icon } from '../components/icons';
  *
  * The one job that matters: file an invoice against what was actually
  * accepted. Quantities are taken from the receipt rather than typed, so the
- * only thing left to disagree about is the rate — which is exactly what the
- * three-way match exists to arbitrate.
+ * only thing left to disagree about is the rate — and the office is shown that
+ * difference automatically when the bill lands.
  * ======================================================================== */
 
 export function SupplierPortalPage() {
   const { me } = useAuth();
-  const [tab, setTab] = useState<'orders' | 'bill' | 'invoices'>('orders');
+  const toast = useToast();
+  const [tab, setTab] = useState<'orders' | 'rates' | 'bill' | 'invoices'>('orders');
   const [billing, setBilling] = useState<any>(null);
+  const [pricing, setPricing] = useState<any>(null);
+  const [askingVehicle, setAskingVehicle] = useState<any>(null);
+  const [addingProduct, setAddingProduct] = useState(false);
 
   const meSup = useApi<any>('/supplier/me');
   const orders = useApi<any[]>('/supplier/orders');
@@ -31,6 +35,8 @@ export function SupplierPortalPage() {
   const [askingFor, setAskingFor] = useState<any>(null);
   const receipts = useApi<any[]>('/supplier/receipts');
   const invoices = useApi<any[]>('/supplier/invoices');
+  const rates = useApi<any[]>('/supplier/rates');
+  const catalogue = useApi<any[]>('/supplier/catalogue');
 
   /* Declared above the loading guard: a hook cannot sit behind an early
    * return. A supplier with two hundred orders needs these as much as the
@@ -39,10 +45,10 @@ export function SupplierPortalPage() {
     date: (o: any) => o.order_date,
     search: (o: any) => [o.po_no, o.branch_name, o.status].filter(Boolean).join(' '),
     facets: [
-      { key: 'st', label: 'state', of: (o: any) => o.status },
-      { key: 'ans', label: 'answer', of: (o: any) => o.supplier_response },
+      { key: 'st', label: 'state', all: 'Any state', of: (o: any) => o.status },
+      { key: 'ans', label: 'answer', all: 'Any answer', of: (o: any) => o.supplier_response },
       { key: 'br', label: 'branch', of: (o: any) => o.branch_name },
-      { key: 'bill', label: 'billing', of: (o: any) => (o.invoiced ? 'invoiced' : 'not billed') },
+      { key: 'bill', label: 'billing', all: 'Billed or not', of: (o: any) => (o.invoiced ? 'invoiced' : 'not billed') },
     ],
     totals: [
       { label: 'Items', of: (o: any) => Number(o.line_count) || 0 },
@@ -53,12 +59,25 @@ export function SupplierPortalPage() {
     date: (r: any) => r.posting_date,
     search: (r: any) => [r.grn_no, r.po_no].filter(Boolean).join(' '),
     facets: [
-      { key: 'b', label: 'billing', of: (r: any) => (r.already_billed ? 'billed' : 'not billed') },
+      { key: 'b', label: 'billing', all: 'Billed or not', of: (r: any) => (r.already_billed ? 'billed' : 'not billed') },
     ],
     totals: [
       { label: 'Deliveries', of: () => 1 },
       { label: 'Accepted', of: (r: any) =>
         (r.lines ?? []).reduce((a: number, l: any) => a + Number(l.acceptedQty || 0), 0) },
+    ],
+  });
+  const fRates = useFilters<any>(rates.data, {
+    search: (r: any) => [r.product_name, r.sku, r.category_name, r.supplier_code]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'cat', label: 'category', of: (r: any) => r.category_name },
+      { key: 'set', label: 'priced', all: 'Priced or not', of: (r: any) =>
+        r.quoted_rate == null ? 'no price yet' : r.is_stale ? 'out of date' : 'current' },
+    ],
+    totals: [
+      { label: 'Products', of: () => 1 },
+      { label: 'Priced', of: (r: any) => (r.quoted_rate != null ? 1 : 0) },
     ],
   });
   const fInvoices = useFilters<any>(invoices.data, {
@@ -102,22 +121,30 @@ export function SupplierPortalPage() {
       subtitle={`Supplying ${s.buyer_name} · ${s.payment_terms_days} day terms`}
     >
       <div className="grid c5 mb">
+        {/* Each card is the front door to the tab that answers it. A number
+            you cannot click is a number you have to go and find again. */}
         <Kpi label="Waiting for your answer" value={num(toAnswer.length, 0)}
           tone={toAnswer.length ? 'crit' : 'good'}
-          foot={toAnswer.length ? 'accept or decline these' : 'nothing to answer'} />
-        <Kpi label="Open orders" value={num(open.length, 0)} foot="confirmed with you" />
+          foot={toAnswer.length ? 'accept or decline these' : 'nothing to answer'}
+          onClick={() => setTab('orders')} />
+        <Kpi label="Open orders" value={num(open.length, 0)} foot="confirmed with you"
+          onClick={() => setTab('orders')} />
         <Kpi label="Delivered, not billed" value={num(unbilled.length, 0)}
           tone={unbilled.length ? 'warn' : undefined}
-          foot={unbilled.length ? 'file an invoice for these' : 'nothing waiting'} />
+          foot={unbilled.length ? 'file an invoice for these' : 'nothing waiting'}
+          onClick={() => setTab('bill')} />
         <Kpi label="Awaiting payment" value={inr(outstanding, 0)}
-          foot="approved and payable" />
+          foot="approved and payable"
+          onClick={() => setTab('invoices')} />
         <Kpi label="Needs your attention" value={num(held.length, 0)}
           tone={held.length ? 'crit' : 'good'}
-          foot={held.length ? 'invoices on hold' : 'nothing on hold'} />
+          foot={held.length ? 'invoices on hold' : 'nothing on hold'}
+          onClick={() => setTab('invoices')} />
       </div>
 
       <div className="tabs">
         {([['orders', `Orders (${open.length})`],
+           ['rates', `My rates (${(rates.data ?? []).filter((r: any) => r.quoted_rate != null).length}/${(rates.data ?? []).length})`],
            ['bill', `To bill (${unbilled.length})`],
            ['invoices', `My invoices (${(invoices.data ?? []).length})`]] as const).map(([k, l]) => (
           <button key={k} className={`tab ${tab === k ? 'active' : ''}`} onClick={() => setTab(k)}>{l}</button>
@@ -153,6 +180,24 @@ export function SupplierPortalPage() {
                   onAsk={() => setAskingFor(o)}
                   onSend={() => setSending(o)} />
               ) },
+              /* Whether a lorry is coming, and a way to ask for one. Until
+                 this was here the only way to ask was the telephone. */
+              { key: 'tr', head: 'Transport', render: (o: any) => (
+                o.pickup_no ? (
+                  <div><Chip tone="ok">{String(o.pickup_status ?? '').toLowerCase() || 'arranged'}</Chip>
+                    <div className="small muted">
+                      {o.pickup_vehicle ?? o.pickup_driver ?? o.pickup_no}
+                      {o.pickup_on ? ` · ${date(o.pickup_on)}` : ''}
+                    </div></div>
+                ) : o.transport_requested_at ? (
+                  <Chip tone="warn">asked {ago(o.transport_requested_at)}</Chip>
+                ) : ['APPROVED', 'CONFIRMED'].includes(o.status)
+                     && Number(o.receipts) === 0 && !o.supplier_marked_sent_at ? (
+                  <button className="btn sm ghost" onClick={() => setAskingVehicle(o)}>
+                    Ask for a vehicle
+                  </button>
+                ) : <span className="muted small">—</span>
+              ) },
               { key: 'b', head: 'Billed', render: (o: any) => o.invoiced
                 ? <Chip tone="ok">invoiced</Chip>
                 : Number(o.receipts) > 0 ? <Chip tone="warn">bill it</Chip>
@@ -164,6 +209,78 @@ export function SupplierPortalPage() {
                 : 'Orders appear here once they are confirmed with you.'} />}
           />
         </div></div>
+        </>
+      ) : null}
+
+      {tab === 'rates' ? (
+        <>
+          <div className="banner info mb">
+            <span><Icon name="info" size={16} /></span>
+            <div>
+              Put your rate against each product and the buyer sees it straight away —
+              no phone call. Change it whenever you like; the old rate is kept, so you
+              both have a record of what you were asking and when.
+            </div>
+          </div>
+          <FilterBar f={fRates} placeholder="Search a product">
+            <span className="spacer" />
+            <button className="btn sm" onClick={() => setAddingProduct(true)}>
+              + I also sell…
+            </button>
+          </FilterBar>
+          <FilterTotals f={fRates} noun="product" />
+          <div className="card"><div className="card-body tight">
+            <DataTable
+              loading={rates.loading}
+              rows={fRates.rows}
+              rowTone={(r: any) => (r.is_stale ? 'warn' : undefined)}
+              cols={[
+                { key: 'p', head: 'Product', render: (r: any) => (
+                  <div className="row" style={{ gap: 8 }}>
+                    <Icon name={r.icon ?? 'produce'} size={17} />
+                    <div><b>{r.product_name}</b>
+                      <div className="small muted">
+                        {r.category_name ?? r.sku}
+                        {r.supplier_code ? ` · you call it ${r.supplier_code}` : ''}
+                      </div></div>
+                  </div>) },
+                { key: 'lp', head: 'We last paid you', num: true, render: (r: any) =>
+                  r.last_paid_rate != null
+                    ? <div>{inr(r.last_paid_rate)}
+                        <div className="small muted">{r.last_purchase_at ? date(r.last_purchase_at) : ''}</div></div>
+                    : <span className="muted small">never bought</span> },
+                { key: 'now', head: 'You are asking', num: true, render: (r: any) =>
+                  r.quoted_rate == null
+                    ? <span className="muted small">not set</span>
+                    : <div>
+                        <b>{inr(r.quoted_rate)}</b>
+                        {r.change_pct != null ? (
+                          <div className={`small ${Number(r.change_pct) > 0 ? 'text-danger' : 'muted'}`}>
+                            {Number(r.change_pct) > 0 ? '+' : ''}{num(r.change_pct, 1)}% on last
+                          </div>) : null}
+                      </div> },
+                { key: 'q', head: 'You have', num: true, render: (r: any) =>
+                  r.available_qty != null
+                    ? <span>{num(r.available_qty, 0)} <span className="small muted">{r.uom ?? r.base_uom}</span></span>
+                    : <span className="muted">—</span> },
+                { key: 'v', head: 'Good until', render: (r: any) =>
+                  r.valid_till
+                    ? <span className={r.is_stale ? 'chip warn' : 'small'}>{date(r.valid_till)}</span>
+                    : <span className="muted small">no end date</span> },
+                { key: 'w', head: 'Told them', render: (r: any) =>
+                  r.quoted_at ? <span className="small muted">{ago(r.quoted_at)}</span> : '—' },
+                { key: 'a', head: '', width: 110, render: (r: any) => (
+                  <button className="btn sm primary" onClick={() => setPricing(r)}>
+                    {r.quoted_rate == null ? 'Set a rate' : 'Change'}
+                  </button>) },
+              ]}
+              empty={<Empty icon="🏷️"
+                title={fRates.active > 0 ? 'No product matches those filters'
+                  : 'Nothing to price yet'}
+                hint={fRates.active > 0 ? 'Clear a filter to widen the search.'
+                  : 'Products appear here once the buyer sets you up to supply them, or once you have supplied one.'} />}
+            />
+          </div></div>
         </>
       ) : null}
 
@@ -241,6 +358,23 @@ export function SupplierPortalPage() {
           />
         </div></div>
         </>
+      ) : null}
+
+      {addingProduct ? (
+        <AddMyProductModal rows={catalogue.data ?? []} onClose={() => setAddingProduct(false)}
+          onDone={(m) => {
+            setAddingProduct(false); catalogue.reload(); rates.reload(); toast(m, 'ok');
+          }} />
+      ) : null}
+
+      {askingVehicle ? (
+        <AskVehicleModal order={askingVehicle} onClose={() => setAskingVehicle(null)}
+          onDone={(m) => { setAskingVehicle(null); orders.reload(); toast(m, 'ok'); }} />
+      ) : null}
+
+      {pricing ? (
+        <RateModal row={pricing} onClose={() => setPricing(null)}
+          onDone={(m) => { setPricing(null); rates.reload(); toast(m, 'ok'); }} />
       ) : null}
 
       {billing ? (
@@ -697,6 +831,246 @@ function AskForPaymentModal({ order, onClose, onDone }: {
           </div>
         </div>
       ) : null}
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * WHAT THEY ARE ASKING TODAY
+ *
+ * Deliberately four fields. A supplier updating a price is standing in a mandi
+ * on a phone, and every extra box is a reason to do it tomorrow instead.
+ * ------------------------------------------------------------------------ */
+function RateModal({ row, onClose, onDone }: {
+  row: any; onClose: () => void; onDone: (m: string) => void;
+}) {
+  const [rate, setRate] = useState(row.quoted_rate != null ? String(row.quoted_rate) : '');
+  const [qty, setQty] = useState(row.available_qty != null ? String(row.available_qty) : '');
+  const [grade, setGrade] = useState(row.offered_grade ?? row.typical_grade ?? '');
+  const [validTill, setValidTill] = useState(row.valid_till ?? '');
+  const [note, setNote] = useState(row.note ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  const n = Number(rate);
+  const last = Number(row.last_paid_rate);
+  const movePct = last > 0 && n > 0 ? ((n - last) / last) * 100 : null;
+
+  return (
+    <Modal
+      title={row.product_name}
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy || !(n > 0)}
+          onClick={async () => {
+            setBusy(true); setError(null);
+            try {
+              const r = await api.post<any>('/supplier/rates', {
+                productId: row.product_id,
+                rate: n,
+                availableQty: qty ? Number(qty) : undefined,
+                grade: grade || undefined,
+                validTill: validTill || undefined,
+                note: note.trim() || undefined,
+              });
+              onDone(r.message);
+            } catch (e: any) { setError(e); } finally { setBusy(false); }
+          }}>Tell the buyer</button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+      <div className="grid c2">
+        <Field label={`Your rate per ${row.base_uom}`}>
+          <input type="number" step="0.01" min={0} autoFocus value={rate}
+            onChange={(e) => setRate(e.target.value)} placeholder="72" />
+        </Field>
+        <Field label="How much you have" hint="Optional — helps the buyer size the order.">
+          <input type="number" step="0.001" min={0} value={qty}
+            onChange={(e) => setQty(e.target.value)} placeholder="400" />
+        </Field>
+      </div>
+
+      {/* The number that starts the argument, shown before it is sent rather
+          than after. A supplier who has not noticed they are asking 30% more
+          than last week would rather find out here. */}
+      {movePct != null && Math.abs(movePct) >= 0.5 ? (
+        <div className={`banner ${Math.abs(movePct) > 20 ? 'warn' : 'info'} mb`}>
+          <span><Icon name={Math.abs(movePct) > 20 ? 'alert' : 'info'} size={16} /></span>
+          <div className="small">
+            That is <b>{movePct > 0 ? 'up' : 'down'} {num(Math.abs(movePct), 1)}%</b> on the{' '}
+            {inr(row.last_paid_rate)} we last paid you
+            {row.last_purchase_at ? ` on ${date(row.last_purchase_at)}` : ''}.
+            {movePct > 20 ? ' The buyer will ask why — the note below is the place to say.' : ''}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="grid c2">
+        <Field label="Grade" hint="Optional.">
+          <select value={grade} onChange={(e) => setGrade(e.target.value)}>
+            <option value="">Not stated</option>
+            {['A', 'B', 'C'].map((g) => <option key={g} value={g}>{g}</option>)}
+          </select>
+        </Field>
+        <Field label="Good until" hint="Leave blank if it stands until you change it.">
+          <input type="date" value={validTill} onChange={(e) => setValidTill(e.target.value)} />
+        </Field>
+      </div>
+      <Field label="Anything the buyer should know">
+        <input value={note} onChange={(e) => setNote(e.target.value)}
+          placeholder="Ratnagiri lot, small size this week" />
+      </Field>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * ASKING FOR A LORRY
+ *
+ * A request, not a booking. The office still arranges it and may say no — what
+ * this guarantees is that the asking is on somebody's list rather than
+ * depending on who answered the phone.
+ * ------------------------------------------------------------------------ */
+function AskVehicleModal({ order, onClose, onDone }: {
+  order: any; onClose: () => void; onDone: (m: string) => void;
+}) {
+  const [note, setNote] = useState('');
+  const [readyOn, setReadyOn] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  return (
+    <Modal
+      title={`A vehicle for ${order.po_no}`}
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy}
+          onClick={async () => {
+            setBusy(true); setError(null);
+            try {
+              const r = await api.post<any>(`/supplier/orders/${order.id}/request-vehicle`, {
+                note: note.trim() || undefined,
+                readyOn: readyOn || undefined,
+              });
+              onDone(r.message);
+            } catch (e: any) { setError(e); } finally { setBusy(false); }
+          }}>Ask the buyer</button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+      <p className="small muted mb">
+        {order.transport_by === 'SUPPLIER'
+          ? 'This order is marked as your transport. Asking is still fine — the buyer can send a vehicle if they have one free.'
+          : 'The buyer arranges the vehicle for this order.'}
+      </p>
+      <Field label="When will it be ready" hint="Optional — helps them plan the run.">
+        <input type="date" value={readyOn} onChange={(e) => setReadyOn(e.target.value)} />
+      </Field>
+      <Field label="Anything they should know">
+        <input value={note} autoFocus onChange={(e) => setNote(e.target.value)}
+          placeholder="40 crates, needs a closed body" />
+      </Field>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * "I ALSO SELL THIS"
+ *
+ * Picked from the catalogue, never typed. A supplier inventing "Aphonso" would
+ * sit next to Alphonso in every report from then on, and no report would ever
+ * add the two together again. Adding a genuinely new product stays the buyer's
+ * job; saying which existing ones you stock does not need to.
+ * ------------------------------------------------------------------------ */
+function AddMyProductModal({ rows, onClose, onDone }: {
+  rows: any[]; onClose: () => void; onDone: (m: string) => void;
+}) {
+  const [productId, setProductId] = useState('');
+  const [code, setCode] = useState('');
+  const [grade, setGrade] = useState('');
+  const [q, setQ] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  const available = rows.filter((r) => !r.already_mine);
+  const needle = q.trim().toLowerCase();
+  const shown = needle
+    ? available.filter((r) =>
+        `${r.name} ${r.sku} ${r.category_name ?? ''}`.toLowerCase().includes(needle))
+    : available;
+
+  return (
+    <Modal
+      title="Something else you sell"
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy || !productId}
+          onClick={async () => {
+            setBusy(true); setError(null);
+            try {
+              const r = await api.post<any>('/supplier/catalogue', {
+                productId,
+                supplierCode: code.trim() || undefined,
+                typicalGrade: grade || undefined,
+              });
+              onDone(r.message);
+            } catch (e: any) { setError(e); } finally { setBusy(false); }
+          }}>Add it to my list</button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+      {!available.length ? (
+        <Empty icon="👍" title="You are already on every product we buy"
+          hint="Put a rate against the ones you have today." />
+      ) : (
+        <>
+          <Field label="Which one">
+            <input value={q} autoFocus onChange={(e) => setQ(e.target.value)}
+              placeholder="Search the list…" />
+          </Field>
+          <div className="table-wrap" style={{ maxHeight: '38vh', overflowY: 'auto' }}>
+            <table className="data">
+              <tbody>
+                {shown.map((r) => (
+                  <tr key={r.id} className={productId === r.id ? 'row-ok' : ''}
+                    style={{ cursor: 'pointer' }} onClick={() => setProductId(r.id)}>
+                    <td style={{ width: 34 }}>
+                      <input type="radio" readOnly checked={productId === r.id}
+                        style={{ width: 16, height: 16 }} />
+                    </td>
+                    <td>
+                      <div className="row" style={{ gap: 8 }}>
+                        <Icon name={r.icon ?? 'produce'} size={17} />
+                        <div><b>{r.name}</b>
+                          <div className="small muted">{r.category_name ?? r.sku}</div></div>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {!shown.length ? (
+                  <tr><td className="muted small" style={{ padding: 12 }}>
+                    Nothing matches that. If we do not buy it at all, ask the buyer to add it.
+                  </td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+          <div className="grid c2" style={{ marginTop: 12 }}>
+            <Field label="What you call it" hint="Optional — printed on your delivery note.">
+              <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="HAP-01" />
+            </Field>
+            <Field label="Grade you usually send" hint="Optional.">
+              <select value={grade} onChange={(e) => setGrade(e.target.value)}>
+                <option value="">Not stated</option>
+                {['A', 'B', 'C'].map((g) => <option key={g} value={g}>{g}</option>)}
+              </select>
+            </Field>
+          </div>
+        </>
+      )}
     </Modal>
   );
 }

@@ -405,14 +405,17 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         { to: '/intake', label: 'Warehouse Intake', icon: 'scale', perms: ['receiving.weighment.create'] },
         { to: '/gate', label: 'Gate & Receiving', icon: 'gate', perms: ['receiving.gate.create', 'receiving.weighment.create', 'quality.inspection.create', 'receiving.grn.submit'] },
         { to: '/grns', label: 'Goods Receipts', icon: 'inbox', perms: ['receiving.grn.create', 'receiving.grn.submit'] },
-        { to: '/putaway', label: 'Put-away', icon: 'shelf', perms: ['receiving.putaway.confirm'] },
         { to: '/warehouse-map', label: 'Warehouse Map', icon: 'shelf',
           perms: ['master.location.manage', 'inventory.pack.store'] },
         { to: '/stock', label: 'Stock & Batches', icon: 'crates',
-          perms: ['receiving.grn.create', 'receiving.putaway.confirm', 'inventory.stock.issue', 'reports.purchase.view'] },
+          perms: ['receiving.grn.create', 'inventory.pack.grade', 'inventory.stock.issue', 'reports.purchase.view'] },
         // Selling is where stock stops being cost and becomes revenue, so it
         // sits with the money, not with the warehouse shelves.
-        { to: '/packing', label: 'Packing & Labels', icon: 'tag', perms: ['inventory.stock.issue'] },
+        /* Quality and packing are one job at one bench, so the people who do
+           the grading have to be able to reach it. QC holds inventory.pack.*
+           and used to be locked out of the only screen that leads there. */
+        { to: '/packing', label: 'Quality & Packing', icon: 'tag',
+          perms: ['inventory.stock.issue', 'inventory.pack.grade'] },
         { to: '/sales', label: 'Sell & Profit', icon: 'coins',
           perms: ['inventory.stock.issue', 'data.margin.view'] },
         { to: '/dispatch', label: 'Dispatch', icon: 'route', perms: ['logistics.pickup.manage', 'receiving.gate.create'] },
@@ -636,6 +639,13 @@ export type Facet<T> = {
   label: string;
   /** The value this row falls under, or null to leave it out of that facet. */
   of: (row: T) => string | null | undefined;
+  /**
+   * The "no filter" option. Defaults to `Every {label}`, which reads correctly
+   * for a noun — "Every supplier", "Every grade" — and badly for anything
+   * else: "Every priced", "Every freshness", "Every timing". Where the facet
+   * is a state rather than a thing, name the option here.
+   */
+  all?: string;
 };
 
 export type Total<T> = {
@@ -732,6 +742,16 @@ export function useFilters<T>(rows: T[] | null | undefined, spec: FilterSpec<T>)
 export function FilterBar({ f, placeholder, children }: {
   f: ReturnType<typeof useFilters<any>>; placeholder?: string; children?: React.ReactNode;
 }) {
+  /* Nothing to filter, nothing to filter with. FilterTotals already hides
+   * itself on an empty list; the bar did not, so a screen with no rows still
+   * offered a search box and a row of dropdowns that could never do anything.
+   *
+   * Children are the exception and the reason this is not simply
+   * `if (!f.all.length) return null`: they are server-side controls — a date
+   * range, a branch picker — and the list may be empty *because* of them.
+   * Hiding those would strand somebody with no way to widen the search. */
+  if (!f.all.length && !children) return null;
+
   return (
     <div className="search-bar">
       {f.hasDate ? (
@@ -742,7 +762,7 @@ export function FilterBar({ f, placeholder, children }: {
       {f.facets.map((facet) => (
         <select key={facet.key} value={f.picked[facet.key] ?? ''}
           onChange={(e) => f.setPicked((s: any) => ({ ...s, [facet.key]: e.target.value }))}>
-          <option value="">{`Every ${facet.label.toLowerCase()}`}</option>
+          <option value="">{facet.all ?? `Every ${facet.label.toLowerCase()}`}</option>
           {(f.options[facet.key] ?? []).map((o) => (
             <option key={o} value={o}>{o.replace(/_/g, ' ').toLowerCase()}</option>))}
         </select>

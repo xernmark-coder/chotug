@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api, useAuth, inr, num, ago } from '../lib/api';
 import { Chip, Empty, ErrorBanner, Kpi, Layout, Loading, Modal, useApi, useToast } from '../components/ui';
 import { Icon } from '../components/icons';
+import { LabelSheet } from './Packing';
 
 /* ===========================================================================
  * THE PACKING BENCH — QUALITY AND PACKING ARE ONE JOB
@@ -37,6 +38,8 @@ export function PackBenchPage() {
   const { data, loading, error, reload } = useApi<any>(`/inventory/pack-bench/${batchId}`, [batchId]);
 
   const [grade, setGrade] = useState('A');
+  const [making, setMaking] = useState(false);
+  const [printing, setPrinting] = useState<any[] | null>(null);
   const [qty, setQty] = useState('');
   const [price, setPrice] = useState('');
   const [binCode, setBinCode] = useState('');
@@ -98,6 +101,22 @@ export function PackBenchPage() {
         <Kpi label="Quality off the vehicle" value={data.lot_grade ?? '—'}
           foot="what the lot was graded" />
       </div>
+
+      {/* Labels outliving their stock. Sending a batch to a shop takes the
+          produce and leaves the boxes' labels behind, and until they are voided
+          every count on this screen is wrong. */}
+      {Number(data.overPacked) > 0 ? (
+        <div className="banner danger mb">
+          <span><Icon name="alert" size={16} /></span>
+          <div>
+            <b>There are labels here for {num(data.overPacked, 1)} {data.base_uom} more than
+            this batch still holds.</b>{' '}
+            The produce has gone — sold, sent to a shop or written off — and its boxes were
+            left behind. Void the labels whose boxes are no longer here; nothing can be
+            packed from this batch until the two agree.
+          </div>
+        </div>
+      ) : null}
 
       <div className="grid sidebar-right">
         <div className="stack">
@@ -170,6 +189,14 @@ export function PackBenchPage() {
                 onClick={addBox}>
                 {busy ? 'Labelling…' : `Pack this box as ${grade}`}
               </button>
+              {/* One at a time is right for odd boxes and wrong for the common
+                  case: two crates of 50 kg become twenty 5 kg boxes, and that
+                  was twenty identical taps. */}
+              {canGrade ? (
+                <button className="btn block mt" onClick={() => setMaking(true)}>
+                  …or make a run of the same size
+                </button>
+              ) : null}
               {!canGrade ? (
                 <p className="small muted mt">You can watch this, but not grade boxes.</p>
               ) : null}
@@ -233,6 +260,18 @@ export function PackBenchPage() {
           </div>
         </div>
       </div>
+
+      {printing ? (
+        <LabelSheet packs={printing} onClose={() => { setPrinting(null); reload(); }} />
+      ) : null}
+
+      {making ? (
+        <MakeBoxesModal bench={data} grade={grade} onClose={() => setMaking(false)}
+          onDone={(m, made) => {
+            setMaking(false); reload(); toast(m, 'ok');
+            if (made?.length) setPrinting(made);
+          }} />
+      ) : null}
 
       {storing ? (
         <StoreModal packs={onBench} bins={data.bins ?? []}
@@ -306,6 +345,156 @@ function StoreModal({ packs, bins, onClose, onDone }: {
         </tbody>
       </table>
       {!packs.length ? <Empty title="Nothing on the bench" /> : null}
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * A RUN OF BOXES
+ *
+ * What came off the vehicle is not what gets stored. Two crates holding 50 kg
+ * each become twenty 5 kg boxes, every one with its own grade, price and QR
+ * label, and it is those boxes that go on a shelf.
+ *
+ * The arithmetic is shown as it is typed, because "how many can I make out of
+ * what is left" is the question being answered, and getting it wrong means
+ * either boxes with nothing to put in them or produce left on the bench.
+ * ------------------------------------------------------------------------ */
+function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
+  bench: any; grade: string; onClose: () => void;
+  onDone: (m: string, made?: any[]) => void;
+}) {
+  const [count, setCount] = useState('');
+  const [size, setSize] = useState('');
+  const [grade, setGrade] = useState(initialGrade);
+  const [price, setPrice] = useState('');
+  const [binCode, setBinCode] = useState('');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  const n = Number(count) || 0;
+  const per = Number(size) || 0;
+  const uses = n * per;
+  const free = Number(bench.unpacked) || 0;
+  const over = Number(bench.overPacked) || 0;
+  const tooMuch = uses > free + 0.001;
+  const leftOver = Math.max(0, free - uses);
+
+  /* The whole point of the screen: how many boxes this size fit in what is
+     left. Offered rather than imposed — an odd last box is normal. */
+  const fits = per > 0 ? Math.floor((free + 0.001) / per) : 0;
+
+  return (
+    <Modal
+      title={`Make boxes out of ${bench.product_name}`}
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy || !n || !per || tooMuch}
+          onClick={async () => {
+            setBusy(true); setError(null);
+            try {
+              const r = await api.post<any>(`/inventory/pack-bench/${bench.batch_id}/run`, {
+                warehouseId: bench.warehouse_id,
+                binCode: binCode.trim() || undefined,
+                note: note.trim() || undefined,
+                groups: [{
+                  count: n, qtyPerPack: per, grade,
+                  price: Number(price) || 0,
+                }],
+              });
+              onDone(r.message, r.packs);
+            } catch (e: any) { setError(e); } finally { setBusy(false); }
+          }}>
+          {n && per ? `Make ${n} box${n === 1 ? '' : 'es'}` : 'Make them'}
+        </button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+      {over > 0 ? (
+        <div className="banner danger mb">
+          <span><Icon name="alert" size={16} /></span>
+          <div className="small">
+            This batch already has labels for <b>{num(over, 1)} {bench.base_uom}</b> more than it
+            holds. Void the stale ones before packing any more, or the counts stay wrong.
+          </div>
+        </div>
+      ) : (
+        <p className="small muted mb">
+          <b>{num(free, 1)} {bench.base_uom}</b> of {bench.product_name} is still loose on this
+          batch. Every box gets its own label, so they can be sold and traced separately.
+        </p>
+      )}
+
+      <div className="grid c2">
+        <div>
+          <label className="lbl">How much in each box ({bench.base_uom})</label>
+          <input type="number" step="0.001" min={0} autoFocus value={size}
+            onChange={(e) => setSize(e.target.value)} placeholder="5" />
+        </div>
+        <div>
+          <label className="lbl">How many boxes</label>
+          <input type="number" min={1} value={count}
+            onChange={(e) => setCount(e.target.value)} placeholder="20" />
+          {fits > 0 && n !== fits ? (
+            <button className="btn sm ghost mt" onClick={() => setCount(String(fits))}>
+              {fits} fit{fits === 1 ? 's' : ''} — use that
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="grid c2 mt">
+        <div>
+          <label className="lbl">Quality of these boxes</label>
+          <div className="row" style={{ gap: 5 }}>
+            {GRADES.map((g) => (
+              <button key={g.key} className={`btn sm ${grade === g.key ? 'primary' : ''}`}
+                onClick={() => setGrade(g.key)}>{g.label}</button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <label className="lbl">Price on each label (₹)</label>
+          <input type="number" step="0.01" min={0} value={price}
+            onChange={(e) => setPrice(e.target.value)} placeholder="120" />
+        </div>
+      </div>
+
+      <div className="grid c2 mt">
+        <div>
+          <label className="lbl">Shelf, if they go now</label>
+          <input value={binCode} onChange={(e) => setBinCode(e.target.value.toUpperCase())}
+            placeholder="scan · R-A1-2" />
+        </div>
+        <div>
+          <label className="lbl">Anything worth noting</label>
+          <input value={note} onChange={(e) => setNote(e.target.value)}
+            placeholder="Small size this lot" />
+        </div>
+      </div>
+
+      {n > 0 && per > 0 ? (
+        <div className={`banner ${tooMuch ? 'danger' : 'info'} mt`}>
+          <span><Icon name={tooMuch ? 'alert' : 'info'} size={16} /></span>
+          <div className="small">
+            {tooMuch ? (
+              <>That is <b>{num(uses, 1)} {bench.base_uom}</b> of boxes out of{' '}
+              <b>{num(free, 1)}</b> still loose. Make fewer, or smaller.</>
+            ) : (
+              <>
+                {n} × {num(per, 1)} {bench.base_uom} = <b>{num(uses, 1)} {bench.base_uom}</b>
+                {leftOver > 0.001
+                  ? <> · {num(leftOver, 1)} {bench.base_uom} left loose on the bench</>
+                  : <> · nothing left over</>}
+                {Number(price) > 0
+                  ? <> · {inr(Number(price) * n, 0)} of labels</> : null}
+              </>
+            )}
+          </div>
+        </div>
+      ) : null}
     </Modal>
   );
 }

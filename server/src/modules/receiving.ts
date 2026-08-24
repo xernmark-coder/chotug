@@ -1180,6 +1180,29 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
 
         await tx.query(`UPDATE grn_lines SET batch_id=$2 WHERE id=$1`, [grnLine.id, batch.id]);
 
+        /* What we actually paid this supplier for this product, recorded at the
+         * only moment it is known for certain.
+         *
+         * supplier_products.last_rate was read in three places and written in
+         * none, so "what did we pay them last time" was permanently blank —
+         * the buy list, the supplier catalogue and the rate comparison all
+         * showed a dash. The same upsert creates the supplier-product link if
+         * it is missing, which is what earns the pair its tracking code. */
+        await tx.query(
+          `INSERT INTO supplier_products
+             (company_id, supplier_id, product_id, typical_grade,
+              last_rate, last_purchase_at, created_by, updated_by)
+           VALUES ($1,$2,$3,$4,$5,now(),$6,$6)
+           ON CONFLICT (supplier_id, product_id) DO UPDATE
+              SET last_rate = EXCLUDED.last_rate,
+                  last_purchase_at = EXCLUDED.last_purchase_at,
+                  typical_grade = COALESCE(supplier_products.typical_grade, EXCLUDED.typical_grade),
+                  is_active = true,
+                  updated_by = EXCLUDED.updated_by,
+                  updated_at = now()`,
+          [req.actor.companyId, g.supplier_id, l.productId, l.grade ?? null,
+           l.rate, req.actor.userId]);
+
         /* --- labels (§14): one lot label plus optional per-crate labels --- */
         const lotCode = await nextDocNo(tx, req.actor, g.branch_id, 'LABEL');
         await tx.query(
@@ -1236,25 +1259,30 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
             ORDER BY b.is_pickface DESC, b.current_fill_kg ASC LIMIT 1`,
           [g.warehouse_id, p?.storage_type ?? 'AMBIENT', l.netWeightKg ?? 0]);
 
-        const taskNo = await nextDocNo(tx, req.actor, g.branch_id, 'PUT');
-        const { rows: pt } = await tx.query(
-          `INSERT INTO putaway_tasks (company_id, warehouse_id, task_no, grn_line_id, batch_id,
-                product_id, qty, weight_kg, rotation_rule, suggested_zone_id, suggested_rack_id,
-                suggested_bin_id, status, created_by, updated_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'PENDING',$13,$13)
-           RETURNING id, task_no`,
-          [req.actor.companyId, g.warehouse_id, taskNo, grnLine.id, batch.id, l.productId,
-           l.acceptedQty, l.netWeightKg ?? null, p?.rotation_rule ?? 'FEFO',
-           bin[0]?.zone_id ?? null, bin[0]?.rack_id ?? null, bin[0]?.bin_id ?? null,
-           req.actor.userId]);
-        putawayTasks.push({ ...pt[0], batchNo, product: p?.name });
+        /* The next job is the bench, not a put-away.
+         *
+         * There used to be two ways stock reached a shelf: a put-away task
+         * that moved a whole batch to a bin, and the packing bench where each
+         * box is graded, labelled and scanned onto a shelf individually. The
+         * client uses the second and found the first confusing — reasonably,
+         * since doing both means the same crates get placed twice.
+         *
+         * So no put-away task is raised. The suggested bin above is still
+         * computed and handed back, because the bench uses it as its default
+         * shelf: the arithmetic about where this product belongs is useful,
+         * it was only the second placement step that was not.
+         */
+        putawayTasks.push({
+          batchId: batch.id, batchNo, product: p?.name,
+          suggestedBinId: bin[0]?.bin_id ?? null,
+        });
 
         await pushTask(tx, req.actor, {
           branchId: g.branch_id, warehouseId: g.warehouse_id,
-          queueKey: 'PUTAWAY_PENDING', docType: 'PUTAWAY', docId: pt[0].id, docNo: pt[0].task_no,
-          title: `Put away ${p?.name} — ${l.acceptedQty} ${l.uom}`,
-          subtitle: `Batch ${batchNo}`,
-          requiredPermission: 'receiving.putaway.confirm', slaMinutes: 120,
+          queueKey: 'PUTAWAY_PENDING', docType: 'BATCH', docId: batch.id, docNo: batchNo,
+          title: `Grade & pack ${p?.name} — ${l.acceptedQty} ${l.uom}`,
+          subtitle: `Batch ${batchNo} · grade each box, label it, put it on a shelf`,
+          requiredPermission: 'inventory.pack.grade', slaMinutes: 240,
         });
       }
 
@@ -1426,96 +1454,18 @@ receivingRouter.post('/grns/:id/reverse', requires('receiving.grn.reverse'), h(a
 }));
 
 /* ===========================================================================
- * §15 — PUT-AWAY. Scan confirmation; a different bin needs a reason.
+ * §15 — PUT-AWAY used to be here: a task list, and a confirm endpoint that
+ * moved a whole batch into a bin.
+ *
+ * Both are gone. The floor places stock box by box at the packing bench —
+ * grade it, label it, scan the shelf — so a second placement step meant the
+ * same crates were put away twice and the two records disagreed. Posting a
+ * receipt now raises "grade & pack" instead; see postGrn() above, and
+ * /inventory/pack-bench/* for where the stock actually lands.
+ *
+ * The endpoints are deleted rather than left behind: an API nothing calls is a
+ * second way to do a job that only whoever reads the routes can find.
  * ======================================================================== */
-receivingRouter.get('/putaway', h(async (req) =>
-  query(req.actor,
-    `SELECT t.id, t.task_no, t.qty, t.weight_kg, t.rotation_rule, t.status,
-            p.name AS product_name, p.sku, p.storage_type,
-            b.batch_no, b.expiry_date, b.grade,
-            zb.code AS suggested_bin_code, zr.code AS suggested_rack_code, zz.code AS suggested_zone_code,
-            t.suggested_bin_id, w.name AS warehouse_name
-       FROM putaway_tasks t
-       JOIN products p ON p.id = t.product_id
-       JOIN batches  b ON b.id = t.batch_id
-       JOIN warehouses w ON w.id = t.warehouse_id
-       LEFT JOIN bins  zb ON zb.id = t.suggested_bin_id
-       LEFT JOIN racks zr ON zr.id = t.suggested_rack_id
-       LEFT JOIN zones zz ON zz.id = t.suggested_zone_id
-      WHERE t.company_id=$1 AND t.status IN ('PENDING','IN_PROGRESS','EXCEPTION')
-        AND ($2::uuid IS NULL OR t.warehouse_id = $2)
-      ORDER BY b.expiry_date NULLS LAST, t.created_at`,
-    [req.actor.companyId, req.query.warehouseId ?? null])));
-
-receivingRouter.post('/putaway/:id/confirm', requires('receiving.putaway.confirm'), h(async (req) => {
-  const input = body(z.object({
-    actualBinId: z.string().uuid(),
-    mismatchReason: z.string().nullable().optional(),
-    scannedCode: z.string().optional(),
-  }), req.body);
-
-  return withTx(req.actor, async (tx) => {
-    const { rows } = await tx.query(
-      `SELECT * FROM putaway_tasks WHERE id=$1 AND company_id=$2 FOR UPDATE`,
-      [req.params.id, req.actor.companyId]);
-    const t = rows[0];
-    if (!t) throw ApiError.notFound('Put-away task not found');
-    if (t.status === 'DONE') throw ApiError.conflict('This task is already done.');
-
-    const mismatch = t.suggested_bin_id && t.suggested_bin_id !== input.actualBinId;
-    if (mismatch && !input.mismatchReason) {
-      throw ApiError.rule('You scanned a different bin than suggested. Give a short reason.');
-    }
-
-    await tx.query(
-      `UPDATE putaway_tasks SET actual_bin_id=$2, mismatch_reason=$3, status='DONE',
-              scanned_by=$4, done_at=now(), updated_by=$4 WHERE id=$1`,
-      [t.id, input.actualBinId, input.mismatchReason ?? null, req.actor.userId]);
-
-    await tx.query(
-      `UPDATE bins SET current_fill_kg = current_fill_kg + $2 WHERE id=$1`,
-      [input.actualBinId, t.weight_kg ?? 0]);
-
-    /* The ledger is append-only — trg_ledger_no_update forbids every UPDATE,
-     * which is the point of it. This used to try to stamp bin_id onto the
-     * posted GRN row, so confirming a put-away raised
-     * "immutable_row: stock_ledger rows cannot be update once written" every
-     * single time and no put-away had ever completed.
-     *
-     * The ledger records a movement of quantity, not a shelf. Where the stock
-     * physically sits lives on putaway_tasks.actual_bin_id and in the bin's
-     * own fill, both written above, and nothing read ledger.bin_id at all. */
-
-    await resolveTask(tx, req.actor, 'PUTAWAY_PENDING', 'PUTAWAY', t.id);
-    await emit(tx, req.actor, 'putaway', t.id, 'putaway.done',
-      { taskNo: t.task_no, binId: input.actualBinId, mismatch });
-    return { ok: true, mismatch };
-  });
-}));
-
-/** Scan any label code — the traceability entry point (§14). */
-receivingRouter.get('/trace/:code', h(async (req) => {
-  const [label] = await query(req.actor,
-    `SELECT l.code, l.label_type, l.qr_payload, l.actual_weight_kg,
-            b.id AS batch_id, b.batch_no, b.received_date, b.expiry_date, b.grade,
-            b.initial_qty, b.remaining_qty, b.status AS batch_status, b.landed_rate_per_kg,
-            p.name AS product_name, p.sku,
-            s.trade_name AS supplier_name, s.source_type,
-            g.grn_no, g.posting_date, ge.gate_no, ge.vehicle_reg_captured,
-            f.name AS farm_name, f.village
-       FROM labels l
-       JOIN batches b ON b.id = l.batch_id
-       JOIN products p ON p.id = b.product_id
-       LEFT JOIN suppliers s ON s.id = b.supplier_id
-       LEFT JOIN farms f ON f.id = b.farm_id
-       LEFT JOIN grn_lines gl ON gl.id = b.grn_line_id
-       LEFT JOIN grns g ON g.id = gl.grn_id
-       LEFT JOIN gate_entries ge ON ge.id = g.gate_entry_id
-      WHERE l.company_id=$1 AND l.code = $2`, [req.actor.companyId, req.params.code]);
-  if (!label) throw ApiError.notFound('No label found with that code');
-  return label;
-}));
-
 /* ===========================================================================
    PICKUPS — arranging the vehicle
 
@@ -1545,17 +1495,27 @@ receivingRouter.get('/pickups', h(async (req) =>
 receivingRouter.get('/pickups/candidates', requires('logistics.pickup.manage'), h(async (req) =>
   query(req.actor,
     `SELECT o.id AS po_id, o.po_no, o.expected_date, o.grand_total, o.branch_id,
-            o.warehouse_id, s.id AS supplier_id, s.trade_name AS supplier_name,
+            o.warehouse_id, o.status, o.supplier_response,
+            o.transport_requested_at, o.transport_request_note,
+            s.id AS supplier_id, s.trade_name AS supplier_name,
             s.phone AS supplier_phone,
             NULLIF(concat_ws(', ',
               s.address->>'line1', s.address->>'line2',
               s.address->>'city', s.address->>'state'), '') AS pickup_address
        FROM purchase_orders o
        JOIN suppliers s ON s.id = o.supplier_id
-      WHERE o.company_id = $1 AND o.status = 'CONFIRMED'
+      WHERE o.company_id = $1
+        /* From the moment the order is placed, not only once the supplier has
+         * answered. A lorry takes arranging, and waiting for the acceptance
+         * before you can even think about it loses a day. */
+        AND o.status IN ('APPROVED','CONFIRMED')
         AND NOT EXISTS (SELECT 1 FROM pickups p
                          WHERE p.po_id = o.id AND p.status <> 'CANCELLED')
-      ORDER BY o.expected_date LIMIT 100`,
+      ORDER BY
+        /* A supplier who has asked for a vehicle goes to the top — somebody is
+         * standing next to crates waiting for an answer. */
+        (o.transport_requested_at IS NOT NULL) DESC,
+        o.expected_date LIMIT 100`,
     [req.actor.companyId])));
 
 receivingRouter.post('/pickups', requires('logistics.pickup.manage'), h(async (req) => {
@@ -1583,9 +1543,9 @@ receivingRouter.post('/pickups', requires('logistics.pickup.manage'), h(async (r
       [input.poId, req.actor.companyId]);
     const po = poRows[0];
     if (!po) throw ApiError.notFound('Order not found');
-    if (po.status !== 'CONFIRMED') {
+    if (!['APPROVED', 'CONFIRMED'].includes(po.status)) {
       throw ApiError.rule(
-        `Only a confirmed order can be collected. This one is ${po.status.toLowerCase().replace('_', ' ')}.`);
+        `A vehicle can be arranged once the order is placed. This one is ${po.status.toLowerCase().replace('_', ' ')}.`);
     }
     const { rows: existing } = await tx.query(
       `SELECT pickup_no FROM pickups WHERE po_id = $1 AND status <> 'CANCELLED'`, [po.id]);
@@ -1608,6 +1568,13 @@ receivingRouter.post('/pickups', requires('logistics.pickup.manage'), h(async (r
        input.pickupOn, input.windowStart || null, input.windowEnd || null,
        input.pickupAddress || po.pickup_address || null,
        input.notes ?? null, input.driverId ?? null, input.vehicleId ?? null, req.actor.userId]);
+
+    /* If the supplier asked for this, the asking is now answered. Leaving the
+     * flag up would keep the order at the top of the list forever. */
+    await tx.query(
+      `UPDATE purchase_orders SET transport_requested_at = NULL WHERE id = $1
+         AND transport_requested_at IS NOT NULL`, [po.id]);
+    await resolveTask(tx, req.actor, 'TRANSPORT_REQUEST', 'PO', po.id);
 
     await emit(tx, req.actor, 'pickup', rows[0].id, 'pickup.created',
       { pickupNo, poNo: po.po_no, offered: !assigned });

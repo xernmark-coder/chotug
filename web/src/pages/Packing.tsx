@@ -34,14 +34,15 @@ export function PackingPage() {
   const runs = useApi<any[]>(`/inventory/pack-runs?warehouseId=${wh}`, [wh]);
   const packs = useApi<any[]>(`/inventory/packs?status=IN_STOCK&warehouseId=${wh}`, [wh]);
 
-  const [packing, setPacking] = useState<any>(null);
   const [printing, setPrinting] = useState<any[] | null>(null);
   const [picked, setPicked] = useState<Record<string, boolean>>({});
 
   const chosen = inStockChosen();
   function inStockChosen() { return (packs.data ?? []).filter((p: any) => picked[p.id]); }
 
-  const canPack = can('inventory.stock.issue');
+  /* Grading at the bench is the quality check, so the permission that opens
+     it is the grading one — not the one that lets you move stock. */
+  const canPack = can('inventory.pack.grade') || can('inventory.stock.issue');
   const inStock = packs.data ?? [];
   const stockValue = inStock.reduce((a: number, p: any) => a + Number(p.price), 0);
 
@@ -50,7 +51,7 @@ export function PackingPage() {
     facets: [
       { key: 'p', label: 'product', of: (b: any) => b.product_name },
       { key: 'g', label: 'grade', of: (b: any) => b.grade },
-      { key: 'e', label: 'shelf life', of: (b: any) =>
+      { key: 'e', label: 'shelf life', all: 'Any shelf life', of: (b: any) =>
         b.days_left == null ? null
           : b.days_left <= 2 ? 'pack today'
           : b.days_left <= 5 ? 'this week' : 'plenty of time' },
@@ -90,8 +91,8 @@ export function PackingPage() {
 
   return (
     <Layout
-      title="Packing &amp; labels"
-      subtitle="Turn a batch into packs with their own size, price and barcode"
+      title="Quality &amp; packing"
+      subtitle="Grade each box as you pack it, then put it straight on a shelf"
     >
       <ErrorBanner error={packable.error} />
 
@@ -107,7 +108,7 @@ export function PackingPage() {
       </div>
 
       {/* ------------------------------------------------ what to pack --- */}
-      <div className="section-head"><h2>Pack a batch</h2><span className="rule" /></div>
+      <div className="section-head"><h2>Grade and pack a batch</h2><span className="rule" /></div>
       <div className="card mb">
         <div className="card-body tight">
           <FilterBar f={fPackable} placeholder="Search product, batch, grade" />
@@ -143,12 +144,15 @@ export function PackingPage() {
               { key: 'a2', head: '', width: 90, render: (b: any) => canPack
                 ? (
                   <div className="btn-row">
-                    {/* Two ways to pack, because both happen. Bulk is "make me
-                        40 crates of 5 kg"; the bench is one box at a time with
-                        its own grade, which is what the floor actually does. */}
+                    {/* One way in. There used to be two — "Bulk" for a run of
+                        identical crates and the bench for one box at a time —
+                        and having both meant choosing between them before you
+                        knew which you needed. The bench now does both: a run of
+                        the same size in one action, single boxes for the odd
+                        ones, and the bulk path stamped the lot's grade on every
+                        box, which was the wrong grade by definition. */}
                     <button className="btn sm primary"
                       onClick={() => nav(`/pack-bench/${b.batch_id}`)}>Grade &amp; pack</button>
-                    <button className="btn sm" onClick={() => setPacking(b)}>Bulk</button>
                   </div>
                 )
                 : null },
@@ -264,11 +268,6 @@ export function PackingPage() {
         </div>
       </div>
 
-      {packing ? (
-        <PackModal batch={packing} onClose={() => setPacking(null)}
-          onDone={(made) => { setPacking(null); reloadAll(); setPrinting(made); }} />
-      ) : null}
-
       {printing ? (
         <LabelSheet packs={printing} onClose={() => { setPrinting(null); packs.reload(); }} />
       ) : null}
@@ -276,171 +275,20 @@ export function PackingPage() {
   );
 }
 
-/* ---------------------------------------------------------------- pack --- */
-
-function PackModal({ batch, onClose, onDone }: {
-  batch: any; onClose: () => void; onDone: (packs: any[]) => void;
-}) {
-  const toast = useToast();
-  const [groups, setGroups] = useState<Group[]>([emptyGroup()]);
-  const [note, setNote] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<any>(null);
-
-  const uom = batch.base_uom;
-  const free = Number(batch.available_qty) - Number(batch.packed_qty);
-  const cost = Number(batch.landed_rate ?? 0);
-
-  const set = (i: number, p: Partial<Group>) =>
-    setGroups((s) => s.map((g, j) => (j === i ? { ...g, ...p } : g)));
-
-  const totalQty = groups.reduce((a, g) => a + (Number(g.count) || 0) * (Number(g.qtyPerPack) || 0), 0);
-  const totalPacks = groups.reduce((a, g) => a + (Number(g.count) || 0), 0);
-  const revenue = groups.reduce((a, g) => a + (Number(g.count) || 0) * (Number(g.price) || 0), 0);
-  const costOut = totalQty * cost;
-  const over = totalQty > free + 0.001;
-
-  const submit = async () => {
-    setBusy(true); setError(null);
-    try {
-      const r = await api.post<any>('/inventory/pack-runs', {
-        batchId: batch.batch_id,
-        warehouseId: batch.warehouse_id,
-        note: note || undefined,
-        groups: groups.map((g) => ({
-          label: g.label || undefined,
-          count: Number(g.count),
-          qtyPerPack: Number(g.qtyPerPack),
-          price: Number(g.price),
-        })),
-      });
-      toast(`${r.run_no} — ${r.packs.length} pack(s) made`, 'ok');
-      onDone(r.packs.map((p: any) => ({
-        ...p, product_name: r.productName, batch_no: r.batchNo,
-      })));
-    } catch (e: any) { setError(e); } finally { setBusy(false); }
-  };
-
-  return (
-    <Modal
-      title={`Pack ${batch.product_name}`}
-      onClose={onClose}
-      wide
-      footer={
-        <>
-          <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn primary" disabled={busy || over || !totalPacks
-            || groups.some((g) => !(Number(g.price) > 0) || !(Number(g.qtyPerPack) > 0))}
-            onClick={submit}>
-            {busy ? 'Packing…' : `Make ${totalPacks} pack(s)`}
-          </button>
-        </>
-      }
-    >
-      <ErrorBanner error={error} />
-      <dl className="kv mb">
-        <dt>Batch</dt><dd className="mono">{batch.batch_no}</dd>
-        <dt>Still loose</dt><dd>{num(free, 2)} {uom}</dd>
-        <dt>It cost you</dt><dd>{inr(cost)} per {uom}</dd>
-        <dt>Shelf life</dt>
-        <dd>{batch.days_left == null ? 'not recorded'
-          : batch.days_left <= 0 ? 'past its date' : `${batch.days_left} day(s) left`}</dd>
-      </dl>
-
-      <p className="small muted mb">
-        Each group is “this many packs, this size, at this price”. Add a second group to
-        price part of the batch differently.
-      </p>
-
-      <div className="table-wrap mb">
-        <table className="data">
-          <thead>
-            <tr>
-              <th>Group</th>
-              <th className="num" style={{ width: 90 }}>Packs</th>
-              <th className="num" style={{ width: 110 }}>Each holds</th>
-              <th className="num" style={{ width: 120 }}>Price per pack</th>
-              <th className="num">Uses</th>
-              <th style={{ width: 44 }}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {groups.map((g, i) => {
-              const uses = (Number(g.count) || 0) * (Number(g.qtyPerPack) || 0);
-              const perUnit = Number(g.qtyPerPack) > 0 ? (Number(g.price) || 0) / Number(g.qtyPerPack) : 0;
-              return (
-                <tr key={i}>
-                  <td>
-                    <input value={g.label} placeholder={`e.g. ${g.qtyPerPack || '5'} ${uom} crate`}
-                      onChange={(e) => set(i, { label: e.target.value })} />
-                  </td>
-                  <td className="num">
-                    <input className="inline num" type="number" style={{ width: 70 }} value={g.count}
-                      onChange={(e) => set(i, { count: e.target.value })} />
-                  </td>
-                  <td className="num">
-                    <input className="inline num" type="number" step="0.01" style={{ width: 84 }}
-                      value={g.qtyPerPack} onChange={(e) => set(i, { qtyPerPack: e.target.value })} />
-                    <div className="small muted">{uom}</div>
-                  </td>
-                  <td className="num">
-                    <input className="inline num" type="number" step="0.01" style={{ width: 96 }}
-                      value={g.price} placeholder="0" onChange={(e) => set(i, { price: e.target.value })} />
-                    {perUnit > 0 ? (
-                      <div className="small" style={{ color: perUnit < cost ? 'var(--danger)' : 'var(--muted)' }}>
-                        {inr(perUnit)}/{uom}{perUnit < cost ? ' — under cost' : ''}
-                      </div>
-                    ) : null}
-                  </td>
-                  <td className="num mono">{num(uses, 2)} {uom}</td>
-                  <td>
-                    {groups.length > 1 ? (
-                      <button className="btn sm ghost"
-                        onClick={() => setGroups((s) => s.filter((_, j) => j !== i))}><Icon name="alert" size={15} /></button>
-                    ) : null}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="btn-row mb">
-        <button className="btn sm" onClick={() => setGroups((s) => [...s, emptyGroup()])}>
-          + Another group at a different price
-        </button>
-      </div>
-
-      <Field label="Note" hint="Optional — anything the next person should know.">
-        <input value={note} onChange={(e) => setNote(e.target.value)} />
-      </Field>
-
-      <div className={`banner ${over ? 'danger' : revenue > costOut ? 'ok' : 'warn'}`}>
-        <span>{over ? '⚠' : revenue > costOut ? '✓' : 'ℹ'}</span>
-        <div>
-          {over ? (
-            <b>That is {num(totalQty, 2)} {uom} of packs from {num(free, 2)} {uom} still loose.</b>
-          ) : (
-            <>
-              <b>
-                {totalPacks} pack(s) using {num(totalQty, 2)} {uom} —
-                {' '}{inr(revenue, 0)} if they all sell
-              </b>
-              <div className="small">
-                {inr(costOut, 0)} of stock goes into them
-                {revenue > 0 ? ` · ${num(((revenue - costOut) / revenue) * 100, 1)}% margin` : ''}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-/** Where a scanned label sends someone. Taken from the running origin so a
- *  label printed from the deployed site carries the deployed address. */
+/* ===========================================================================
+ * The bulk pack modal used to live here: "make me 40 crates of 5 kg", raised
+ * from this list. It is gone.
+ *
+ * Two problems with it. It sat beside "Grade & pack" as a second way to do the
+ * same job, so the floor had to choose between them before knowing which they
+ * needed. And it stamped the LOT's grade on every crate — the grade given to
+ * the whole lorry — which is the one grade a packed box should never carry,
+ * since the entire reason for grading at the bench is that the person holding
+ * the box can see what the lorry inspection could not.
+ *
+ * The bench now does both: a run of the same size in one action, and single
+ * boxes for the odd ones. See MakeBoxesModal in PackBench.tsx.
+ * ======================================================================== */
 function scanHost() {
   return typeof window === 'undefined' ? '' : window.location.host;
 }
@@ -452,7 +300,8 @@ function scanHost() {
  * service, no CDN, and the barcode is drawn as SVG so it stays sharp at any
  * printer resolution.
  */
-function LabelSheet({ packs, onClose }: { packs: any[]; onClose: () => void }) {
+/** Exported: the bench prints the same sheet after a run of boxes. */
+export function LabelSheet({ packs, onClose }: { packs: any[]; onClose: () => void }) {
   const toast = useToast();
 
   const print = async () => {

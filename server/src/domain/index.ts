@@ -37,6 +37,14 @@ export type PlanningInput = {
   serviceLevelZ?: number;
   minStock?: number | null;
   maxStock?: number | null;
+  /**
+   * The level the buyer said to reorder at. Passed in since the buy list was
+   * written and never declared here, so TypeScript dropped it and the planner
+   * never saw it: a product with a reorder point of 150 and nothing on the
+   * shelf suggested buying zero, because it had no sales history to forecast
+   * from. A reorder point is not a forecast — it is an instruction.
+   */
+  reorderPoint?: number | null;
   moq?: number | null;
   orderMultiple?: number | null;
   wastagePct?: number;
@@ -53,6 +61,9 @@ export type PlanningResult = {
   daysOfCover: number;
   reasons: { code: string; label: string; value: string }[];
 };
+
+/** What a buy suggestion rounds up to when the product does not say otherwise. */
+export const DEFAULT_ORDER_STEP = 5;
 
 export function recommendedQty(i: PlanningInput): PlanningResult {
   const reserved = i.reservedQty ?? 0;
@@ -81,6 +92,14 @@ export function recommendedQty(i: PlanningInput): PlanningResult {
   let required = qty(grossed + safety);
   if (i.minStock && required + cover < i.minStock) required = qty(i.minStock - cover + grossed);
 
+  /* The buyer's own floor. Demand forecasting answers "how much will sell";
+   * this answers "how little am I willing to have on the shelf", and for a
+   * product that has never sold — a new breed, a seasonal line — it is the
+   * only signal there is. */
+  if (i.reorderPoint && cover <= Number(i.reorderPoint)) {
+    required = qty(Math.max(required, Number(i.reorderPoint)));
+  }
+
   let suggested = Math.max(0, qty(required - cover));
 
   // Never overshoot max stock (§5) — a full chiller is also a loss.
@@ -88,8 +107,27 @@ export function recommendedQty(i: PlanningInput): PlanningResult {
     suggested = Math.max(0, qty(i.maxStock - cover));
   }
   if (i.moq && suggested > 0 && suggested < i.moq) suggested = i.moq;
-  if (i.orderMultiple && i.orderMultiple > 0 && suggested > 0) {
-    suggested = qty(Math.ceil(suggested / i.orderMultiple) * i.orderMultiple);
+
+  /* Nobody buys 12.4 crates. The arithmetic above is honest about demand and
+   * wastage and lands on a fraction; a buyer standing in a mandi rounds it up.
+   * A product may set its own multiple — a pallet of 24, a bag of 50 — and
+   * that wins. Everything else rounds up to the next 5, which is what the
+   * buyers were doing on paper anyway.
+   *
+   * Always UP: buying one crate short of a day's demand costs a sale, buying
+   * one over costs a little cash for a day. */
+  const step = i.orderMultiple && i.orderMultiple > 0 ? i.orderMultiple : DEFAULT_ORDER_STEP;
+  if (suggested > 0) {
+    suggested = qty(Math.ceil(suggested / step) * step);
+    /* Rounding up must not walk through the ceiling that exists two lines
+     * above. If the rounded figure no longer fits, take one step back; if that
+     * leaves nothing, keep the single step — the product is on the buy list
+     * because it needs something, and answering "buy 0" would be a worse lie
+     * than being a few over. */
+    if (i.maxStock && cover + suggested > i.maxStock) {
+      const down = qty(suggested - step);
+      if (down > 0) suggested = down;
+    }
   }
 
   const daysOfCover = i.avgDailySale > 0 ? round(cover / i.avgDailySale, 1) : 999;
@@ -102,6 +140,9 @@ export function recommendedQty(i: PlanningInput): PlanningResult {
   if (wastage > 0) reasons.push({ code: 'WASTAGE', label: `Grossed up for ${round(wastage * 100, 2)}% expected wastage`, value: `${qty(grossed - baseDemand - advance)}` });
   if (advance > 0) reasons.push({ code: 'ADVANCE', label: 'Advance customer orders', value: `${advance}` });
   if (daysOfCover < i.leadTimeDays) reasons.push({ code: 'RISK', label: 'Cover is below lead time — stock-out risk', value: `${daysOfCover} days` });
+  if (i.reorderPoint && cover <= Number(i.reorderPoint)) {
+    reasons.push({ code: 'REORDER', label: 'At or below the reorder point you set', value: `${i.reorderPoint}` });
+  }
 
   return {
     availableStock: available, coverQty: cover, demandQty: qty(baseDemand),

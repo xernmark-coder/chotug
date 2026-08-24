@@ -86,7 +86,9 @@ const QUEUE_ROUTE: Record<string, (t: any) => string> = {
   WEIGH_PENDING: (t) => `/gate/${t.doc_id}`,
   QC_PENDING: (t) => `/gate/${t.doc_id}`,
   GRN_PENDING: (t) => `/gate/${t.doc_id}`,
-  PUTAWAY_PENDING: () => `/putaway`,
+  /* Straight to the bench for that batch. Put-away as a separate step is
+     gone — grading, labelling and shelving are one job at one table. */
+  PUTAWAY_PENDING: (t) => `/pack-bench/${t.doc_id}`,
   INVOICE_MATCH: (t) => `/invoices/${t.doc_id}`,
   AI_SUGGESTION: () => `/buy-list`,
   ALERT: () => `/alerts`,
@@ -94,13 +96,16 @@ const QUEUE_ROUTE: Record<string, (t: any) => string> = {
   FARM_TASK: (t) => `/farm?farmId=${t.doc_id}`,
   FARM_HARVEST: () => `/farm/dispatch`,
   FARM_RECEIVE: () => `/farm/dispatch`,
+  // Straight to Dispatch, where the vehicle gets arranged.
+  TRANSPORT_REQUEST: () => `/dispatch`,
 };
 
 const QUEUE_LABEL: Record<string, string> = {
   REQUIREMENT_REVIEW: 'Requirement', APPROVAL: 'Approval', EXPECTED_ARRIVAL: 'Arrival',
   WEIGH_PENDING: 'Weighment', QC_PENDING: 'Quality check', GRN_PENDING: 'Goods receipt',
-  PUTAWAY_PENDING: 'Put-away', INVOICE_MATCH: 'Invoice', AI_SUGGESTION: 'Suggestion',
+  PUTAWAY_PENDING: 'Grade & pack', INVOICE_MATCH: 'Invoice', AI_SUGGESTION: 'Suggestion',
   ALERT: 'Alert', FINANCE_EXCEPTION: 'Finance', PO_CONFIRM: 'Confirm order',
+  TRANSPORT_REQUEST: 'Vehicle wanted',
   FARM_TASK: 'Farm work', FARM_HARVEST: 'Harvest', FARM_RECEIVE: 'Farm delivery',
 };
 
@@ -124,10 +129,10 @@ export function WorkQueuePage() {
     facets: [
       { key: 'q', label: 'kind', of: (t: any) => QUEUE_LABEL[t.queue_key] ?? t.queue_key },
       { key: 'sv', label: 'urgency', of: (t: any) => t.severity },
-      { key: 'sla', label: 'timing', of: (t: any) =>
+      { key: 'sla', label: 'timing', all: 'Early and late', of: (t: any) =>
         (t.sla_breached ? 'past the agreed time' : 'in time') },
     ],
-    totals: [{ label: 'Tasks', of: () => 1 }],
+    totals: [],
   });
 
   const cols: Col<any>[] = [
@@ -189,6 +194,18 @@ export function DashboardPage() {
   const { data, loading, error } = useApi<any>(`/insights/dashboard?branchId=${branchId ?? ''}`, [branchId]);
   const queue = useApi<any[]>('/insights/work-queue');
   const queueCount = (queue.data ?? []).length;
+
+  /* Above the loading guard — a hook cannot sit behind an early return. */
+  const fLow = useFilters<any>(data?.criticalStock, {
+    search: (p2: any) => [p2.name, p2.sku].filter(Boolean).join(' '),
+    facets: [
+      { key: 'c', label: 'cover', all: 'Any cover', of: (p2: any) =>
+        p2.days_of_cover == null ? null
+          : p2.days_of_cover < 1 ? 'gone today'
+          : p2.days_of_cover < 2 ? 'gone tomorrow' : 'a few days left' },
+    ],
+    totals: [{ label: 'Products', of: () => 1 }],
+  });
 
   if (loading) return <Layout title="Dashboard"><Loading /></Layout>;
 
@@ -542,8 +559,10 @@ export function DashboardPage() {
               <button className="btn sm primary" onClick={() => nav('/buy-list')}>Buy list →</button>
             </div>
             <div className="card-body tight">
+              <FilterBar f={fLow} placeholder="Search product" />
+              <FilterTotals f={fLow} noun="product" />
               <DataTable
-                rows={data?.criticalStock ?? []}
+                rows={fLow.rows}
                 cols={[
                   { key: 'p', head: 'Product', render: (p: any) => (
                     <div><b>{p.name}</b><div className="small muted">{p.sku}</div></div>

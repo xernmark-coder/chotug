@@ -6,7 +6,7 @@ import { DashboardPage, LoginPage, WorkQueuePage } from './pages/Home';
 import { BuyListPage, RequirementDetailPage, RequirementListPage } from './pages/Planning';
 import { ApprovalsPage, PoCreatePage, PoDetailPage, PoListPage } from './pages/Purchase';
 import { ArrivalsPage, GateDetailPage, GateEntryPage, GatePipelinePage } from './pages/Receiving';
-import { GrnDetailPage, GrnListPage, PutawayPage, StockPage } from './pages/Grn';
+import { GrnDetailPage, GrnListPage, StockPage } from './pages/Grn';
 import { FleetPage } from './pages/Fleet';
 import { AcceptInvitePage, PeoplePage } from './pages/People';
 import { QuickOrderPage } from './pages/QuickOrder';
@@ -119,7 +119,10 @@ export default function App() {
 
       <Route path="/grns" element={<GrnListPage />} />
       <Route path="/grns/:id" element={<GrnDetailPage />} />
-      <Route path="/putaway" element={<PutawayPage />} />
+      {/* Put-away is gone: grading, labelling and shelving happen together at
+          the packing bench. The old path is kept as a redirect so a bookmark
+          or an old link lands somewhere sensible rather than on nothing. */}
+      <Route path="/putaway" element={<Navigate to="/packing" replace />} />
       <Route path="/stock" element={<StockPage />} />
       <Route path="/packing" element={<PackingPage />} />
       <Route path="/sales" element={<SalesPage />} />

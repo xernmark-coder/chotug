@@ -943,3 +943,21 @@ table.mini tr.voided { opacity: .5; text-decoration: line-through; }
 .filter-total .ft-num { display: flex; flex-direction: column; align-items: flex-end; }
 .filter-total .ft-num em { font-style: normal; font-size: 10px; text-transform: uppercase;
   letter-spacing: .06em; color: var(--muted); }
+
+/* -------------------------------------------------------- asking rates --
+   Every supplier's posted price for one product, side by side, cheapest
+   first. A buyer comparing three numbers should not have to open three
+   screens — or ring three people, which is what this replaces. */
+.rate-strip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 9px 12px; border-bottom: 1px solid var(--border); }
+.rate-chip { display: flex; flex-direction: column; align-items: flex-start;
+  gap: 1px; padding: 5px 10px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--surface); cursor: pointer;
+  font: inherit; text-align: left; }
+.rate-chip:hover { border-color: var(--primary); background: var(--accent-soft); }
+.rate-chip b { font-size: 14px; font-variant-numeric: tabular-nums; }
+.rate-chip span { font-size: 11px; color: var(--text-2); }
+.rate-chip em { font-style: normal; font-size: 10px; color: var(--muted); }
+/* Past its valid-till: still shown, because knowing what they were asking
+   last week is useful, but never mistaken for today's price. */
+.rate-chip.stale { opacity: .55; border-style: dashed; }

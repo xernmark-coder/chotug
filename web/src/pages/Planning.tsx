@@ -7,6 +7,7 @@ import {
   useApi, useReasonBank, useToast,  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
+import { ProductModal } from './Catalogue';
 import { CHART } from '../components/charts';
 
 /* ===========================================================================
@@ -28,6 +29,7 @@ export function BuyListPage() {
   const [insightFor, setInsightFor] = useState<any>(null);
   const [onlyNeeded, setOnlyNeeded] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [addingProduct, setAddingProduct] = useState(false);
 
   const items = useMemo(() => {
     const all = data?.items ?? [];
@@ -38,7 +40,10 @@ export function BuyListPage() {
      What matters here is finding a product and seeing what the selection will
      cost before committing to it. */
   const f = useFilters<any>(items, {
-    search: (i) => [i.productName, i.sku, i.categoryName].filter(Boolean).join(' '),
+    /* Was productName / categoryName — neither of which this endpoint returns,
+       so the search box matched nothing at all and the category dropdown never
+       had a value to show. */
+    search: (i) => [i.name, i.nameHi, i.sku, i.categoryName].filter(Boolean).join(' '),
     facets: [
       { key: 'cat', label: 'category', of: (i) => i.categoryName },
       { key: 'urgency', label: 'urgency', of: (i) => i.urgency },
@@ -103,10 +108,15 @@ export function BuyListPage() {
     {
       key: 'p', head: 'Product',
       render: (i) => (
-        <div>
-          <b>{i.name}</b>
-          {i.nameHi ? <span className="muted small"> · {i.nameHi}</span> : null}
-          <div className="small muted">{i.sku}</div>
+        <div className="row" style={{ gap: 8 }}>
+          <Icon name={i.icon ?? 'produce'} size={17} />
+          <div>
+            <b>{i.name}</b>
+            {i.nameHi ? <span className="muted small"> · {i.nameHi}</span> : null}
+            <div className="small muted">
+              {i.categoryName ? `${i.categoryName} · ` : ''}{i.sku}
+            </div>
+          </div>
         </div>
       ),
     },
@@ -134,13 +144,34 @@ export function BuyListPage() {
         {i.daysOfCover >= 999 ? '—' : `${num(i.daysOfCover, 1)}d`}
       </Chip>
     ) },
+    /* A "0" against a product flagged LOW STOCK reads as a broken suggestion,
+       and that is exactly how it was read. Nothing is wrong: there are already
+       2,350 kg of it on eleven open orders. Say so on the row rather than
+       leaving the buyer to work it out. */
     { key: 'sug', head: 'Suggested', num: true, render: (i) => (
-      <b className="mono">{num(i.suggestedQty, 0)} <span className="small muted">{i.uom}</span></b>
+      i.suggestedQty > 0 ? (
+        <b className="mono">{num(i.suggestedQty, 0)} <span className="small muted">{i.uom}</span></b>
+      ) : (
+        <div>
+          <b className="mono muted">0</b>
+          <div className="small muted">
+            {Number(i.openPoQty) > 0
+              ? `${num(i.openPoQty, 0)} already on order`
+              : Number(i.currentStock) > 0 ? 'enough on the shelf'
+              : 'no demand recorded'}
+          </div>
+        </div>
+      )
     ) },
     {
       key: 'qty', head: 'Order qty', num: true, width: 130,
       render: (i) => (
         <div className="row" style={{ justifyContent: 'flex-end', gap: 5 }}>
+          {/* The reason dialog used to open on every keystroke: typing 150 over
+              a suggested 20 threw it up at "1", then again at "15". Nobody
+              could get a number in. It now waits until they have finished —
+              blur or Enter — which is also the first moment the number they
+              typed actually means anything. */}
           <input className="inline num" style={{ width: 78 }} type="number"
             value={finalQty(i)}
             onClick={(e) => e.stopPropagation()}
@@ -148,7 +179,11 @@ export function BuyListPage() {
               const v = Number(e.target.value);
               setQtyOverride((s) => ({ ...s, [i.productId]: v }));
               setSelected((s) => ({ ...s, [i.productId]: v > 0 }));
-              if (v !== i.suggestedQty) setEditing(i);
+            }}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+            onBlur={(e) => {
+              const v = Number(e.target.value);
+              if (v !== i.suggestedQty && !reasons[i.productId]) setEditing(i);
             }} />
           {finalQty(i) !== i.suggestedQty ? (
             <span title={reasons[i.productId] ?? 'Reason needed'}>
@@ -205,7 +240,13 @@ export function BuyListPage() {
           items.forEach((i: any) => { if (i.suggestedQty > 0) next[i.productId] = true; });
           setSelected(next);
         }}>Select all suggested</button>
+        {/* A product nobody has set up yet is a product nobody can order, and
+            this is the screen where you notice it is missing. */}
+        {can('master.product.manage') ? (
+          <button className="btn sm" onClick={() => setAddingProduct(true)}>+ New product</button>
+        ) : null}
       </FilterBar>
+      <FilterTotals f={f} noun="product" />
 
       <div className="card">
         <div className="card-body tight">
@@ -215,9 +256,13 @@ export function BuyListPage() {
             empty={<Empty icon="👍" title="Nothing needs ordering right now"
               hint="Uncheck the filter above to see every product." />}
           />
-          <FilterTotals f={f} noun="product" />
         </div>
       </div>
+
+      {addingProduct ? (
+        <ProductModal onClose={() => setAddingProduct(false)}
+          onDone={() => { setAddingProduct(false); reload(); toast('Product added', 'ok'); }} />
+      ) : null}
 
       {editing ? (
         <Modal title={`Why are you changing ${editing.name}?`} onClose={() => setEditing(null)}
@@ -369,6 +414,7 @@ export function RequirementListPage() {
       actions={<button className="btn primary" onClick={() => nav('/buy-list')}>New from buy list</button>}>
       <ErrorBanner error={error} />
       <FilterBar f={f} placeholder="Search number, branch, who raised it, or why" />
+      <FilterTotals f={f} noun="requirement" />
       <div className="card"><div className="card-body tight">
         <DataTable
           rows={f.rows} loading={loading}
@@ -393,7 +439,6 @@ export function RequirementListPage() {
           empty={<Empty icon="📝" title="No requirements yet"
             hint="Start from the buy list — the system already knows what you are short of." />}
         />
-        <FilterTotals f={f} noun="requirement" />
       </div></div>
     </Layout>
   );

@@ -34,6 +34,7 @@ export function InvoiceListPage() {
         : undefined}>
       <ErrorBanner error={error} />
       <FilterBar f={f} placeholder="Search invoice number or supplier" />
+      <FilterTotals f={f} noun="invoice" />
       <div className="card"><div className="card-body tight">
         <DataTable
           rows={f.rows} loading={loading}
@@ -57,7 +58,6 @@ export function InvoiceListPage() {
           ]}
           empty={<Empty icon="🧾" title="No invoices captured yet" />}
         />
-        <FilterTotals f={f} noun="invoice" />
       </div></div>
     </Layout>
   );
@@ -196,20 +196,18 @@ export function InvoiceDetailPage() {
 
   const latest = data.matchResults?.[0];
 
-  const runMatch = async () => {
+  /* The comparison now runs by itself when the invoice is filed. This is here
+     for the case that matters: the bill arrived before the lorry, so there was
+     nothing to compare it with, and now there is. */
+  const recheck = async () => {
     setBusy(true);
     try {
       const r = await api.post<any>(`/costing/invoices/${id}/match`);
-      toast(r.overall === 'MATCH'
-        ? 'Matched — invoice moved to payable'
-        : `${r.overall.replace(/_/g, ' ').toLowerCase()} — ${r.findings.length} issue(s) found`,
-        r.overall === 'MATCH' ? 'ok' : 'err');
+      const n = (r.findings ?? []).length;
+      toast(n ? `${n} thing(s) do not agree — see below` : 'This bill agrees with what we received',
+        n ? 'err' : 'ok');
       reload();
     } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(false); }
-  };
-
-  const linkLine = async (lineId: string, grnLineId: string) => {
-    toast('Link the line, then run the match again', 'info');
   };
 
   return (
@@ -219,8 +217,8 @@ export function InvoiceDetailPage() {
         <div className="btn-row">
           <Chip value={data.status} />
           {can('finance.invoice.match') && !['PAID', 'CANCELLED'].includes(data.status) ? (
-            <button className="btn primary" disabled={busy} onClick={runMatch}>
-              {busy ? 'Matching…' : 'Run 3-way match'}
+            <button className="btn" disabled={busy} onClick={recheck}>
+              {busy ? 'Checking…' : 'Check against receipts'}
             </button>
           ) : null}
         </div>
@@ -258,37 +256,51 @@ export function InvoiceDetailPage() {
             </div>
           </div>
 
+          {/* Was "Match result", four chips reading QTY / RATE / TAX / CHARGE
+              and a column headed "Severity". Nobody in a mandi office talks
+              like that, and the whole card said nothing a person could act on.
+              What they actually want to know is whether the bill agrees with
+              what turned up, and if not, by how much. */}
           {latest ? (
             <div className="card">
               <div className="card-head">
-                <h2>Match result</h2>
-                <Chip value={latest.overall} />
+                <h2>How this bill compares</h2>
+                <span className="small muted">
+                  checked {latest.run_at ? ago(latest.run_at) : 'just now'}
+                </span>
               </div>
               <div className="card-body">
-                <div className="grid c4 mb">
-                  {(['qty_result', 'rate_result', 'tax_result', 'charge_result'] as const).map((k) => (
-                    <div key={k}>
-                      <div className="small muted">{k.replace('_result', '').toUpperCase()}</div>
-                      <Chip tone={latest[k] === 'OK' ? 'ok' : latest[k] === 'WARN' ? 'warn' : 'danger'}>
-                        {latest[k]}
-                      </Chip>
-                    </div>
-                  ))}
-                </div>
                 {(latest.findings ?? []).length ? (
-                  <DataTable
-                    rows={latest.findings}
-                    cols={[
-                      { key: 'l', head: 'Line', render: (f: any) => f.lineNo || '—' },
-                      { key: 'f', head: 'Field', render: (f: any) => f.field },
-                      { key: 's', head: 'Severity', render: (f: any) =>
-                        <Chip tone={f.severity === 'FAIL' ? 'danger' : 'warn'}>{f.severity}</Chip> },
-                      { key: 'm', head: 'What is wrong', render: (f: any) => f.message },
-                      { key: 'e', head: 'Expected', num: true, render: (f: any) => f.expected ?? '—' },
-                      { key: 'a', head: 'On invoice', num: true, render: (f: any) => f.actual },
-                    ]}
-                  />
-                ) : <div className="banner ok"><span><Icon name="check" size={16} /></span><div>Everything matched within tolerance.</div></div>}
+                  <>
+                    <div className="banner warn mb">
+                      <span><Icon name="alert" size={16} /></span>
+                      <div>
+                        <b>{latest.findings.length} thing(s) on this bill do not agree with
+                        what we ordered or received.</b> It can still be paid — Finance
+                        decides — but somebody should know.
+                      </div>
+                    </div>
+                    <DataTable
+                      rows={latest.findings}
+                      cols={[
+                        { key: 'l', head: 'Line', width: 56,
+                          render: (f: any) => f.lineNo || '—' },
+                        { key: 'm', head: 'What does not agree',
+                          render: (f: any) => (
+                            <div><b>{f.message}</b>
+                              <div className="small muted">{String(f.field).replace(/_/g, ' ')}</div>
+                            </div>) },
+                        { key: 'e', head: 'Should be', num: true,
+                          render: (f: any) => f.expected ?? '—' },
+                        { key: 'a', head: 'Billed', num: true,
+                          render: (f: any) => f.actual },
+                      ]}
+                    />
+                  </>
+                ) : (
+                  <div className="banner ok"><span><Icon name="check" size={16} /></span>
+                    <div>This bill agrees with what we ordered and what we received.</div></div>
+                )}
               </div>
             </div>
           ) : null}
@@ -360,10 +372,10 @@ export function PaymentsPage() {
     search: (p: any) => [p.invoice_no, p.supplier_name].filter(Boolean).join(' '),
     facets: [
       { key: 'sup', label: 'supplier', of: (p: any) => p.supplier_name },
-      { key: 'od', label: 'age', of: (p: any) =>
+      { key: 'od', label: 'age', all: 'Any age', of: (p: any) =>
         Number(p.overdue_days) > 7 ? 'more than a week late'
           : Number(p.overdue_days) > 0 ? 'late' : 'in time' },
-      { key: 'bl', label: 'block', of: (p: any) => (p.is_blocked ? 'blocked' : 'clear') },
+      { key: 'bl', label: 'block', all: 'Blocked or not', of: (p: any) => (p.is_blocked ? 'blocked' : 'clear') },
     ],
     totals: [
       { label: 'Payable', of: (p: any) => Number(p.payable_amount) || 0, money: true },
@@ -422,7 +434,9 @@ export function PaymentsPage() {
 export function SuppliersPage() {
   const toast = useToast();
   const { can } = useAuth();
-  const [tab, setTab] = useState<'scores' | 'manage'>('scores');
+  const [tab, setTab] = useState<'scores' | 'rates' | 'manage'>('scores');
+  const asked = useApi<any[]>(
+    can('purchase.rate.compare') ? '/planning/supplier-rates' : null, []);
   const { data, loading, error, reload } = useApi<any[]>('/insights/supplier-performance');
   const [busy, setBusy] = useState(false);
   const mayManage = can('master.supplier.manage');
@@ -437,7 +451,6 @@ export function SuppliersPage() {
         (Number(x.rejection_pct) > 10 ? 'over 10%' : 'under 10%') },
     ],
     totals: [
-      { label: 'Suppliers', of: () => 1 },
       { label: 'Orders', of: (x: any) => Number(x.order_count) || 0 },
     ],
   });
@@ -459,18 +472,24 @@ export function SuppliersPage() {
         : null}>
       <ErrorBanner error={error} />
 
-      {mayManage ? (
-        <div className="tabs">
-          <button className={`tab ${tab === 'scores' ? 'active' : ''}`} onClick={() => setTab('scores')}>
-            Performance
+      <div className="tabs">
+        <button className={`tab ${tab === 'scores' ? 'active' : ''}`} onClick={() => setTab('scores')}>
+          Performance
+        </button>
+        {can('purchase.rate.compare') ? (
+          <button className={`tab ${tab === 'rates' ? 'active' : ''}`} onClick={() => setTab('rates')}>
+            What they are asking ({(asked.data ?? []).length})
           </button>
+        ) : null}
+        {mayManage ? (
           <button className={`tab ${tab === 'manage' ? 'active' : ''}`} onClick={() => setTab('manage')}>
             Manage suppliers
           </button>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
 
-      {tab === 'manage' && mayManage ? <SupplierManager /> : <>
+      {tab === 'rates' ? <AskingRates rows={asked.data ?? []} loading={asked.loading} /> :
+       tab === 'manage' && mayManage ? <SupplierManager /> : <>
       <div className="banner info mb">
         <span><Icon name="scale" size={16} /></span>
         <div>
@@ -534,6 +553,114 @@ const SOURCE_TYPES = [
   { v: 'WHOLESALER', label: 'Wholesaler' },
 ];
 
+/* ---------------------------------------------------------------------------
+ * WHAT EVERY SUPPLIER IS ASKING
+ *
+ * Posted by the suppliers themselves from their own panels, so this is their
+ * word rather than a buyer's note of a phone call. Grouped by product, because
+ * "who is cheapest on mango today" is the question, not "what is Sahyadri
+ * charging for everything".
+ * ------------------------------------------------------------------------ */
+function AskingRates({ rows, loading }: { rows: any[]; loading: boolean }) {
+  const f = useFilters<any>(rows, {
+    date: (r: any) => r.quoted_at,
+    search: (r: any) => [r.product_name, r.sku, r.supplier_name, r.note]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'p', label: 'product', of: (r: any) => r.product_name },
+      { key: 's', label: 'supplier', of: (r: any) => r.supplier_name },
+      { key: 'st', label: 'freshness', all: 'Current and out of date', of: (r: any) =>
+        (r.is_stale ? 'out of date' : 'current') },
+      { key: 'mv', label: 'movement', all: 'Up and down', of: (r: any) =>
+        r.change_pct == null ? null
+          : Number(r.change_pct) > 0 ? 'dearer than last time'
+          : Number(r.change_pct) < 0 ? 'cheaper than last time' : 'same as last time' },
+    ],
+    totals: [],
+  });
+
+  /* The cheapest live rate per product, so the badge means something. */
+  const best = React.useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const r of f.rows) {
+      if (r.is_stale) continue;
+      const v = Number(r.quoted_rate);
+      if (m[r.product_id] == null || v < m[r.product_id]) m[r.product_id] = v;
+    }
+    return m;
+  }, [f.rows]);
+
+  return (
+    <>
+      <div className="banner info mb">
+        <span><Icon name="info" size={16} /></span>
+        <div>
+          Each supplier posts their own rate from their panel. Nothing here was typed
+          by the office, so it is their price, not a note of a phone call. A rate past
+          its valid-till is shown faded — it is history, not an offer.
+        </div>
+      </div>
+      <FilterBar f={f} placeholder="Search product or supplier" />
+      <FilterTotals f={f} noun="rate" />
+      <div className="card"><div className="card-body tight">
+        <DataTable
+          rows={f.rows} loading={loading}
+          rowTone={(r: any) => (r.is_stale ? 'warn' : undefined)}
+          cols={[
+            { key: 'p', head: 'Product', render: (r: any) => (
+              <div className="row" style={{ gap: 8 }}>
+                <Icon name={r.icon ?? 'produce'} size={17} />
+                <div><b>{r.product_name}</b>
+                  <div className="small muted">{r.sku}</div></div>
+              </div>) },
+            { key: 's', head: 'Supplier', render: (r: any) => (
+              <div><b>{r.supplier_name}</b>
+                <div className="small muted">{r.source_type}
+                  {r.tracking_code ? ` · ${r.tracking_code}` : ''}</div></div>) },
+            { key: 'r', head: 'Asking', num: true, render: (r: any) => (
+              <div>
+                <b>{inr(r.quoted_rate)}</b>
+                {!r.is_stale && best[r.product_id] === Number(r.quoted_rate) ? (
+                  <div><Chip tone="ok">cheapest</Chip></div>
+                ) : null}
+              </div>) },
+            { key: 'lp', head: 'We last paid', num: true, render: (r: any) =>
+              r.last_paid_rate != null
+                ? <div>{inr(r.last_paid_rate)}
+                    <div className="small muted">
+                      {r.last_purchase_at ? date(r.last_purchase_at) : ''}</div></div>
+                : <span className="muted small">never</span> },
+            { key: 'ch', head: 'Move', num: true, render: (r: any) =>
+              r.change_pct == null ? <span className="muted">—</span> : (
+                <b className={Number(r.change_pct) > 0 ? 'text-danger' : ''}>
+                  {Number(r.change_pct) > 0 ? '+' : ''}{num(r.change_pct, 1)}%
+                </b>) },
+            { key: 'q', head: 'They have', num: true, render: (r: any) =>
+              r.available_qty != null
+                ? <span>{num(r.available_qty, 0)} <span className="small muted">{r.uom}</span></span>
+                : <span className="muted">—</span> },
+            { key: 'g', head: 'Grade', render: (r: any) =>
+              r.offered_grade ? <Chip tone="neutral">{r.offered_grade}</Chip>
+                : <span className="muted small">—</span> },
+            { key: 'v', head: 'Good until', render: (r: any) =>
+              r.valid_till
+                ? <span className={r.is_stale ? 'chip warn' : 'small'}>{date(r.valid_till)}</span>
+                : <span className="muted small">until changed</span> },
+            { key: 'n', head: 'They said', render: (r: any) =>
+              r.note ? <span className="small">{r.note}</span> : <span className="muted">—</span> },
+            { key: 'w', head: 'Posted', render: (r: any) =>
+              <span className="small muted">{ago(r.quoted_at)}</span> },
+          ]}
+          empty={<Empty icon="🏷️"
+            title={f.active > 0 ? 'No rate matches those filters' : 'No supplier has posted a rate yet'}
+            hint={f.active > 0 ? 'Clear a filter to widen the search.'
+              : 'Suppliers set their own rates from their panel — the numbers appear here as they do.'} />}
+        />
+      </div></div>
+    </>
+  );
+}
+
 function SupplierManager() {
   const toast = useToast();
   const [showBlocked, setShowBlocked] = useState(false);
@@ -549,13 +676,12 @@ function SupplierManager() {
       { key: 'ty', label: 'type', of: (x: any) => x.source_type },
       { key: 'st', label: 'status', of: (x: any) => x.status },
       { key: 'ds', label: 'district', of: (x: any) => x.district },
-      { key: 'gst', label: 'GST', of: (x: any) =>
+      { key: 'gst', label: 'GST', all: 'Any GST status', of: (x: any) =>
         (x.gstin ? 'registered' : x.is_unregistered ? 'unregistered' : 'not recorded') },
-      { key: 'lg', label: 'portal', of: (x: any) =>
+      { key: 'lg', label: 'portal', all: 'Signs in or not', of: (x: any) =>
         (Number(x.login_count) > 0 ? 'signs in' : 'never signed in') },
     ],
     totals: [
-      { label: 'Suppliers', of: () => 1 },
       { label: 'Orders', of: (x: any) => Number(x.order_count) || 0 },
     ],
   });
@@ -632,7 +758,8 @@ function SupplierManager() {
   );
 }
 
-function SupplierModal({ supplier, onClose, onDone }: {
+/** Exported so a buyer can add a supplier without leaving the order. */
+export function SupplierModal({ supplier, onClose, onDone }: {
   supplier: any; onClose: () => void; onDone: () => void;
 }) {
   const toast = useToast();
@@ -778,7 +905,7 @@ export function AlertsPage() {
       { key: 'ty', label: 'type', of: (a: any) => String(a.alert_type).replace(/_/g, ' ') },
       { key: 'st', label: 'status', of: (a: any) => a.status },
     ],
-    totals: [{ label: 'Alerts', of: () => 1 }],
+    totals: [],
   });
 
   const act = async (id: string, action: string) => {
@@ -978,6 +1105,13 @@ export function ReportsPage() {
       of: (r: any) => Number(r[t.col]) || 0,
     })),
   }), [def, present]));
+
+  /* Switching report clears the filters. Several reports share a facet name —
+   * "supplier", "product", "grade" — and without this, picking a supplier on
+   * the purchase register silently narrowed the quality report you opened
+   * next. The control showed it, but the number at the top was the number
+   * somebody would have quoted, and it would have been wrong. */
+  React.useEffect(() => { f.clear(); }, [key]);
 
   const download = () => {
     // Exports what is on the screen. Downloading 5,000 rows after narrowing to
@@ -1191,6 +1325,7 @@ export function SettingsPage() {
   const { can } = useAuth();
   const { data, loading, error, reload } = useApi<any[]>('/masters/settings');
   const [edits, setEdits] = useState<Record<string, string>>({});
+  const [tab, setTab] = useState<'settings' | 'trail'>('settings');
 
   const LABELS: Record<string, string> = {
     'purchase.weight_tolerance_pct': 'Weight tolerance (%) before a variance is flagged',
@@ -1218,6 +1353,15 @@ export function SettingsPage() {
   return (
     <Layout title="Settings" subtitle="Thresholds that change how the system behaves">
       <ErrorBanner error={error} />
+      {can('admin.audit.view') ? (
+        <div className="tabs">
+          {([['settings', 'Settings'], ['trail', 'What people did']] as const).map(([k, l]) => (
+            <button key={k} className={`tab ${tab === k ? 'active' : ''}`}
+              onClick={() => setTab(k)}>{l}</button>))}
+        </div>
+      ) : null}
+
+      {tab === 'trail' ? <AuditTrail /> : <>
       <div className="mb"><CompanyCard /></div>
       <div className="mb"><EmailSettingsCard /></div>
       {loading ? <Loading /> : (
@@ -1238,16 +1382,118 @@ export function SettingsPage() {
           ))}
         </div></div>
       )}
+      </>}
     </Layout>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * WHAT PEOPLE DID
+ *
+ * "everything will be recorded such as who, how, when how much" — the client
+ * meant the audit team, but the same sentence is true of the system itself.
+ * Every write already landed in audit_log and the endpoint to read it already
+ * existed; there was simply no screen, so 3,000 entries sat there unreadable
+ * and the answer to "who changed that rate" was a database console.
+ * ------------------------------------------------------------------------ */
+function AuditTrail() {
+  const [table, setTable] = useState('');
+  const { data, loading, error } = useApi<any[]>(
+    `/masters/audit?table=${encodeURIComponent(table)}`, [table]);
+
+  const f = useFilters<any>(data, {
+    date: (a: any) => a.occurred_at,
+    search: (a: any) => [a.entity_type, a.action, a.actor_name, a.actor_role,
+      a.reason_text, a.reason_code].filter(Boolean).join(' '),
+    facets: [
+      { key: 'who', label: 'person', of: (a: any) => a.actor_name ?? 'the system' },
+      { key: 'what', label: 'record', of: (a: any) => a.entity_type },
+      { key: 'act', label: 'action', of: (a: any) => a.action },
+      { key: 'role', label: 'role', of: (a: any) => a.actor_role },
+    ],
+    totals: [],
+  });
+
+  return (
+    <>
+      <ErrorBanner error={error} />
+      <div className="banner info mb">
+        <span><Icon name="info" size={16} /></span>
+        <div>
+          Every change anybody makes, with who made it and when. It is written
+          automatically and nothing on any screen can edit or delete it — which
+          is the only thing that makes it worth reading.
+        </div>
+      </div>
+      <FilterBar f={f} placeholder="Search person, record, reason">
+        <select value={table} onChange={(e) => setTable(e.target.value)}>
+          <option value="">Everything</option>
+          {['purchase_orders', 'supplier_invoices', 'payments', 'payment_requests',
+            'grns', 'stock_issues', 'products', 'suppliers', 'users']
+            .map((t) => <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>)}
+        </select>
+      </FilterBar>
+      <FilterTotals f={f} noun="entry" />
+      <div className="card"><div className="card-body tight">
+        <DataTable
+          rows={f.rows} loading={loading}
+          cols={[
+            { key: 'w', head: 'When', render: (a: any) => (
+              <div className="small"><b>{ago(a.occurred_at)}</b>
+                <div className="muted">{dateTime(a.occurred_at)}</div></div>) },
+            { key: 'who', head: 'Who', render: (a: any) => (
+              <div><b>{a.actor_name ?? 'the system'}</b>
+                {a.actor_role ? <div className="small muted">{a.actor_role}</div> : null}</div>) },
+            { key: 'did', head: 'Did what', render: (a: any) => (
+              <div>
+                <Chip tone={/delete|reverse|cancel/i.test(a.action) ? 'danger'
+                  : /create|insert/i.test(a.action) ? 'ok' : 'primary'}>
+                  {String(a.action).replace(/_/g, ' ').toLowerCase()}
+                </Chip>
+                <div className="small muted">{String(a.entity_type).replace(/_/g, ' ')}</div>
+              </div>) },
+            { key: 'why', head: 'Why', render: (a: any) =>
+              a.reason_text ? <span className="small">{a.reason_text}</span>
+                : a.reason_code ? <span className="small muted">{a.reason_code}</span>
+                : <span className="muted">—</span> },
+            /* The diff is the answer to "what exactly changed", and it is
+               JSON. Shown small and monospaced rather than pretty-printed —
+               anybody reading this far wants the raw fact. */
+            { key: 'd', head: 'What changed', render: (a: any) => {
+              const d = a.diff;
+              if (!d || (typeof d === 'object' && !Object.keys(d).length)) {
+                return <span className="muted">—</span>;
+              }
+              const txt = typeof d === 'string' ? d : JSON.stringify(d);
+              return <span className="mono small" title={txt}>
+                {txt.length > 90 ? `${txt.slice(0, 90)}…` : txt}
+              </span>;
+            } },
+          ]}
+          empty={<Empty icon="📄"
+            title={f.active > 0 ? 'Nothing matches those filters' : 'Nothing recorded yet'} />}
+        />
+      </div></div>
+    </>
   );
 }
 
 /* ======================================================= PROFILE ======== */
 export function ProfilePage() {
   const { me } = useAuth();
+  const [changing, setChanging] = useState(false);
   if (!me) return <Layout title="Profile"><Loading /></Layout>;
   return (
-    <Layout title={me.fullName} subtitle={`${me.companyName} · ${me.email}`}>
+    <Layout title={me.fullName} subtitle={`${me.companyName} · ${me.email}`}
+      /* A password was set once from an invite link and could never be changed
+         again — not by the person, not by anyone. Somebody who thinks a
+         colleague watched them type it had no recourse at all. */
+      actions={<button className="btn sm" onClick={() => setChanging(true)}>
+        Change password
+      </button>}>
+      {changing ? (
+        <ChangePasswordModal onClose={() => setChanging(false)} />
+      ) : null}
       <div className="grid c2">
         <div className="card">
           <div className="card-head"><h2>Your access</h2></div>
@@ -1299,6 +1545,25 @@ function NotesPanel() {
   const { data, loading, error, reload } = useApi<any[]>(`/costing/notes?status=${status}`, [status]);
   const [busy, setBusy] = useState<string | null>(null);
 
+  const f = useFilters<any>(data, {
+    date: (n: any) => n.note_date ?? n.created_at,
+    search: (n: any) => [n.note_no, n.supplier_name, n.invoice_no, n.reason_code]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'sup', label: 'supplier', of: (n: any) => n.supplier_name },
+      { key: 'ty', label: 'direction', of: (n: any) =>
+        (n.note_type === 'DEBIT' ? 'we claim back' : 'we owe more') },
+      { key: 'rc', label: 'reason', of: (n: any) =>
+        String(n.reason_code ?? '').replace(/_/g, ' ') },
+      { key: 'st', label: 'status', of: (n: any) => n.status },
+      { key: 'src', label: 'raised by', of: (n: any) =>
+        (n.auto_drafted ? 'the match engine' : 'a person') },
+    ],
+    totals: [
+      { label: 'Value', of: (n: any) => Number(n.amount) || 0, money: true },
+    ],
+  });
+
   const act = async (n: any, action: string) => {
     if (action === 'cancel') {
       const reason = window.prompt(`Why is ${n.note_no} being cancelled?`);
@@ -1337,7 +1602,7 @@ function NotesPanel() {
           foot="raised by the match engine" />
       </div>
 
-      <div className="search-bar">
+      <FilterBar f={f} placeholder="Search note, supplier, invoice">
         <select value={status} onChange={(e) => setStatus(e.target.value)}>
           <option value="">Every note</option>
           <option value="DRAFT">Draft</option>
@@ -1345,12 +1610,13 @@ function NotesPanel() {
           <option value="ACCEPTED">Accepted</option>
           <option value="SETTLED">Settled</option>
         </select>
-      </div>
+      </FilterBar>
+      <FilterTotals f={f} noun="note" />
 
       <ErrorBanner error={error} />
       <div className="card"><div className="card-body tight">
         <DataTable
-          rows={data ?? []} loading={loading}
+          rows={f.rows} loading={loading}
           rowTone={(n: any) => (n.status === 'DRAFT' && n.auto_drafted ? 'warn' : undefined)}
           cols={[
             { key: 'n', head: 'Note', render: (n: any) => (
@@ -1489,5 +1755,58 @@ function CompanyCard() {
         </table>
       </div>
     </div>
+  );
+}
+
+function ChangePasswordModal({ onClose }: { onClose: () => void }) {
+  const toast = useToast();
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [again, setAgain] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  /* Checked here as well as on the server, because being told "at least 8
+     characters" after pressing the button means typing all three again. */
+  const tooShort = next.length > 0 && next.length < 8;
+  const mismatch = again.length > 0 && next !== again;
+
+  return (
+    <Modal
+      title="Change your password"
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary"
+          disabled={busy || !current || next.length < 8 || next !== again}
+          onClick={async () => {
+            setBusy(true); setError(null);
+            try {
+              await api.post('/auth/change-password', {
+                currentPassword: current, newPassword: next,
+              });
+              toast('Password changed', 'ok');
+              onClose();
+            } catch (e: any) { setError(e); } finally { setBusy(false); }
+          }}>Change it</button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+      <Field label="Your password now">
+        <input type="password" autoFocus value={current}
+          onChange={(e) => setCurrent(e.target.value)} />
+      </Field>
+      <Field label="New password"
+        hint={tooShort ? 'At least 8 characters.' : 'At least 8 characters.'}>
+        <input type="password" value={next} onChange={(e) => setNext(e.target.value)} />
+      </Field>
+      <Field label="Type it again" hint={mismatch ? 'These two do not match.' : undefined}>
+        <input type="password" value={again} onChange={(e) => setAgain(e.target.value)} />
+      </Field>
+      {mismatch ? (
+        <div className="banner warn"><span><Icon name="alert" size={16} /></span>
+          <div className="small">The two new passwords do not match.</div></div>
+      ) : null}
+    </Modal>
   );
 }

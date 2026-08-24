@@ -87,11 +87,10 @@ function VehiclesCard({ showRetired, manage }: { showRetired: boolean; manage: b
       { key: 't', label: 'type', of: (v: any) => v.vehicle_type },
       { key: 'tr', label: 'transporter', of: (v: any) => v.transporter_name },
       { key: 'st', label: 'status', of: (v: any) => (v.is_active ? v.status : 'REMOVED') },
-      { key: 'pp', label: 'papers', of: (v: any) =>
+      { key: 'pp', label: 'papers', all: 'Any paperwork', of: (v: any) =>
         (v.compliance_expired ? 'expired' : 'valid') },
     ],
     totals: [
-      { label: 'Vehicles', of: () => 1 },
       { label: 'Capacity kg', of: (v: any) => Number(v.capacity_kg) || 0 },
     ],
   });
@@ -348,11 +347,11 @@ function DriversCard({ showRetired, manage }: { showRetired: boolean; manage: bo
     search: (d: any) => [d.full_name, d.phone, d.dl_number].filter(Boolean).join(' '),
     facets: [
       { key: 'st', label: 'status', of: (d: any) => (d.is_active ? d.status : 'REMOVED') },
-      { key: 'dl', label: 'licence', of: (d: any) => (d.licence_expired ? 'expired' : 'valid') },
-      { key: 'cs', label: 'consent', of: (d: any) =>
+      { key: 'dl', label: 'licence', all: 'Any licence', of: (d: any) => (d.licence_expired ? 'expired' : 'valid') },
+      { key: 'cs', label: 'consent', all: 'Consent or not', of: (d: any) =>
         (d.consent_obtained_at ? 'recorded' : 'not recorded') },
     ],
-    totals: [{ label: 'Drivers', of: () => 1 }],
+    totals: [],
   });
 
   return (

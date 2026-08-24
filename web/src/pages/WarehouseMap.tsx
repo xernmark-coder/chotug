@@ -26,6 +26,11 @@ export function WarehouseMapPage() {
   const [adding, setAdding] = useState<any>(null);
   const [printing, setPrinting] = useState<any[] | null>(null);
   const [openFloor, setOpenFloor] = useState<Record<string, boolean>>({});
+  /* A map is a tree, not a list, so the filter prunes rather than narrowing a
+   * table: a branch survives if it matches, or if anything under it does.
+   * Typing "R-04" on a four-floor warehouse should leave one rack on screen. */
+  const [q, setQ] = useState('');
+  const [only, setOnly] = useState<'' | 'full' | 'empty'>('');
 
   const canManage = can('master.location.manage');
   const d = layout.data;
@@ -46,8 +51,36 @@ export function WarehouseMapPage() {
         })),
       });
     }
-    return [...byFloor.values()].filter((g) => g.floor || g.sections.length);
-  }, [d]);
+    const needle = q.trim().toLowerCase();
+    const hit = (...bits: any[]) =>
+      !needle || bits.filter(Boolean).join(' ').toLowerCase().includes(needle);
+
+    const out = [...byFloor.values()].filter((g) => g.floor || g.sections.length);
+    if (!needle && !only) return out;
+
+    return out
+      .map((g) => {
+        const floorHit = hit(g.floor?.name, g.floor?.qr_code);
+        const sections = g.sections
+          .map((sec: any) => {
+            const secHit = floorHit || hit(sec.name, sec.code, sec.qr_code);
+            const racks = sec.racks
+              .map((r: any) => {
+                const rackHit = secHit || hit(r.code, r.qr_code);
+                const shelves = r.shelves.filter((b: any) =>
+                  (rackHit || hit(b.code, b.qr_code))
+                  && (only === '' ? true
+                    : only === 'full' ? Number(b.packs) > 0 : Number(b.packs) === 0));
+                return { ...r, shelves };
+              })
+              .filter((r: any) => r.shelves.length || (hit(r.code, r.qr_code) && !only));
+            return { ...sec, racks };
+          })
+          .filter((sec: any) => sec.racks.length);
+        return { ...g, sections };
+      })
+      .filter((g) => g.sections.length);
+  }, [d, q, only]);
 
   if (layout.loading) return <Layout title="Warehouse map"><Loading /></Layout>;
 
@@ -84,6 +117,39 @@ export function WarehouseMapPage() {
         <Kpi label="Shelves in use" value={`${used.length} / ${allShelves.length}`}
           foot={`${num(allShelves.reduce((a: number, s: any) => a + Number(s.packs), 0), 0)} boxes stored`} />
       </div>
+
+      <div className="search-bar">
+        <select value={only} onChange={(e) => setOnly(e.target.value as any)}>
+          <option value="">Every shelf</option>
+          <option value="full">Holding something</option>
+          <option value="empty">Empty</option>
+        </select>
+        <input value={q} onChange={(e) => setQ(e.target.value)}
+          placeholder="Search a floor, section, rack or shelf code" />
+        {q || only ? (
+          <button className="btn sm" onClick={() => { setQ(''); setOnly(''); }}>Clear</button>
+        ) : null}
+      </div>
+      <div className="filter-total">
+        <span>
+          <b>{grouped.reduce((a, g) => a + g.sections.reduce((b: number, s2: any) =>
+            b + s2.racks.reduce((c: number, r: any) => c + r.shelves.length, 0), 0), 0)}</b> shelves
+          {q || only ? <span className="muted"> of {allShelves.length}</span> : null}
+        </span>
+        <span className="row" style={{ gap: 20 }}>
+          <span className="ft-num"><em>Boxes</em><b>{num(grouped.reduce((a, g) =>
+            a + g.sections.reduce((b: number, s2: any) => b + s2.racks.reduce((c: number, r: any) =>
+              c + r.shelves.reduce((e: number, sh: any) => e + Number(sh.packs || 0), 0), 0), 0), 0), 0)}</b></span>
+          <span className="ft-num"><em>Weight kg</em><b>{num(grouped.reduce((a, g) =>
+            a + g.sections.reduce((b: number, s2: any) => b + s2.racks.reduce((c: number, r: any) =>
+              c + r.shelves.reduce((e: number, sh: any) => e + Number(sh.weight_kg || 0), 0), 0), 0), 0), 1)}</b></span>
+        </span>
+      </div>
+
+      {!grouped.length && (q || only) ? (
+        <Empty icon="🗺️" title="Nothing matches that"
+          hint="Clear the search to see the whole map." />
+      ) : null}
 
       {grouped.map((g) => {
         const key = g.floor?.id ?? 'none';
