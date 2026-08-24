@@ -248,6 +248,87 @@ chk "queue accepts the request" "$(Q "SELECT count(*) FROM pg_constraint WHERE c
 grep -q "Arrange a vehicle" web/src/pages/Purchase.tsx \
   && ok "...or the office assigns one from the order" || no "assign" "no button"
 
+echo "── 59 · the fourth round"
+# The supplier is agreeing to goods, not to a document number.
+grep -q "What we want" web/src/pages/SupplierPortal.tsx \
+  && ok "supplier sees the products, not just a PO no" || no "supplier order list" "number only"
+grep -q "'productName', pr.name" server/src/modules/supplier.ts \
+  && ok "...and the API sends them" || no "supplier orders" "no lines"
+
+# Nobody rings a supplier to confirm an order any more.
+grep -rqi "confirm with supplier" web/src/pages/*.tsx --include=*.tsx \
+  && grep -rli "confirm with supplier" web/src/pages/*.tsx | grep -qv "Purchase.tsx\|Home.tsx" \
+  && no "confirm with supplier" "still on a screen" || ok "no confirm-with-supplier on any screen"
+grep -q "To send to suppliers" web/src/pages/Home.tsx \
+  && ok "the dashboard card says send" || no "dashboard card" "still says confirm"
+
+# Dispatch belongs with the orders.
+# Next entry after Approvals, ignoring the comment that explains why.
+grep -A 8 "to: '/approvals'" web/src/components/ui.tsx | grep "to: '/" | sed -n 2p \
+  | grep -q "/dispatch" \
+  && ok "dispatch sits beside the orders" || no "sidebar" "dispatch is elsewhere"
+
+# Finance should know what it is paying for.
+grep -q "AS goods," server/src/modules/finance.ts \
+  && ok "payment requests carry their goods" || no "goods" "a name and a number only"
+grep -q "head: 'What for'" web/src/pages/FinanceDesk.tsx \
+  && ok "...and the desk lists them" || no "finance desk" "not shown"
+
+# Storing a box: a map, not a list of codes.
+grep -q "store-map" web/src/pages/PackBench.tsx \
+  && ok "shelves are picked off a map" || no "shelf map" "codes only"
+grep -q 'placeholder="R-A1-2"' web/src/pages/PackBench.tsx \
+  && ok "...and can still be typed or scanned" || no "scan" "map only"
+
+# The weighbridge is optional; boxes can be entered as a run.
+grep -q "'ARRIVED', 'QC_PENDING', 'WEIGHED', 'QC_COMPLETE'" server/src/modules/receiving.ts \
+  && ok "quality check does not need the weighbridge" || no "weighbridge" "still mandatory"
+grep -q "count: z.coerce.number().int().min(1).max(200" server/src/modules/receiving.ts \
+  && ok "10 boxes of 20 kg in one entry" || no "bulk boxes" "one at a time"
+grep -q "generate_series(1, \$13::int)" server/src/modules/receiving.ts \
+  && ok "...still one row per box, each voidable" || no "bulk boxes" "stored as one row"
+grep -q "Weigh the boxes" web/src/pages/Receiving.tsx \
+  && ok "the gate offers the box scale instead" || no "gate" "no way to the boxes"
+grep -q "Booked in — the crates are still on the floor" web/src/pages/Grn.tsx \
+  && ok "a posted receipt points at the bench" || no "receipt" "dead ends"
+
+echo "── 57 · expected kg"
+# A buyer in a mandi is buying 200 crates, not 1,840 kilos. The field stays for
+# the owner, who does sometimes commit to a tonnage; blank it and the weighment
+# compares against the quantity ordered, which is what it did anyway.
+grep -q "showExpectedKg = can('admin.override')" web/src/pages/Purchase.tsx \
+  && ok "expected kg is the owner's field only" || no "expected kg" "still on every order"
+grep -q "colSpan={showExpectedKg ? 6 : 5}" web/src/pages/Purchase.tsx \
+  && ok "...and the table still lines up without it" || no "colSpan" "hard-coded"
+grep -q "COALESCE(expected_weight_kg, qty_in_base)" server/src/modules/receiving.ts \
+  && ok "a blank one falls back to the quantity" || no "fallback" "variance breaks when blank"
+
+echo "── 55 · packed boxes travel with the stock"
+# A pack is a physical box with a label on it. Moving the quantity and leaving
+# the box behind left the warehouse holding labels for produce that had gone —
+# the packing bench showed "-6.0 KG still loose", a quantity that cannot exist.
+chk "boxes can be in transit" "$(Q "SELECT count(*) FROM pg_constraint WHERE conname='packs_status_check' AND pg_get_constraintdef(oid) LIKE '%IN_TRANSIT%'")"
+chk "a travelling box names its lorry" "$(Q "SELECT count(*) FROM pg_constraint WHERE conname='ck_pack_in_transit'")"
+grep -q "moveBoxesOnto" server/src/modules/centres.ts \
+  && ok "dispatch puts the boxes on the lorry" || no "dispatch" "boxes left behind"
+grep -q "breaking one open" server/src/modules/centres.ts \
+  && ok "...and refuses to split one" || no "whole boxes" "a box can be split"
+grep -q "transfer_issue_id = \$1 AND status = 'IN_TRANSIT'" server/src/modules/centres.ts \
+  && ok "the shop books them in" || no "receive" "boxes never arrive"
+grep -q "Did not arrive at" server/src/modules/centres.ts \
+  && ok "...and writes off the ones that did not" || no "shortfall" "missing boxes still arrive"
+# The whole point: no place holds more labels than produce.
+chk "no labels without produce" "$(Q "
+  SELECT 1 WHERE NOT EXISTS (
+    SELECT 1 FROM stock_balances sb
+     LEFT JOIN packs pk ON pk.batch_id=sb.batch_id AND pk.warehouse_id=sb.warehouse_id
+                       AND pk.status='IN_STOCK'
+     GROUP BY sb.batch_id, sb.warehouse_id, sb.qty, sb.reserved_qty
+    HAVING (sb.qty - sb.reserved_qty) - COALESCE(SUM(pk.qty),0) < -0.001)")"
+chk "boxes now sitting in a shop" "$(Q "
+  SELECT count(*) FROM packs pk JOIN warehouses w ON w.id=pk.warehouse_id
+   WHERE w.is_centre AND pk.status='IN_STOCK'")"
+
 echo "── 53 · the packing phase"
 # What comes off the vehicle is not what gets stored: 2 crates of 50 kg become
 # 20 boxes of 5 kg, each with its own grade, price and QR.

@@ -550,6 +550,16 @@ back off dusty labels.
 
 ## centres — the shops
 
+`POST /centres/transfers` moves the **packed boxes** as well as the quantity.
+Whole boxes only: sending 23 kg of a batch packed into 5 kg boxes is refused
+with `{ boxSize: 5, suggest: [20, 25] }`, because anything beyond whole boxes
+has to come from produce that is not in a box. Dispatched boxes go `IN_TRANSIT`,
+lose their bin, and keep their code, grade and price.
+
+`POST /centres/transfers/:id/receive` books in as many boxes as were counted;
+the rest are voided against the shortfall note. A box is never marked arrived
+because the paperwork said it was sent.
+
 Mounted at `/api/centres`. **A centre is a warehouse with `is_centre` set.** It
 holds stock, stock moves through the same ledger, packs sit on the same shelves
 — giving it its own table would have meant a second stock model and two

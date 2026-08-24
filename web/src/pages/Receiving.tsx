@@ -555,6 +555,7 @@ export function GateEntryPage() {
 /* ================================================= GATE DETAIL =========== */
 export function GateDetailPage() {
   const { id } = useParams();
+  const nav = useNavigate();
   const toast = useToast();
   const { can } = useAuth();
   const { data, loading, error, reload } = useApi<any>(`/receiving/gate-entries/${id}`, [id]);
@@ -610,7 +611,7 @@ export function GateDetailPage() {
 
       <div className="tabs">
         <button className={`tab ${tab === 'weigh' ? 'active' : ''}`} onClick={() => setTab('weigh')}>
-          Weighment {data.weighments?.length ? `(${data.weighments.length})` : ''}
+          Weighbridge {data.weighments?.length ? `(${data.weighments.length})` : ''}
         </button>
         <button className={`tab ${tab === 'qc' ? 'active' : ''}`} onClick={() => setTab('qc')}>
           Quality check {data.inspections?.length ? `(${data.inspections.length})` : ''}
@@ -620,7 +621,32 @@ export function GateDetailPage() {
         </button>
       </div>
 
-      {tab === 'weigh' ? <WeighTab gate={data} onDone={reload} /> : null}
+      {/* The weighbridge is one way to get a weight and weighing the boxes is
+          the other. Plenty of yards have no bridge, and on a small load
+          weighing every box IS the weight — it is the figure the receipt uses
+          either way. Neither is required before the quality check. */}
+      {tab === 'weigh' ? (
+        <>
+          <div className="banner info mb">
+            <span><Icon name="info" size={16} /></span>
+            <div>
+              The weighbridge is optional. It gives a gross-and-tare check against
+              the order; if you have no bridge, or the load is small,{' '}
+              <b>weigh the boxes instead</b> — that is the number the receipt uses.
+              {(data.boxTotals ?? []).length ? (
+                <div className="small">
+                  {(data.boxTotals ?? []).reduce((a: number, b: any) => a + Number(b.boxes), 0)} box(es)
+                  weighed so far.
+                </div>
+              ) : null}
+            </div>
+            <button className="btn sm primary" onClick={() => nav(`/unload/${data.id}`)}>
+              Weigh the boxes →
+            </button>
+          </div>
+          <WeighTab gate={data} onDone={reload} />
+        </>
+      ) : null}
       {tab === 'qc' ? <QcTab gate={data} onDone={reload} /> : null}
       {tab === 'grn' ? <GrnTab gate={data} onDone={reload} /> : null}
     </Layout>
@@ -1285,6 +1311,9 @@ function GrnTab({ gate, onDone }: { gate: any; onDone: () => void }) {
       });
       toast(r.message, 'ok');
       onDone();
+      /* Straight on to the bench. The receipt is not the end of the job — the
+         crates are standing there waiting to be graded, packed and shelved,
+         and the batch they belong to has only just come into existence. */
       nav(`/grns/${r.id}`);
     } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(false); }
   };

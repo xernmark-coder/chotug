@@ -380,6 +380,11 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         { to: '/requirements', label: 'Requirements', icon: 'clipboard', perms: ['purchase.requirement.create'] },
         { to: '/purchase-orders', label: 'Purchase Orders', icon: 'box', perms: ['purchase.po.create', 'purchase.po.approve'] },
         { to: '/approvals', label: 'Approvals', icon: 'checkDoc', perms: ['purchase.po.approve', 'purchase.requirement.approve', 'finance.invoice.approve'] },
+        /* Next to the orders, not down in the warehouse block. Arranging a
+           lorry is something you decide while looking at an order — most often
+           because the supplier has just asked for one — and having to cross the
+           whole menu to do it was a reason to leave it until later. */
+        { to: '/dispatch', label: 'Dispatch', icon: 'route', perms: ['logistics.pickup.manage', 'receiving.gate.create'] },
       ],
     },
     {
@@ -418,7 +423,6 @@ export function Layout({ children, title, subtitle, actions, touch }: {
           perms: ['inventory.stock.issue', 'inventory.pack.grade'] },
         { to: '/sales', label: 'Sell & Profit', icon: 'coins',
           perms: ['inventory.stock.issue', 'data.margin.view'] },
-        { to: '/dispatch', label: 'Dispatch', icon: 'route', perms: ['logistics.pickup.manage', 'receiving.gate.create'] },
         { to: '/fleet', label: 'Vehicles & Drivers', icon: 'truck', perms: ['master.vehicle.manage', 'receiving.gate.create'] },
       ],
     },

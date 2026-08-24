@@ -297,9 +297,21 @@ function StoreModal({ packs, bins, onClose, onDone }: {
   const [error, setError] = useState<any>(null);
   const chosen = packs.filter((p) => picked[p.id]);
 
+  /* Grouped the way the warehouse is: rack, then the shelves on it. */
+  const racks = React.useMemo(() => {
+    const m = new Map<string, any[]>();
+    for (const b of bins) {
+      const k = b.rack_code ?? 'Unracked';
+      if (!m.has(k)) m.set(k, []);
+      m.get(k)!.push(b);
+    }
+    return [...m.entries()];
+  }, [bins]);
+
   return (
     <Modal
       title="Put these on a shelf"
+      wide
       onClose={onClose}
       footer={<>
         <button className="btn" onClick={onClose}>Cancel</button>
@@ -321,15 +333,47 @@ function StoreModal({ packs, bins, onClose, onDone }: {
       <label className="lbl">Scan the shelf label</label>
       <input value={binCode} autoFocus onChange={(e) => setBinCode(e.target.value.toUpperCase())}
         placeholder="R-A1-2" />
-      <div className="chip-row mt mb">
-        {bins.slice(0, 12).map((b: any) => (
-          <button key={b.id} className={`chip ${binCode === b.code ? 'primary' : ''}`}
-            onClick={() => setBinCode(b.code)}>
-            {b.code}{b.packs ? ` · ${b.packs}` : ''}
-          </button>
-        ))}
+
+      {/* Or point at it. A scanner is quicker when the label is in front of
+          you, and useless when you are deciding WHERE to put something —
+          twelve codes in a row told nobody which rack was nearly full or
+          which one is by the door. This is the same rack-and-shelf layout as
+          the warehouse map, small enough to sit in a dialog. */}
+      <div className="row mt" style={{ justifyContent: 'space-between' }}>
+        <label className="lbl" style={{ margin: 0 }}>…or pick it off the map</label>
+        {bins.length > 0 ? (
+          <span className="small muted">{bins.length} shelves · filled ones are shaded</span>
+        ) : null}
       </div>
-      <label className="lbl">Which boxes</label>
+      <div className="store-map">
+        {racks.map(([rack, shelves]) => (
+          <div className="loc-rack" key={rack}>
+            <div className="loc-rack-name"><b className="small">{rack}</b></div>
+            <div className="shelf-row">
+              {shelves.map((b: any) => (
+                <button key={b.id}
+                  className={`shelf ${Number(b.packs) ? 'full' : ''} ${binCode === b.code ? 'on' : ''}`}
+                  title={b.capacity_kg
+                    ? `${num(b.current_fill_kg ?? 0, 0)} of ${num(b.capacity_kg, 0)} kg`
+                    : 'no stated capacity'}
+                  onClick={() => setBinCode(b.code)}>
+                  <b>{b.code}</b>
+                  <span className="small">
+                    {Number(b.packs) ? `${b.packs} box${Number(b.packs) === 1 ? '' : 'es'}` : 'empty'}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+        {!racks.length ? (
+          <p className="small muted">
+            No shelves set up yet. Build the racks on the warehouse map, or type a code above.
+          </p>
+        ) : null}
+      </div>
+
+      <label className="lbl mt">Which boxes</label>
       <table className="mini">
         <tbody>
           {packs.map((p) => (

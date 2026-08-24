@@ -121,6 +121,7 @@ export function PoCreatePage() {
   const { data: requirement } = useApi<any>(requirementId ? `/planning/requirements/${requirementId}` : null);
 
   const [supplierId, setSupplierId] = useState('');
+  const showExpectedKg = can('admin.override');
   const [addingSupplier, setAddingSupplier] = useState(false);
   const [addingProduct, setAddingProduct] = useState(false);
   const [expectedDate, setExpectedDate] = useState(addDays(1));
@@ -267,9 +268,17 @@ export function PoCreatePage() {
               ) : (
                 <div className="table-wrap">
                   <table className="data">
+                    {/* Expected kg is a weighbridge nicety, not something a
+                        buyer standing in a mandi knows or should be asked for:
+                        they are buying 200 crates, not 1,840 kilos. Left blank
+                        the weighment simply compares against the quantity
+                        ordered, which is what it did on almost every order
+                        anyway. Kept for the owner, who does sometimes commit to
+                        a tonnage. */}
                     <thead><tr>
                       <th>Product</th><th className="num">Quantity</th><th className="num">Rate</th>
-                      <th className="num">Expected kg</th><th className="num">Line total</th><th></th>
+                      {showExpectedKg ? <th className="num">Expected kg</th> : null}
+                      <th className="num">Line total</th><th></th>
                     </tr></thead>
                     <tbody>
                       {lines.map((l, i) => (
@@ -290,13 +299,15 @@ export function PoCreatePage() {
                                   j === i ? { ...x, rate: Number(e.target.value) } : x))}
                                 onBlur={(e) => checkRate(l, Number(e.target.value))} />
                             </td>
-                            <td className="num">
-                              <input className="inline num" style={{ width: 82 }} type="number"
-                                value={l.expectedWeightKg ?? ''}
-                                placeholder="—"
-                                onChange={(e) => setLines((s) => s.map((x, j) =>
-                                  j === i ? { ...x, expectedWeightKg: e.target.value ? Number(e.target.value) : null } : x))} />
-                            </td>
+                            {showExpectedKg ? (
+                              <td className="num">
+                                <input className="inline num" style={{ width: 82 }} type="number"
+                                  value={l.expectedWeightKg ?? ''}
+                                  placeholder="—"
+                                  onChange={(e) => setLines((s) => s.map((x, j) =>
+                                    j === i ? { ...x, expectedWeightKg: e.target.value ? Number(e.target.value) : null } : x))} />
+                              </td>
+                            ) : null}
                             <td className="num mono"><b>{inr(l.qty * l.rate)}</b></td>
                             <td>
                               <div className="row" style={{ gap: 4 }}>
@@ -308,7 +319,7 @@ export function PoCreatePage() {
                             </td>
                           </tr>
                           {rateWarnings[l.productId] ? (
-                            <tr><td colSpan={6} style={{ paddingTop: 0 }}>
+                            <tr><td colSpan={showExpectedKg ? 6 : 5} style={{ paddingTop: 0 }}>
                               <div className="banner warn small"><span><Icon name="alert" size={16} /></span><div>{rateWarnings[l.productId]}</div></div>
                             </td></tr>
                           ) : null}

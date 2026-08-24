@@ -263,8 +263,14 @@ insightsRouter.get('/dashboard', h(async (req) => {
        (SELECT count(*) FROM gate_entries g
          WHERE g.company_id=$1 AND g.status IN ('QC_COMPLETE','GRN_PENDING')
            AND ($2::uuid IS NULL OR g.branch_id=$2))                        AS awaiting_grn,
-       (SELECT count(*) FROM putaway_tasks t
-         WHERE t.company_id=$1 AND t.status IN ('PENDING','IN_PROGRESS'))   AS awaiting_putaway,
+       /* Put-away is gone; the step after booking in is the bench. Counts
+        * batches holding stock that nothing has been packed from yet. */
+       (SELECT count(*) FROM stock_balances sb
+         WHERE sb.company_id=$1 AND sb.qty > 0
+           AND NOT EXISTS (SELECT 1 FROM packs k
+                            WHERE k.batch_id = sb.batch_id
+                              AND k.warehouse_id = sb.warehouse_id
+                              AND k.status = 'IN_STOCK'))                   AS awaiting_putaway,
        (SELECT count(*) FROM supplier_invoices i
          WHERE i.company_id=$1 AND i.status IN ('PENDING','MISMATCH','HOLD')
            AND ($2::uuid IS NULL OR i.branch_id=$2))                        AS invoices_to_match,
@@ -434,8 +440,15 @@ insightsRouter.get('/dashboard', h(async (req) => {
        (SELECT count(*) FROM gate_entries g
          WHERE g.company_id=$1 AND g.status IN ('QC_COMPLETE','GRN_PENDING')
            AND ($2::uuid IS NULL OR g.branch_id=$2))                        AS to_book,
-       (SELECT count(*) FROM putaway_tasks t
-         WHERE t.company_id=$1 AND t.status IN ('PENDING','IN_PROGRESS'))   AS to_putaway,
+       /* Was a count of putaway_tasks, which are no longer raised — the step
+        * between booking in and a packed box is the bench. This counts batches
+        * with stock that nothing has been packed from yet. */
+       (SELECT count(*) FROM stock_balances sb
+         WHERE sb.company_id=$1 AND sb.qty > 0
+           AND NOT EXISTS (SELECT 1 FROM packs k
+                            WHERE k.batch_id = sb.batch_id
+                              AND k.warehouse_id = sb.warehouse_id
+                              AND k.status = 'IN_STOCK'))                   AS to_putaway,
        (SELECT count(*) FROM packs k
          WHERE k.company_id=$1 AND k.status='IN_STOCK')                     AS packed,
        (SELECT count(*) FROM supplier_invoices i

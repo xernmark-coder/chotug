@@ -30,11 +30,13 @@ export function UnloadPage() {
 
   const [productId, setProductId] = useState<string>('');
   const [weight, setWeight] = useState('');
+  const [count, setCount] = useState('');
   const [busy, setBusy] = useState(false);
   const [voiding, setVoiding] = useState<any>(null);
   const [postError, setPostError] = useState<any>(null);
   const scanRef = useRef<HTMLInputElement>(null);
 
+  const boxCount = Math.max(1, Math.min(200, Number(count) || 1));
   const lines = data?.lines ?? [];
   const chosen = lines.find((l: any) => l.product_id === productId);
 
@@ -53,10 +55,12 @@ export function UnloadPage() {
         productId: over?.scannedCode ? undefined : (over?.productId ?? productId),
         scannedCode: over?.scannedCode,
         weightKg: kg,
+        count: boxCount,
         captureMode: over?.scannedCode ? 'SCAN' : 'MANUAL',
       });
       toast(r.message, 'ok');
       setWeight('');
+      setCount('');
       reload();
     } catch (e: any) { setPostError(e); } finally { setBusy(false); }
   };
@@ -147,12 +151,32 @@ export function UnloadPage() {
                   }}>{k}</button>
                 ))}
               </div>
-              <button
-                className="btn primary block lg mt"
-                disabled={busy || !canWeigh || !Number(weight) || !productId}
-                onClick={() => addBox()}>
-                {busy ? 'Recording…' : `Add box ${data.totalBoxes + 1}`}
-              </button>
+              {/* A lorry often holds a stack of identical boxes. Recording ten
+                  of them was ten identical taps, so the floor stopped bothering
+                  and typed one box of 200 kg — which cannot be corrected when
+                  one of the ten turns out to be short. Each is still its own
+                  row; this only saves the repetition. */}
+              <div className="row mt" style={{ gap: 8, alignItems: 'flex-end' }}>
+                <div style={{ width: 120 }}>
+                  <label className="lbl">How many</label>
+                  <input className="num" type="number" min={1} max={200} value={count}
+                    onChange={(e) => setCount(e.target.value)} placeholder="1" />
+                </div>
+                <button
+                  className="btn primary block lg"
+                  disabled={busy || !canWeigh || !Number(weight) || !productId}
+                  onClick={() => addBox()}>
+                  {busy ? 'Recording…'
+                    : boxCount > 1
+                      ? `Add ${boxCount} boxes of ${weight || 0} kg`
+                      : `Add box ${data.totalBoxes + 1}`}
+                </button>
+              </div>
+              {boxCount > 1 && Number(weight) ? (
+                <p className="small muted mt" style={{ textAlign: 'center' }}>
+                  {boxCount} × {weight} kg = <b>{num(boxCount * Number(weight), 1)} kg</b>
+                </p>
+              ) : null}
               {!canWeigh ? (
                 <p className="small muted mt">You can watch this, but not record boxes.</p>
               ) : null}

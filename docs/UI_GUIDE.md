@@ -54,7 +54,7 @@ This is the single most important screen in the system. It answers "what should 
 
 | Column | What it shows |
 |---|---|
-| What | The kind of task: Requirement, Approval, Arrival, Weighment, Quality check, Goods receipt, Put-away, Invoice, Alert |
+| What | The kind of task: Requirement, Approval, Arrival, Weighment, Quality check, Goods receipt, Grade & pack, Invoice, Alert |
 | Task | The headline, e.g. *"Weigh vehicle MH12AB1234"*, with a sub-line giving context |
 | Document | The document number (GT/2026-27/000014) |
 | Where | Branch or warehouse |
@@ -67,7 +67,7 @@ Rows are sorted: overdue first, then critical, then warn, then oldest first.
 | Control | What it does |
 |---|---|
 | **Refresh** | Re-reads `GET /api/insights/work-queue`. The page also refreshes itself every 60 seconds. |
-| Clicking any row / **Open →** | Jumps straight to the exact screen where that task is done — a weighment task opens that vehicle's gate record on the weighment tab; an approval opens the approvals queue; a put-away task opens the put-away list. |
+| Clicking any row / **Open →** | Jumps straight to the exact screen where that task is done — a weighment task opens that vehicle's gate record on the weighment tab; an approval opens the approvals queue; a grade-and-pack task opens that batch on the bench. |
 
 ### What you should know
 Tasks appear here automatically the moment a document becomes someone else's problem, and disappear the moment it's dealt with. Nobody has to remember to hand work over.
@@ -98,7 +98,7 @@ Purchased today · Purchased this month · Outstanding payable (amber if any ove
 
 **Side column**
 - **Running low** — up to 12 products at or below reorder point, with current stock, the reorder point beneath it, and a days-of-cover chip (red under 1 day).
-- **Pipeline** — a plain list of counts: open requirements, draft/submitted POs, waiting to weigh, waiting for QC, waiting for receipt, waiting for put-away, invoices to match.
+- **Pipeline** — a plain list of counts: open requirements, draft/submitted POs, waiting to weigh, waiting for QC, waiting for receipt, waiting to be packed, invoices to match.
 
 ### Buttons and controls
 
@@ -272,7 +272,10 @@ Exactly three actions per row, as the specification requires — nothing else:
 
 # 6. Receiving — the chain that cannot be skipped
 
-The order is fixed: **Gate entry → Weighment → Quality check → Goods receipt → Put-away.** Stock cannot enter without a gate entry, because the database itself requires one on every receipt.
+The order is fixed: **Gate entry → weigh (bridge or boxes) → Quality check →
+Goods receipt → Grade & pack.** Stock cannot enter without a gate entry, because
+the database itself requires one on every receipt. The weighbridge is the only
+optional step — weighing the boxes gives the same figure.
 
 ## 6.1 Expected arrivals
 **Route:** `/arrivals`
@@ -377,7 +380,7 @@ A table pre-filled from the weighment and inspections: product, received, accept
 4. Creates the GRN header and lines.
 5. For each accepted quantity: creates a **batch** with an expiry date derived from shelf life; prints a **lot label** and the requested number of **crate labels** (variable-weight products carry their real weight per crate).
 6. Writes the **stock ledger** IN row and updates **stock balances**.
-7. Suggests a bin by storage type and free capacity, and creates a **put-away task**.
+7. Suggests a bin by storage type and free capacity, and raises a **grade & pack** job pointing at the bench. The suggested bin becomes the bench's default shelf.
 8. Updates the PO line's received/accepted/rejected quantities and line status; moves the PO to PART_RECEIVED or RECEIVED.
 9. Closes the gate entry and stamps the gate-out time.
 10. Writes a `grn.posted` event to the outbox so Pricing and Accounts hear about it — in the same transaction, so a committed receipt can never fail to notify them.
@@ -404,17 +407,18 @@ Explains the rule: *transport is spread by weight, commission by value — so a 
 ### Reverse dialog
 Red warning: this removes the stock again and reopens the PO lines, only works if the stock hasn't already moved out, and the original receipt stays in the records. A reason of at least six characters is required. **Reverse receipt** writes reversal rows to the stock ledger (it does not delete anything), restores the PO line quantities, marks the batches written-off, and raises a HIGH alert.
 
-## 6.6 Put-away
-**Route:** `/putaway` · Needs `receiving.putaway.confirm` · Touch-optimised
+## 6.6 Put-away — removed
 
-Tasks waiting: product and storage type, batch with expiry, quantity and weight, rotation rule chip (FEFO/FIFO), and the suggested location as `ZONE/RACK/BIN`. Sorted by earliest expiry, because that is what FEFO means.
+**`/putaway` now redirects to `/packing`.**
 
-| Button | What it does |
-|---|---|
-| Any row / **Confirm** | Opens the confirmation dialog |
-| Dialog: **Which bin did you actually use?** | Lists bins with storage type and current fill vs capacity |
-| Dialog: **Why a different bin?** | Appears **only** if you picked something other than the suggestion, and is then required |
-| **Confirm put-away** | Marks the task done, updates the bin's fill weight, and stamps the bin onto the stock ledger row so the stock's physical location is now known. |
+There used to be a task list telling somebody to move a whole batch into a bin,
+raised automatically when a receipt was posted. The floor places stock box by
+box at the packing bench — grade it, label it, scan the shelf — so keeping both
+meant the same crates were placed twice and the two records disagreed.
+
+Posting a receipt raises **Grade & pack** for the batch instead. The bin the old
+put-away would have suggested is still computed and still used, as the bench's
+default shelf. See *Receiving, end to end* and *The packing phase*.
 
 ## 6.7 Stock & batches
 **Route:** `/stock`
@@ -450,27 +454,38 @@ Header: supplier, invoice number, invoice date, due date, and a **reverse charge
 | **Add line** | Adds a blank row |
 | **Capture invoice** | Saves it. Immediately checks for duplicates — same supplier with the same invoice number, or the same date and amount — and warns you if found. Checks whether the line amounts actually add up to the stated subtotal. Pushes an *invoice to match* task to Finance. |
 
-## 7.3 Invoice detail and 3-way match
+## 7.3 Invoice detail
 **Route:** `/invoices/:id`
 
-Red banner if it looks like a duplicate. Amber banner if the arithmetic on the invoice itself doesn't add up.
+Red banner if it looks like a duplicate. Amber banner if the arithmetic on the
+invoice itself doesn't add up.
 
-**Invoice lines vs what we received** — billed quantity beside received quantity, billed rate beside PO rate, and amount. Any line with no matching goods receipt is red-barred with a **no receipt** chip.
+**Invoice lines vs what we received** — billed quantity beside received
+quantity, billed rate beside PO rate, and amount. Any line with no matching
+goods receipt is red-barred with a **no receipt** chip.
+
+**How this bill compares** — the comparison against the order and the receipt.
+It runs **on its own** when the invoice is filed, by the office or by the
+supplier; there is no *Run 3-way match* button and no verdict chips labelled
+QTY / RATE / TAX / CHARGE. Either the bill agrees, or the panel lists what does
+not, with what it should have been beside what was billed.
 
 | Button | Permission | What it does |
 |---|---|---|
-| **Run 3-way match** | `finance.invoice.match` | Compares invoice against goods receipt (quantity) and purchase order (rate), using the company's tolerance profile. |
+| **Check against receipts** | `finance.invoice.match` | Runs it again. For the case that matters: the bill arrived before the lorry, so there was nothing to compare it with, and now there is. |
 
-**What the match produces:** four verdict chips (QTY, RATE, TAX, CHARGE) and a findings table listing every problem in plain words — *"Billed quantity is 6.4% away from what was received"* — with the expected and actual values.
-
-**What happens next, automatically:**
+**What it does automatically:**
 
 | Outcome | Result |
 |---|---|
-| Everything within tolerance | Status → MATCHED, then **PAYABLE**, and a payable record is created. The invoice-match task is cleared. |
-| Outside tolerance | Status → MISMATCH. A HIGH alert is raised and an approval request goes to Finance. |
-| Beyond the critical threshold | Status → **HOLD** with the failures recorded as the hold reason. It cannot become payable. |
-| Billed more than received | A **debit note is auto-drafted** for the difference, so the money is actually recovered rather than forgotten. It appears in the Credit / debit notes panel with an **auto-drafted** chip. |
+| Everything within tolerance | Status → MATCHED, then **PAYABLE**. **No task is raised** — a bill that ties needs nobody's attention, and manufacturing one is how a queue stops being read. |
+| Outside tolerance | Status → MISMATCH, a HIGH alert, and a task saying *"does not agree with what we received"*. |
+| Beyond the critical threshold | Status → **HOLD** with the failures as the hold reason. |
+| Billed more than received | A **debit note is auto-drafted** for the difference, so the money is recovered rather than forgotten. |
+
+It is never a gate. The client pays the supplier when the order is accepted, so
+this is reconciliation after the fact — useful to read, and Finance still
+decides.
 
 ## 7.4 Payment status
 **Route:** `/payments` · Needs `finance.payment.view`
@@ -499,7 +514,7 @@ An explainer of how the scores work, then: supplier and code, type, status, perf
 
 Severity chip, title with the detail beneath, alert type, age, status. Critical rows red-barred.
 
-Alerts the system raises on its own: low stock, PO approval pending, arrival missed, weight variance, QC rejection, GRN pending, invoice mismatch, duplicate invoice, abnormal landed cost, put-away pending, vehicle compliance, hygiene failure, GRN reversed.
+Alerts the system raises on its own: low stock, PO approval pending, arrival missed, weight variance, QC rejection, GRN pending, invoice mismatch, duplicate invoice, abnormal landed cost, vehicle compliance, hygiene failure, GRN reversed.
 
 | Button | What it does |
 |---|---|
@@ -558,7 +573,7 @@ The left sidebar groups pages by the job being done, not by database module:
 ```
 Work        My Work · Dashboard · Alerts
 Plan & Buy  What to Buy · Requirements · Purchase Orders · Approvals
-Receive     Expected Arrivals · Gate & Receiving · Goods Receipts · Put-away · Stock & Batches
+Receive     Expected Arrivals · Gate & Receiving · Goods Receipts · Stock & Batches
 Money       Invoices & Match · Payment Status · Suppliers
 Insight     Reports · AI Centre · Settings
 ```
@@ -575,8 +590,8 @@ Menu items you have no permission for are not rendered at all. A gate executive 
 | **Purchase Manager** | My Work (approvals at the top) | Approve / hold / reject, watch supplier scores and rate anomalies |
 | **Gate Executive** | My Work (arrivals) | Record vehicle → checklist → submit & lock → weigh |
 | **QC Executive** | My Work (QC pending) | Open vehicle → photo assist → checklist → accept / reject / hold |
-| **Warehouse Executive** | My Work (GRN + put-away) | Post receipt → labels → put away by FEFO |
-| **Finance Executive** | My Work (invoices) | Capture invoice → 3-way match → payable, or hold and debit note |
+| **Warehouse Executive** | My Work (GRN + packing) | Post receipt → grade and pack each box → scan it onto a shelf |
+| **Finance Executive** | My Work (invoices) | Capture invoice → it is checked against the receipt automatically → payable, or hold and debit note |
 | **Owner** | Dashboard | Everything, plus the audit trail and AI governance |
 
 ---
@@ -954,6 +969,25 @@ bench   makes the boxes that will be sold,       a label per box, scanned onto a
         grades and prices each one
 ```
 
+### The weighbridge is optional
+
+It used to gate the quality check: a vehicle still at ARRIVED could not be
+inspected until somebody had put it on the bridge. Plenty of yards have no
+bridge, and on a small load weighing every box **is** the weight — it is the
+figure the receipt uses either way. Skipping it loses the gross-and-tare
+variance against the order and nothing else, and the weighbridge tab says so
+with a way straight to the box scale.
+
+### Ten boxes of twenty kilos
+
+Recording ten identical boxes was ten identical taps, so the floor stopped
+bothering and typed one box of 200 kg — which cannot be corrected when one of
+the ten turns out to be short. The unload screen now takes a count beside the
+weight and shows the arithmetic: *6 × 20 kg = 120 kg*.
+
+It still writes **one row per box**. Each remains separately voidable, the
+numbering stays contiguous, and "box 41" still means something on the floor.
+
 ### The packing phase
 
 What comes off the vehicle is not what gets stored. Two crates holding 50 kg
@@ -978,6 +1012,49 @@ lorry — which is the one grade a packed box should never carry, since the whol
 point of grading at the bench is that the person holding the box can see what
 the vehicle inspection could not. `POST /pack-runs` was deleted with it.
 
+### The boxes travel with the stock
+
+A pack is a physical box with a label on it, so sending stock to a shop sends
+the boxes. Moving the quantity and leaving the boxes behind gave the warehouse
+labels for produce that had gone, and gave the shop loose kilos it could not
+sell as the 5 kg boxes it had actually been handed.
+
+**Whole boxes only.** A batch packed into 5 kg boxes cannot send 23 kg:
+
+```
+Kesar is packed into boxes of 5 KG. Sending 23 would mean breaking one open.
+Send 20 or 25 instead.
+```
+
+Splitting a sealed box is a thing that happens on a floor, not in a database —
+and if it did happen, whoever did it has to repack and relabel anyway. Anything
+beyond whole boxes has to come from produce that is not in a box; if there is
+none, the transfer is refused with the two nearest amounts that work.
+
+A box in transit is `IN_TRANSIT` — it has left one place and has not been
+counted in at the other, which is exactly the window in which a box goes
+missing. It loses its bin on dispatch, because the rack it was on belongs to the
+warehouse it has left, and the shop scans it onto its own shelf. It keeps its
+code, grade and price: it is the same box, in a different town.
+
+**A short delivery writes boxes off.** If the shop counts 20 kg of a 25 kg load,
+four boxes become the shop's stock and the fifth is voided against the note the
+shop had to write — *"Did not arrive at Kothrud Centre: one box crushed on the
+way"*. Marking all five arrived would recreate the drift this exists to prevent.
+
+Both ends show boxes as boxes: the centre's **Coming to you** says *"5 labelled
+box(es)"* under the quantity, and **On the shelves** has an *In boxes* column
+against each product, reading `loose` where the produce is not packed.
+
+### Putting a box on a shelf
+
+A scanner is quicker when the label is in front of you and useless when you are
+deciding *where* something should go. The store dialog now shows the same
+rack-and-shelf layout as the warehouse map, small enough to sit in a dialog:
+each shelf says whether it is empty or how many boxes it holds, filled ones are
+shaded, and clicking one fills the code. Typing or scanning still works — it is
+the top field.
+
 ### When labels outlive their stock
 
 Sending a batch to a shop takes the produce and leaves its boxes' labels
@@ -986,6 +1063,10 @@ bench read **"−6.0 KG still loose"** — a quantity that cannot exist, on the 
 screen whose job is deciding how much more can be packed. The bench now reports
 nothing loose and says how far the labels overrun the stock, so the stale ones
 can be voided.
+
+This can no longer happen through a transfer — the boxes go with the produce —
+but a write-off or a correction can still leave a label behind, so the warning
+stays.
 
 **Put-away has been removed.** There used to be a second path: a task list
 telling somebody to move a whole batch into a bin, raised automatically when a
@@ -1026,6 +1107,30 @@ means anything.
 
 **+ New product** sits on the bar, because this is the screen where you notice
 one is missing.
+
+## What the supplier is being asked for
+
+Their order list led with **PO/2026-27/000055** and a total. That number is our
+reference and means nothing to them, so they were being asked to accept or
+decline an order without being able to see, on that screen, that it was 200 kg
+of Kesar at ₹110. The first column is now **What we want** — every line with its
+quantity, unit, grade and rate — and the order number sits beside it as the
+reference it is. Searching finds a product, not only a document number.
+
+## What Finance is paying for
+
+Verifying *"₹38,280 to Sahyadri"* with no way to see that it is 400 kg of
+Alphonso makes the check that exists to catch a wrong payment into a check on a
+name and a number. Every request on the desk now lists its goods, read from
+whichever document it hangs off — a purchase order or an invoice — and the
+search matches product names too.
+
+## Dispatch sits with the orders
+
+It used to live down in the warehouse block. Arranging a lorry is something you
+decide while looking at an order — most often because the supplier has just
+asked for one — and crossing the whole menu to do it was a reason to leave it
+until later.
 
 ## The supplier posts their own rates
 
@@ -1242,7 +1347,7 @@ much" is the question somebody filtered in order to ask.
 
 Every browsable list in the app: the work queue, requirements, the buy list,
 purchase orders, approvals, expected arrivals, the gate pipeline, warehouse
-intake, goods receipts, put-away, stock on hand, what has left the warehouse,
+intake, goods receipts, stock on hand, what has left the warehouse,
 packing (batches, packs, runs), sell-and-profit (packs, suggestions, sales),
 the Finance desk (all four queues), payment status, credit and debit notes,
 supplier performance, the supplier master, the supplier's own portal (orders,

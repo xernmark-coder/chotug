@@ -103,6 +103,24 @@ export function GrnDetailPage() {
         </div>
       }>
       <ErrorBanner error={error} />
+      {/* Booking in is not the end of the job. The crates are standing on the
+          floor and the batch they belong to has only just come into existence,
+          so the next step goes at the top rather than as a button in the last
+          column of a wide table. */}
+      {data.status === 'POSTED' && can('inventory.pack.grade')
+        && (data.lines ?? []).some((l: any) => l.batch_id) ? (
+        <div className="banner info mb">
+          <span><Icon name="tag" size={16} /></span>
+          <div>
+            <b>Booked in — the crates are still on the floor.</b>{' '}
+            Grade each box as you pack it, label it, and scan it onto a shelf.
+          </div>
+          <button className="btn sm primary"
+            onClick={() => nav(`/pack-bench/${(data.lines ?? []).find((l: any) => l.batch_id).batch_id}`)}>
+            Grade &amp; pack &rarr;
+          </button>
+        </div>
+      ) : null}
       {data.is_backdated ? (
         <div className="banner warn mb"><span><Icon name="clipboard" size={16} /></span>
           <div>This receipt was back-dated to {date(data.posting_date)}.</div></div>

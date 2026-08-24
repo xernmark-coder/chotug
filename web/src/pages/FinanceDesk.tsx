@@ -370,7 +370,8 @@ function requestFilterSpec() {
   return {
     date: (r: any) => r.requested_at,
     search: (r: any) => [r.payee_name, r.request_no, r.note, r.supplier_name,
-      r.requested_by_name, r.expense_category].filter(Boolean).join(' '),
+      r.requested_by_name, r.expense_category,
+      ...(r.goods ?? []).map((g: any) => g.productName)].filter(Boolean).join(' '),
     facets: [
       { key: 'payee', label: 'payee', of: (r: any) => r.payee_name },
       { key: 'cat', label: 'expense', of: (r: any) => r.expense_category },
@@ -416,6 +417,24 @@ function requestCols() {
             {r.warehouse_name ? ` · ${r.warehouse_name}` : ''}
           </div></div>
       </div>) },
+    /* What the money is for. Verifying "₹38,280 to Sahyadri" without being
+       able to see that it is 400 kg of Alphonso makes the check that exists to
+       catch a wrong payment into a check on a name and a number. */
+    { key: 'g', head: 'What for', render: (r: any) => (
+      (r.goods ?? []).length ? (
+        <div className="stack" style={{ gap: 1 }}>
+          {(r.goods ?? []).slice(0, 3).map((g: any, i: number) => (
+            <div key={i} className="row small" style={{ gap: 6 }}>
+              <Icon name={g.icon ?? 'produce'} size={14} />
+              <span><b>{num(g.qty, 0)} {g.uom}</b> {g.productName}</span>
+            </div>
+          ))}
+          {(r.goods ?? []).length > 3 ? (
+            <span className="small muted">and {r.goods.length - 3} more</span>
+          ) : null}
+        </div>
+      ) : <span className="muted small">{r.note ?? '—'}</span>
+    ) },
     { key: 'n', head: 'Request', render: (r: any) => (
       <div><span className="mono small">{r.request_no}</span>
         {r.note ? <div className="small muted">{r.note}</div> : null}</div>) },

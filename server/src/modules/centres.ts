@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { query, withTx } from '../db.js';
+import { query, withTx, type Actor, type Tx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
 import { authenticate, requires } from '../platform/auth.js';
 import { emit, pushTask, raiseAlert } from '../platform/services.js';
@@ -116,7 +116,13 @@ centreRouter.get('/:id/today', h(async (req) => {
       `SELECT p.id AS product_id, p.name AS product_name, p.sku, p.icon, p.base_uom,
               SUM(sb.qty) AS qty, SUM(sb.qty - sb.reserved_qty) AS available,
               SUM(sb.qty * COALESCE(b.landed_rate,0)) AS value,
-              MIN(COALESCE(b.predicted_expiry_date, b.expiry_date)) AS soonest_expiry
+              MIN(COALESCE(b.predicted_expiry_date, b.expiry_date)) AS soonest_expiry,
+              /* How much of it is in labelled boxes. A shop sells boxes, so
+               * "30 kg" and "6 boxes of 5 kg" are different facts and the
+               * second is the one behind the counter. */
+              (SELECT count(*)::int FROM packs pk
+                WHERE pk.warehouse_id = $1 AND pk.product_id = p.id
+                  AND pk.status = 'IN_STOCK') AS boxes
          FROM stock_balances sb
          JOIN products p ON p.id = sb.product_id
          LEFT JOIN batches b ON b.id = sb.batch_id
@@ -126,6 +132,8 @@ centreRouter.get('/:id/today', h(async (req) => {
     query(req.actor,
       `SELECT si.id, si.issue_no, si.issue_date, si.dispatched_at, si.total_qty,
               si.vehicle_reg, si.driver_name, si.transport_cost, si.status,
+              (SELECT count(*)::int FROM packs pk
+                WHERE pk.transfer_issue_id = si.id AND pk.status = 'IN_TRANSIT') AS boxes,
               sw.name AS from_warehouse,
               (SELECT string_agg(p.name || ' ' || round(sl.qty,1), ', ')
                  FROM stock_issue_lines sl JOIN products p ON p.id = sl.product_id
@@ -171,6 +179,91 @@ centreRouter.get('/:id/today', h(async (req) => {
 }));
 
 /* ------------------------------------------------------------ transfers -- */
+
+/**
+ * Put the packed boxes on the lorry too.
+ *
+ * A batch that has been through the bench is not loose produce any more — it is
+ * a stack of labelled boxes. Sending 30 kg of a batch packed into 5 kg boxes
+ * means sending six of those boxes, not thirty anonymous kilos, and the label
+ * on each has to end up where the box does or it is pointing at nothing.
+ *
+ * Whole boxes only. If the quantity asked for would have to break one open, the
+ * transfer is refused with the nearest amount that would not — splitting a
+ * sealed box is a thing that happens on a floor, not in a database, and if it
+ * did happen the person doing it needs to repack and relabel anyway.
+ */
+async function moveBoxesOnto(
+  tx: Tx, actor: Actor, issueId: string, fromWarehouseId: string,
+  lines: { batchId: string; qty: number }[],
+) {
+  const moved: any[] = [];
+
+  for (const l of lines) {
+    const { rows: packs } = await tx.query(
+      `SELECT p.id, p.code, p.qty, p.grade, p.price, pr.name AS product_name, pr.base_uom
+         FROM packs p JOIN products pr ON pr.id = p.product_id
+        WHERE p.company_id = $1 AND p.batch_id = $2 AND p.warehouse_id = $3
+          AND p.status = 'IN_STOCK'
+        ORDER BY p.created_at, p.pack_no
+        FOR UPDATE OF p`,
+      [actor.companyId, l.batchId, fromWarehouseId]);
+    if (!packs.length) continue;   // nothing packed on this batch — loose stock
+
+    /* Fill the lorry box by box, never past what was asked for. */
+    const take: any[] = [];
+    let taken = 0;
+    for (const p of packs) {
+      if (taken + Number(p.qty) > Number(l.qty) + 0.001) break;
+      take.push(p);
+      taken += Number(p.qty);
+    }
+
+    const remainder = Number(l.qty) - taken;
+    if (remainder > 0.001) {
+      /* Whatever is left has to come from produce that is not in a box. */
+      const { rows: bal } = await tx.query(
+        `SELECT sb.qty - sb.reserved_qty AS available,
+                COALESCE((SELECT SUM(x.qty) FROM packs x
+                           WHERE x.batch_id = sb.batch_id AND x.warehouse_id = sb.warehouse_id
+                             AND x.status = 'IN_STOCK'), 0) AS packed
+           FROM stock_balances sb
+          WHERE sb.batch_id = $1 AND sb.warehouse_id = $2 AND sb.company_id = $3`,
+        [l.batchId, fromWarehouseId, actor.companyId]);
+      const loose = Number(bal[0]?.available ?? 0) - Number(bal[0]?.packed ?? 0);
+      if (remainder > loose + 0.001) {
+        const p0 = packs[0];
+        const nextWhole = taken;
+        const oneMore = taken + Number(p0.qty);
+        throw ApiError.rule(
+          `${p0.product_name} is packed into boxes of ${p0.qty} ${p0.base_uom}. `
+          + `Sending ${l.qty} would mean breaking one open. `
+          + `Send ${nextWhole} or ${oneMore} instead.`,
+          { boxSize: Number(p0.qty), suggest: [nextWhole, oneMore] });
+      }
+    }
+
+    if (!take.length) continue;
+
+    const { rows: upd } = await tx.query(
+      `UPDATE packs
+          SET status = 'IN_TRANSIT', transfer_issue_id = $2, dispatched_at = now(),
+              /* It has left the shelf. Leaving bin_id set would put a box on a
+                 rack it is no longer on, and the audit team scans that rack. */
+              bin_id = NULL, stored_at = NULL
+        WHERE id = ANY($1::uuid[])
+        RETURNING id, code, qty, grade, price`,
+      [take.map((p) => p.id), issueId]);
+    for (const p of upd) moved.push({ ...p, productName: take[0].product_name });
+  }
+
+  if (moved.length) {
+    await emit(tx, actor, 'stock_issue', issueId, 'packs.dispatched',
+      { boxes: moved.length, codes: moved.map((p) => p.code) });
+  }
+  return moved;
+}
+
 
 /**
  * Send stock to a centre.
@@ -229,6 +322,14 @@ centreRouter.post('/transfers', requires('inventory.stock.issue'), h(async (req)
       [issue.id, i.toWarehouseId, i.vehicleId ?? null, i.vehicleReg ?? null,
        i.driverName ?? null, i.transportCost ?? null]);
 
+    /* The boxes go with the produce.
+     *
+     * A pack is a physical box with a label on it. Moving the quantity and
+     * leaving the boxes behind left the warehouse holding labels for produce
+     * that had gone, and gave the shop loose kilos it could not sell as the
+     * 5 kg boxes it had actually been handed. */
+    const boxes = await moveBoxesOnto(tx, req.actor, issue.id, i.fromWarehouseId, i.lines);
+
     /* "the cost of that transport, every single expense will be recorded" —
      * so it goes to Finance as a claim like any other rather than being a
      * number typed on a transfer and never paid by anyone. */
@@ -262,8 +363,9 @@ centreRouter.post('/transfers', requires('inventory.stock.issue'), h(async (req)
       issueNo: issue.issue_no, to: dest[0].name, vehicleReg: i.vehicleReg ?? null,
     });
 
-    return { ...issue, status: 'IN_TRANSIT', destination: dest[0].name,
-      message: `${issue.issue_no} on its way to ${dest[0].name}.` };
+    return { ...issue, status: 'IN_TRANSIT', destination: dest[0].name, boxes,
+      message: `${issue.issue_no} on its way to ${dest[0].name}`
+        + (boxes.length ? `, with ${boxes.length} packed box(es).` : '.') };
   });
 }));
 
@@ -349,6 +451,58 @@ centreRouter.post('/transfers/:id/receive', requires('centre.stock.receive'), h(
               received_note=$3 WHERE id=$1`,
       [issue.id, req.actor.userId, i.note ?? null]);
 
+    /* The boxes arrive with it — but only as many as were counted in.
+     *
+     * They keep their code, their grade and their price: it is the same box, on
+     * a different shelf in a different town. They do not keep their bin, because
+     * the rack they were on belongs to the warehouse they have left; the shop
+     * scans them onto its own.
+     *
+     * Boxes covered by the shortfall never turned up. Marking them arrived
+     * would recreate exactly the drift this whole change is about, so they are
+     * voided against the note the shop had to write. */
+    const arrived: any[] = [];
+    const lost: any[] = [];
+    for (const l of lines) {
+      const { rows: inTransit } = await tx.query(
+        `SELECT id, code, qty, grade FROM packs
+          WHERE transfer_issue_id = $1 AND status = 'IN_TRANSIT' AND batch_id = $2
+          ORDER BY created_at, pack_no
+          FOR UPDATE`,
+        [issue.id, l.batch_id]);
+      if (!inTransit.length) continue;
+
+      const got = wanted.has(l.id) ? wanted.get(l.id)! : Number(l.qty);
+      const keep: string[] = [];
+      const drop: string[] = [];
+      let counted = 0;
+      for (const p of inTransit) {
+        if (counted + Number(p.qty) <= got + 0.001) {
+          keep.push(p.id); counted += Number(p.qty); arrived.push(p);
+        } else {
+          drop.push(p.id); lost.push(p);
+        }
+      }
+
+      if (keep.length) {
+        await tx.query(
+          `UPDATE packs
+              SET warehouse_id = $2, status = 'IN_STOCK',
+                  transfer_issue_id = NULL, dispatched_at = NULL,
+                  bin_id = NULL, stored_at = NULL
+            WHERE id = ANY($1::uuid[])`,
+          [keep, issue.dest_warehouse_id]);
+      }
+      if (drop.length) {
+        await tx.query(
+          `UPDATE packs
+              SET status = 'VOID', transfer_issue_id = NULL, dispatched_at = NULL,
+                  void_reason = $2
+            WHERE id = ANY($1::uuid[])`,
+          [drop, `Did not arrive at ${issue.dest_name}: ${i.note ?? 'no reason given'}`]);
+      }
+    }
+
     if (shortage > 0.001) {
       await raiseAlert(tx, req.actor, {
         alertType: 'TRANSFER_SHORT', severity: 'HIGH', branchId: issue.dest_branch,
@@ -361,11 +515,17 @@ centreRouter.post('/transfers/:id/receive', requires('centre.stock.receive'), h(
     await emit(tx, req.actor, 'stock_issue', issue.id, 'transfer.received',
       { issueNo: issue.issue_no, shortage });
 
+    const withBoxes = arrived.length
+      ? ` ${arrived.length} box(es) came with it`
+        + (lost.length
+          ? `, ${lost.length} did not and ${lost.length === 1 ? 'has' : 'have'} been written off.`
+          : '.')
+      : '';
     return {
-      ok: true, issueNo: issue.issue_no, shortage,
-      message: shortage > 0.001
+      ok: true, issueNo: issue.issue_no, shortage, boxes: arrived, boxesLost: lost,
+      message: (shortage > 0.001
         ? `Booked in, ${shortLines.join(', ')} short. The buyer has been told.`
-        : `${issue.issue_no} booked in at ${issue.dest_name}.`,
+        : `${issue.issue_no} booked in at ${issue.dest_name}.`) + withBoxes,
     };
   });
 }));

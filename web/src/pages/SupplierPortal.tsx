@@ -43,12 +43,14 @@ export function SupplierPortalPage() {
    * buyer does. */
   const fOrders = useFilters<any>(orders.data, {
     date: (o: any) => o.order_date,
-    search: (o: any) => [o.po_no, o.branch_name, o.status].filter(Boolean).join(' '),
+    search: (o: any) => [o.po_no, o.branch_name, o.status,
+      ...(o.lines ?? []).map((l: any) => `${l.productName} ${l.sku}`)].filter(Boolean).join(' '),
     facets: [
       { key: 'st', label: 'state', all: 'Any state', of: (o: any) => o.status },
       { key: 'ans', label: 'answer', all: 'Any answer', of: (o: any) => o.supplier_response },
       { key: 'br', label: 'branch', of: (o: any) => o.branch_name },
       { key: 'bill', label: 'billing', all: 'Billed or not', of: (o: any) => (o.invoiced ? 'invoiced' : 'not billed') },
+      { key: 'prod', label: 'product', of: (o: any) => (o.lines ?? [])[0]?.productName },
     ],
     totals: [
       { label: 'Items', of: (o: any) => Number(o.line_count) || 0 },
@@ -153,19 +155,37 @@ export function SupplierPortalPage() {
 
       {tab === 'orders' ? (
         <>
-        <FilterBar f={fOrders} placeholder="Search order number" />
+        <FilterBar f={fOrders} placeholder="Search a product or order number" />
         <FilterTotals f={fOrders} noun="order" />
         <div className="card"><div className="card-body tight">
           <DataTable
             loading={orders.loading}
             rows={fOrders.rows}
             cols={[
+              /* What they are being asked for, first. The order number is a
+                 reference for us and means nothing to them — they were being
+                 asked to accept a number and a total, with no way to see that
+                 it was 200 kg of Kesar until they opened something else. */
+              { key: 'w', head: 'What we want', render: (o: any) => (
+                <div className="stack" style={{ gap: 2 }}>
+                  {(o.lines ?? []).map((l: any, i: number) => (
+                    <div key={i} className="row" style={{ gap: 7 }}>
+                      <Icon name={l.icon ?? 'produce'} size={16} />
+                      <span>
+                        <b>{num(l.qty, 0)} {l.uom}</b> {l.productName}
+                        {l.grade ? <span className="small muted"> · grade {l.grade}</span> : null}
+                        <span className="small muted"> @ {inr(l.rate)}</span>
+                      </span>
+                    </div>
+                  ))}
+                  {!(o.lines ?? []).length ? <span className="muted small">—</span> : null}
+                </div>
+              ) },
               { key: 'n', head: 'Order', render: (o: any) => (
-                <div><b className="mono">{o.po_no}</b>
+                <div><span className="mono small">{o.po_no}</span>
                   <div className="small muted">{date(o.order_date)} · {o.branch_name}</div></div>
               ) },
               { key: 'e', head: 'Wanted by', render: (o: any) => date(o.expected_date) },
-              { key: 'l', head: 'Items', num: true, render: (o: any) => o.line_count },
               { key: 'v', head: 'Value', num: true, render: (o: any) => inr(o.grand_total, 0) },
               /* Their words, not our workflow's. A supplier does not care that
                  an order is "PART_RECEIVED"; they care whether it is theirs to

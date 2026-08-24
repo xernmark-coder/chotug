@@ -324,7 +324,11 @@ export function CentreDayPage() {
                 { key: 'v', head: 'Vehicle', render: (t: any) => (
                   <div>{t.vehicle_reg ?? '—'}
                     <div className="small muted">{t.driver_name ?? ''}</div></div>) },
-                { key: 'q', head: 'Sent', num: true, render: (t: any) => num(t.total_qty, 1) },
+                { key: 'q', head: 'Sent', num: true, render: (t: any) => (
+                  <div>{num(t.total_qty, 1)}
+                    {Number(t.boxes) > 0
+                      ? <div className="small muted">{t.boxes} labelled box(es)</div> : null}
+                  </div>) },
                 { key: 'a', head: '', width: 130, render: (t: any) =>
                   can('centre.stock.receive')
                     ? <button className="btn sm primary" onClick={() => setReceiving(t)}>It arrived</button>
@@ -352,6 +356,12 @@ export function CentreDayPage() {
                   </div>) },
                 { key: 'q', head: 'Have', num: true, render: (s: any) =>
                   <b>{num(s.qty, 1)} <span className="small muted">{s.base_uom}</span></b> },
+                /* A shop sells boxes. "30 kg" and "6 boxes of 5 kg" are
+                   different facts and the second is the one behind the counter. */
+                { key: 'bx', head: 'In boxes', num: true, render: (s: any) =>
+                  Number(s.boxes) > 0
+                    ? <b>{num(s.boxes, 0)}</b>
+                    : <span className="muted small">loose</span> },
                 { key: 'e', head: 'Oldest goes off', render: (s: any) => {
                   if (!s.soonest_expiry) return <span className="muted small">—</span>;
                   const days = Math.round(

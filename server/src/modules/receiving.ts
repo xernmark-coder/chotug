@@ -325,6 +325,10 @@ receivingRouter.post('/gate-entries/:id/boxes',
       /* Or the code printed on the box. The floor scans that, not our UUID. */
       scannedCode: z.string().trim().max(60).optional(),
       weightKg: z.coerce.number().positive('What did the box weigh?'),
+      /* Ten identical boxes off a lorry are ten identical taps otherwise. The
+       * weight is still per box — this repeats it, it does not divide it. */
+      count: z.coerce.number().int().min(1).max(200,
+        'Record these in smaller runs so a mistake is easy to undo').default(1),
       captureMode: z.enum(['MANUAL', 'DEVICE', 'SCAN']).default('MANUAL'),
       scaleDeviceId: z.string().uuid().nullable().optional(),
     }), req.body);
@@ -380,15 +384,22 @@ receivingRouter.post('/gate-entries/:id/boxes',
         `SELECT COALESCE(MAX(box_no), 0) + 1 AS n FROM unload_boxes WHERE gate_entry_id = $1`,
         [entry.id]);
 
+      /* One row per box even when they were entered as a run: each is a
+       * separate physical box that can be voided on its own, and "10 boxes"
+       * stored as one row of 200 kg cannot be corrected when one of them turns
+       * out to be short. generate_series keeps the numbering contiguous under
+       * the row lock taken above. */
       const { rows: ins } = await tx.query(
         `INSERT INTO unload_boxes (company_id, branch_id, warehouse_id, gate_entry_id,
                 po_line_id, product_id, box_no, weight_kg, capture_mode,
                 scale_device_id, scanned_code, weighed_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         SELECT $1,$2,$3,$4,$5,$6,$7 + g - 1,$8,$9,$10,$11,$12
+           FROM generate_series(1, $13::int) AS g
          RETURNING *`,
         [req.actor.companyId, entry.branch_id, entry.warehouse_id, entry.id,
          pl[0]?.id ?? null, productId, nextNo[0].n, input.weightKg, input.captureMode,
-         input.scaleDeviceId ?? null, input.scannedCode ?? null, req.actor.userId]);
+         input.scaleDeviceId ?? null, input.scannedCode ?? null, req.actor.userId,
+         input.count]);
 
       const { rows: tot } = await tx.query(
         `SELECT boxes, net_kg FROM v_unload_totals
@@ -396,13 +407,19 @@ receivingRouter.post('/gate-entries/:id/boxes',
       const { rows: prod } = await tx.query(
         `SELECT name FROM products WHERE id = $1`, [productId]);
 
+      const first = nextNo[0].n;
+      const last = first + input.count - 1;
       return {
         ...ins[0],
+        boxes: ins,
         productName: prod[0]?.name,
-        productBoxes: tot[0]?.boxes ?? 1,
-        productNetKg: tot[0]?.net_kg ?? input.weightKg,
-        message: `Box ${nextNo[0].n} · ${input.weightKg} kg · ${prod[0]?.name} `
-          + `(${tot[0]?.boxes ?? 1} boxes, ${Number(tot[0]?.net_kg ?? input.weightKg).toFixed(1)} kg so far)`,
+        productBoxes: tot[0]?.boxes ?? input.count,
+        productNetKg: tot[0]?.net_kg ?? input.weightKg * input.count,
+        message: (input.count === 1
+          ? `Box ${first} · ${input.weightKg} kg · ${prod[0]?.name}`
+          : `Boxes ${first}–${last} · ${input.count} × ${input.weightKg} kg · ${prod[0]?.name}`)
+          + ` (${tot[0]?.boxes ?? input.count} boxes, `
+          + `${Number(tot[0]?.net_kg ?? input.weightKg * input.count).toFixed(1)} kg so far)`,
       };
     });
   }));
@@ -818,9 +835,16 @@ receivingRouter.post('/gate-entries/:id/inspections', requires('quality.inspecti
       `SELECT * FROM gate_entries WHERE id=$1 AND company_id=$2`, [req.params.id, req.actor.companyId]);
     const g = gr[0];
     if (!g) throw ApiError.notFound('Gate entry not found');
-    if (!['QC_PENDING', 'WEIGHED', 'QC_COMPLETE'].includes(g.status)) {
+    /* The weighbridge is optional.
+     *
+     * It used to gate this: a vehicle still at ARRIVED could not be inspected
+     * until somebody had put it on the bridge. Plenty of yards have no bridge,
+     * and plenty of loads are small enough that weighing every box IS the
+     * weight — which is the number the receipt uses anyway. Skipping the bridge
+     * loses the gross/tare variance check and nothing else. */
+    if (!['ARRIVED', 'QC_PENDING', 'WEIGHED', 'QC_COMPLETE'].includes(g.status)) {
       throw ApiError.rule(
-        `This vehicle is at "${g.status}". Complete weighment before the quality check.`);
+        `This vehicle is ${g.status.replace(/_/g, ' ').toLowerCase()} — it is past the quality check.`);
     }
 
     // §11 — a red/critical weight variance must be cleared before QC.

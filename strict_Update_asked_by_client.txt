@@ -80,3 +80,15 @@ on what to buy the the popup aksing reason comes immediately on small change in 
 when the supplier asks for the vehical it should be reflected on the everypanel and finance or admin will send them vehical .
 
 remove direct put away of the product , they want that they will inspect and at that time they should be able to take the weigth of each , like in a vehical multiple items will come , so for each item there will be multiple boxes they will weight each box and sysytem will accumate the net wight of each item , thenat same time they will make there boxes and place qr on them and then put those boxes in the warehouse at particular location this should be flow , please remove old flow , it is confusing ,
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+to confirm with supplier remove this from everywhere as , now admin or purchase executive dont need to call to supplier , he himself accept or reject it or accept and asks for the vehical and vehical goes there to pick it sent by finance . this is present on dashboard card of it and and taking to some page please look it and fix it . 
+
+once the supplier is asking for the vehical it is comming to dispatch section it is good , but put this sidebar of the dispatch near the order so easy to nevigate . 
+
+when the finance check the payment request they should know about the product they are paying for , list down the list of products for which they are paying. 
+
+at the put on shelve if it is possible to show map of the warehouse and from there they select where to put will be good , also by typing the number is also good.
+
+when the item comes , they also want to take the weight of vehical and empty vehical but they can skip it too and take the weight of the boxes directly , this please add in that flow of qc , and they will direct enter 10 box of 20kg or weight each box , then after the qc they should open to packing page to pack the boxed , remove old flow if any prsent , and then send these packed boxed to the warehouse , modify the part in ss completely to achieve this . 

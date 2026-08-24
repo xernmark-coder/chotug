@@ -80,7 +80,7 @@ export function LoginPage() {
 const QUEUE_ROUTE: Record<string, (t: any) => string> = {
   REQUIREMENT_REVIEW: (t) => `/requirements/${t.doc_id}`,
   APPROVAL: (t) => `/approvals`,
-  // Straight to the order, where the Confirm button lives.
+  // Straight to the order, where "Send to supplier" lives.
   PO_CONFIRM: (t) => `/purchase-orders/${t.doc_id}`,
   EXPECTED_ARRIVAL: (t) => `/gate/new?poId=${t.doc_id}`,
   WEIGH_PENDING: (t) => `/gate/${t.doc_id}`,
@@ -104,7 +104,7 @@ const QUEUE_LABEL: Record<string, string> = {
   REQUIREMENT_REVIEW: 'Requirement', APPROVAL: 'Approval', EXPECTED_ARRIVAL: 'Arrival',
   WEIGH_PENDING: 'Weighment', QC_PENDING: 'Quality check', GRN_PENDING: 'Goods receipt',
   PUTAWAY_PENDING: 'Grade & pack', INVOICE_MATCH: 'Invoice', AI_SUGGESTION: 'Suggestion',
-  ALERT: 'Alert', FINANCE_EXCEPTION: 'Finance', PO_CONFIRM: 'Confirm order',
+  ALERT: 'Alert', FINANCE_EXCEPTION: 'Finance', PO_CONFIRM: 'Order',
   TRANSPORT_REQUEST: 'Vehicle wanted',
   FARM_TASK: 'Farm work', FARM_HARVEST: 'Harvest', FARM_RECEIVE: 'Farm delivery',
 };
@@ -327,10 +327,13 @@ export function DashboardPage() {
                 foot={k.overdue_approvals > 0 ? `${k.overdue_approvals} past the agreed time` : 'all within time'}
                 onClick={() => nav('/approvals')} />
             ) : null}
+            {/* Was "To confirm with supplier", which described a phone call
+                nobody makes any more. Approved orders are waiting to be SENT;
+                the supplier does the confirming, on their own panel. */}
             {canConfirm ? (
-              <Kpi label="To confirm with supplier" value={flow.to_confirm ?? 0}
+              <Kpi label="To send to suppliers" value={flow.to_confirm ?? 0}
                 tone={(flow.to_confirm ?? 0) > 0 ? 'warn' : 'good'}
-                foot="approved, supplier not yet told"
+                foot="approved, not yet on their panel"
                 onClick={() => nav('/purchase-orders?status=APPROVED')} />
             ) : null}
             {seesAlerts ? (
@@ -401,9 +404,9 @@ export function DashboardPage() {
             <Kpi label="To post as receipt" value={k.awaiting_grn ?? 0}
               tone={(k.awaiting_grn ?? 0) > 0 ? 'warn' : 'good'}
               foot="quality checked, not yet stock" onClick={() => nav('/gate')} />
-            <Kpi label="Waiting for put-away" value={k.awaiting_putaway ?? 0}
+            <Kpi label="Waiting to be packed" value={k.awaiting_putaway ?? 0}
               tone={(k.awaiting_putaway ?? 0) > 0 ? 'warn' : 'good'}
-              foot="posted, not yet on a shelf" onClick={() => nav('/putaway')} />
+              foot="booked in, no boxes made yet" onClick={() => nav('/packing')} />
             <Kpi label="Posted today" value={k.receipts_today ?? 0}
               foot="receipts booked into stock" onClick={() => nav('/grns')} />
             <Kpi label="Expiring within 7 days" value={k.expiring_7d ?? 0}
@@ -614,12 +617,12 @@ const FLOW_STEPS: {
    * The buy list is reached from "Below reorder point" and from Running low. */
   { key: 'need',       label: 'Requirements', icon: 'clipboard', to: '/requirements' },
   { key: 'approve',    label: 'Approve',     icon: 'checkDoc',   to: '/approvals', hot: 1 },
-  { key: 'to_confirm', label: 'Confirm',     icon: 'box',        to: '/purchase-orders', hot: 1 },
+  { key: 'to_confirm', label: 'Send',        icon: 'box',        to: '/purchase-orders', hot: 1 },
   { key: 'in_transit', label: 'On the road', icon: 'route',      to: '/dispatch' },
   { key: 'at_gate',    label: 'At the gate', icon: 'gate',       to: '/intake', hot: 1 },
   { key: 'in_qc',      label: 'Quality',     icon: 'scale',      to: '/gate', hot: 1 },
   { key: 'to_book',    label: 'Book in',     icon: 'inbox',      to: '/gate', hot: 1 },
-  { key: 'to_putaway', label: 'Put away',    icon: 'shelf',      to: '/putaway', hot: 1 },
+  { key: 'to_putaway', label: 'To pack',     icon: 'shelf',      to: '/packing', hot: 1 },
   { key: 'packed',     label: 'Packed',      icon: 'tag',        to: '/packing' },
   { key: 'to_match',   label: 'Match bills', icon: 'invoice',    to: '/invoices', hot: 1 },
   { key: 'to_pay',     label: 'To pay',      icon: 'card',       to: '/payments' },

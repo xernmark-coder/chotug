@@ -56,6 +56,18 @@ supplierRouter.get('/orders', requires('supplier.order.view'), h(async (req) => 
     `SELECT o.id, o.po_no, o.order_date, o.expected_date, o.status, o.grand_total,
             o.payment_terms_days, o.is_urgent, b.name AS branch_name,
             (SELECT count(*) FROM po_lines l WHERE l.po_id = o.id) AS line_count,
+            /* What was actually asked for. A supplier deciding whether to
+             * accept needs to know they are being asked for 200 kg of Kesar,
+             * not that this is PO/2026-27/000055 — the number means nothing to
+             * them and they were being asked to agree to it blind. */
+            (SELECT json_agg(json_build_object(
+                      'productName', pr.name, 'sku', pr.sku, 'icon', pr.icon,
+                      'qty', l.qty, 'uom', l.uom, 'rate', l.rate,
+                      'grade', l.expected_grade, 'lineTotal', l.line_total,
+                      'received', l.received_qty)
+                      ORDER BY l.line_no)
+               FROM po_lines l JOIN products pr ON pr.id = l.product_id
+              WHERE l.po_id = o.id) AS lines,
             (SELECT count(*) FROM grns g WHERE g.po_id = o.id AND g.status = 'POSTED') AS receipts,
             EXISTS (SELECT 1 FROM supplier_invoices i
                      WHERE i.po_id = o.id AND i.status <> 'CANCELLED') AS invoiced,

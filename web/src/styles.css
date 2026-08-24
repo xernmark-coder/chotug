@@ -961,3 +961,14 @@ table.mini tr.voided { opacity: .5; text-decoration: line-through; }
 /* Past its valid-till: still shown, because knowing what they were asking
    last week is useful, but never mistaken for today's price. */
 .rate-chip.stale { opacity: .55; border-style: dashed; }
+
+/* ------------------------------------------------------- shelf picker --
+   The warehouse map, shrunk to fit a dialog. Somebody deciding where a box
+   goes needs to see which racks are filling up; a list of codes cannot show
+   that. Capped in height because a big warehouse has a lot of shelves and
+   the boxes being stored are below it. */
+.store-map { max-height: 30vh; overflow-y: auto; border: 1px solid var(--border);
+  border-radius: 8px; padding: 4px 10px; background: var(--surface-2); }
+.store-map .loc-rack { padding: 6px 0; }
+.shelf.on { border-color: var(--primary); background: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--primary) inset; }

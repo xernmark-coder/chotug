@@ -96,6 +96,7 @@ async function main() {
     await run('35_supplier_rates.sql');
     await run('36_transport_request.sql');
     await run('37_transport_visibility.sql');
+    await run('38_packs_travel.sql');
     // Last, so the FORCE that 04 and 06 re-apply is lifted again.
     await run('11_rls_managed_host.sql');
     console.log('\nSchema and master data are in place.');

@@ -173,6 +173,32 @@ financeRouter.get('/requests', h(async (req) => {
             w.name AS warehouse_name, b.name AS branch_name,
             ru.full_name AS requested_by_name, vu.full_name AS verified_by_name,
             (pr.amount - pr.paid_amount) AS balance,
+            /* What the money is actually for.
+             *
+             * Finance was verifying "₹38,280 to Sahyadri" with no way to see
+             * that it was 400 kg of Alphonso without opening the source
+             * document in another tab — so the check that exists to catch a
+             * wrong payment was being made on a name and a number.
+             *
+             * A request hangs off a purchase order or an invoice, so read
+             * whichever it has. */
+            (CASE pr.source_type
+               WHEN 'purchase_order' THEN
+                 (SELECT json_agg(json_build_object(
+                           'productName', p2.name, 'icon', p2.icon,
+                           'qty', l.qty, 'uom', l.uom, 'rate', l.rate,
+                           'lineTotal', l.line_total) ORDER BY l.line_no)
+                    FROM po_lines l JOIN products p2 ON p2.id = l.product_id
+                   WHERE l.po_id = pr.source_id)
+               WHEN 'supplier_invoice' THEN
+                 (SELECT json_agg(json_build_object(
+                           'productName', COALESCE(p3.name, il.raw_description),
+                           'icon', p3.icon,
+                           'qty', il.qty, 'uom', COALESCE(il.uom, p3.base_uom), 'rate', il.rate,
+                           'lineTotal', il.amount) ORDER BY il.line_no)
+                    FROM invoice_lines il LEFT JOIN products p3 ON p3.id = il.product_id
+                   WHERE il.invoice_id = pr.source_id)
+             END) AS goods,
             (pr.due_date IS NOT NULL AND pr.due_date < CURRENT_DATE
              AND pr.status NOT IN ('PAID','REJECTED','CANCELLED')) AS overdue
        FROM payment_requests pr
