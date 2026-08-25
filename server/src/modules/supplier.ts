@@ -241,6 +241,12 @@ supplierRouter.post('/orders/:id/respond', requires('supplier.order.accept'), h(
     if (input.decision === 'DECLINE' && !input.note) {
       throw ApiError.rule('Tell the buyer why, so they can place it elsewhere.');
     }
+    if (input.decision === 'ACCEPT' && !input.invoiceNo) {
+      throw ApiError.rule('Enter your invoice number before accepting this order.');
+    }
+    if (input.decision === 'ACCEPT' && !input.vehicleReg) {
+      throw ApiError.rule('Enter the vehicle number before accepting this order.');
+    }
 
     await tx.query(
       `UPDATE purchase_orders

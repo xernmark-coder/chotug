@@ -151,7 +151,11 @@ export function WarehouseIntakePage() {
 
       {weighing ? (
         <WeighInModal gate={weighing} onClose={() => setWeighing(null)}
-          onDone={() => { setWeighing(null); reload(); }} />
+          onDone={(nextStep) => {
+            setWeighing(null);
+            reload();
+            if (nextStep === 'BOX_WEIGHING') nav(`/unload/${weighing.gate_entry_id}`);
+          }} />
       ) : null}
     </Layout>
   );
@@ -165,7 +169,7 @@ export function WarehouseIntakePage() {
  * what it is made of, and a shortage argument needs both.
  */
 function WeighInModal({ gate, onClose, onDone }: {
-  gate: any; onClose: () => void; onDone: () => void;
+  gate: any; onClose: () => void; onDone: (nextStep?: string) => void;
 }) {
   const toast = useToast();
   const containers = useApi<any[]>('/masters/container-types');
@@ -202,7 +206,7 @@ function WeighInModal({ gate, onClose, onDone }: {
   const submit = async () => {
     setBusy(true); setError(null);
     try {
-      await api.post(`/receiving/gate-entries/${gate.gate_entry_id}/weighments`, {
+      const result = await api.post<any>(`/receiving/gate-entries/${gate.gate_entry_id}/weighments`, {
         kind,
         method: containerTypeId ? 'CRATE_COUNT' : 'TWO_WEIGHMENT',
         grossKg: kind === 'GROSS' ? Number(weight) : null,
@@ -214,7 +218,7 @@ function WeighInModal({ gate, onClose, onDone }: {
         remarks: remarks || undefined,
       });
       toast(`${kind === 'GROSS' ? 'Gross' : 'Tare'} weight recorded`, 'ok');
-      onDone();
+      onDone(result.nextStep === 'QC' ? 'BOX_WEIGHING' : undefined);
     } catch (e: any) { setError(e); } finally { setBusy(false); }
   };
 

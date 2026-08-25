@@ -693,10 +693,8 @@ function RespondModal({ order, onClose, onDone }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
 
-  /* Accepting is also when they know their invoice number and which lorry it
-   * is going on. Collecting it here means the gate types one number instead of
-   * eight fields with a driver waiting in the rain. All optional — a farmer
-   * accepting on a phone at 5am has neither to hand. */
+  /* Accepting is also when they record the invoice and lorry. The gate then
+   * needs only the invoice number and can correct details if the load changes. */
   const [invoiceNo, setInvoiceNo] = useState('');
   const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().slice(0, 10));
   const [invoiceTotal, setInvoiceTotal] = useState(String(order.grand_total));
@@ -736,7 +734,7 @@ function RespondModal({ order, onClose, onDone }: {
         <button className="btn" onClick={onClose}>Not now</button>
         <button className="btn danger" disabled={busy || !note.trim()}
           onClick={() => send('DECLINE')}>Cannot supply</button>
-        <button className="btn primary" disabled={busy}
+        <button className="btn primary" disabled={busy || !invoiceNo.trim() || !vehicleReg.trim()}
           onClick={() => send('ACCEPT')}>Yes, I accept</button>
       </>}
     >
@@ -755,7 +753,7 @@ function RespondModal({ order, onClose, onDone }: {
 
       <div className="section-head sm"><h3>Your invoice</h3><span className="rule" /></div>
       <div className="grid c3">
-        <Field label="Invoice number"><input value={invoiceNo}
+        <Field label="Invoice number (required)"><input value={invoiceNo}
           onChange={(e) => setInvoiceNo(e.target.value)} placeholder="SAH/26-27/118" /></Field>
         <Field label="Invoice date"><input type="date" value={invoiceDate}
           disabled={!invoiceNo.trim()} onChange={(e) => setInvoiceDate(e.target.value)} /></Field>
@@ -769,7 +767,7 @@ function RespondModal({ order, onClose, onDone }: {
         driver will not be kept waiting while somebody types them in again.
       </p>
       <div className="grid c2">
-        <Field label="Vehicle number"><input value={vehicleReg}
+        <Field label="Vehicle number (required)"><input value={vehicleReg}
           onChange={(e) => setVehicleReg(e.target.value.toUpperCase())}
           placeholder="MH14CD5678" /></Field>
         <Field label="Transporter"><input value={transporter}

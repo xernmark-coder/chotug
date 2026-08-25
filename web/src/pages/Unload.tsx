@@ -76,7 +76,14 @@ export function UnloadPage() {
       title={`Unloading ${entry.gate_no}`}
       subtitle={entry.po_no ? `Against ${entry.po_no}` : 'No purchase order — unplanned arrival'}
       touch
-      actions={<button className="btn sm" onClick={() => nav(`/gate/${id}`)}>Vehicle file →</button>}
+      actions={<div className="btn-row">
+        {data.totalBoxes > 0 ? (
+          <button className="btn sm primary" onClick={() => nav(`/gate/${id}`)}>
+            Done weighing boxes →
+          </button>
+        ) : null}
+        <button className="btn sm" onClick={() => nav(`/gate/${id}`)}>Vehicle file →</button>
+      </div>}
     >
       <ErrorBanner error={postError} />
 

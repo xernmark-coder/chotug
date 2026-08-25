@@ -937,8 +937,12 @@ inventoryRouter.post('/pack-bench/:batchId/run',
       let binId: string | null = null;
       if (input.binCode) {
         const { rows: bin } = await tx.query(
-          `SELECT id FROM bins WHERE company_id = $1 AND lower(code) = lower($2) AND is_active`,
-          [req.actor.companyId, input.binCode]);
+          `SELECT bn.id FROM bins bn
+             JOIN racks r ON r.id = bn.rack_id
+             JOIN zones z ON z.id = r.zone_id
+            WHERE bn.company_id = $1 AND lower(bn.code) = lower($2)
+              AND bn.is_active AND z.warehouse_id = $3`,
+          [req.actor.companyId, input.binCode, input.warehouseId]);
         if (!bin[0]) throw ApiError.rule(`No shelf with the code "${input.binCode}".`);
         binId = bin[0].id;
       }
@@ -1008,14 +1012,24 @@ inventoryRouter.post('/packs/store', requires('inventory.pack.store'), h(async (
     const { rows: bin } = await tx.query(
       `SELECT bn.id, bn.code, bn.capacity_kg, r.code AS rack_code
          FROM bins bn JOIN racks r ON r.id = bn.rack_id
-        WHERE bn.company_id = $1 AND lower(bn.code) = lower($2) AND bn.is_active`,
-      [req.actor.companyId, input.binCode]);
+         JOIN zones z ON z.id = r.zone_id
+        WHERE bn.company_id = $1 AND lower(bn.code) = lower($2)
+          AND bn.is_active AND z.warehouse_id = (
+            SELECT warehouse_id FROM packs WHERE id = ANY($3::uuid[]) LIMIT 1
+          )`,
+      [req.actor.companyId, input.binCode, input.packIds]);
     if (!bin[0]) throw ApiError.rule(`No shelf with the code "${input.binCode}".`);
 
     const { rows: moved } = await tx.query(
       `UPDATE packs
           SET bin_id = $1, stored_at = now(), stored_by = $2
         WHERE id = ANY($3::uuid[]) AND company_id = $4 AND status = 'IN_STOCK'
+          AND warehouse_id = (
+            SELECT z.warehouse_id FROM bins b
+            JOIN racks r ON r.id = b.rack_id
+            JOIN zones z ON z.id = r.zone_id
+            WHERE b.id = $1
+          )
         RETURNING id, code, grade, qty, weight_kg`,
       [bin[0].id, req.actor.userId, input.packIds, req.actor.companyId]);
 

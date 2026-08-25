@@ -252,11 +252,11 @@ export function GateEntryPage() {
       if (g.warnings?.length) toast(`Recorded with warnings: ${g.warnings.join(', ')}`, 'err');
       if (lockNow) {
         await api.post(`/receiving/gate-entries/${g.id}/submit`);
-        toast(`${g.gate_no} locked — send the vehicle to the weighbridge`, 'ok');
+        toast(`${g.gate_no} locked — weigh each box as it comes off`, 'ok');
       } else {
         toast(`${g.gate_no} saved`, 'ok');
       }
-      nav(`/gate/${g.id}`);
+      nav(lockNow ? `/unload/${g.id}` : `/gate/${g.id}`);
     } catch (e: any) { setError(e); } finally { setBusy(false); }
   };
 
@@ -564,9 +564,16 @@ export function GateDetailPage() {
 
   useEffect(() => {
     if (!data) return;
-    if (data.status === 'QC_PENDING') setTab('qc');
+    const boxesWeighed = (data.boxTotals ?? [])
+      .reduce((total: number, line: any) => total + Number(line.boxes ?? 0), 0) > 0;
+    if (data.locked_at && data.status === 'ARRIVED' && !boxesWeighed) {
+      nav(`/unload/${id}`);
+      return;
+    }
+    if (boxesWeighed && data.status === 'ARRIVED') setTab('qc');
+    else if (data.status === 'QC_PENDING') setTab('qc');
     else if (['QC_COMPLETE', 'GRN_PENDING'].includes(data.status)) setTab('grn');
-  }, [data?.status]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [data, id, nav]);
 
   if (loading) return <Layout title="Gate entry"><Loading /></Layout>;
   if (!data) return <Layout title="Gate entry"><ErrorBanner error={error} /></Layout>;
@@ -576,8 +583,8 @@ export function GateDetailPage() {
     setBusy(true);
     try {
       await api.post(`/receiving/gate-entries/${id}/submit`);
-      toast('Gate entry locked', 'ok');
-      reload();
+      toast('Gate entry locked — weigh each box as it comes off', 'ok');
+      nav(`/unload/${id}`);
     } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
 
@@ -621,18 +628,15 @@ export function GateDetailPage() {
         </button>
       </div>
 
-      {/* The weighbridge is one way to get a weight and weighing the boxes is
-          the other. Plenty of yards have no bridge, and on a small load
-          weighing every box IS the weight — it is the figure the receipt uses
-          either way. Neither is required before the quality check. */}
+      {/* Box weighing is the first physical step. The weighbridge remains
+          available as an optional cross-check, but it is not required. */}
       {tab === 'weigh' ? (
         <>
           <div className="banner info mb">
             <span><Icon name="info" size={16} /></span>
             <div>
-              The weighbridge is optional. It gives a gross-and-tare check against
-              the order; if you have no bridge, or the load is small,{' '}
-              <b>weigh the boxes instead</b> — that is the number the receipt uses.
+              First weigh each box as it comes off the vehicle. The weighbridge is
+              optional and is only a gross-and-tare cross-check.
               {(data.boxTotals ?? []).length ? (
                 <div className="small">
                   {(data.boxTotals ?? []).reduce((a: number, b: any) => a + Number(b.boxes), 0)} box(es)
@@ -641,7 +645,7 @@ export function GateDetailPage() {
               ) : null}
             </div>
             <button className="btn sm primary" onClick={() => nav(`/unload/${data.id}`)}>
-              Weigh the boxes →
+              Start box weighing →
             </button>
           </div>
           <WeighTab gate={data} onDone={reload} />
@@ -1314,7 +1318,8 @@ function GrnTab({ gate, onDone }: { gate: any; onDone: () => void }) {
       /* Straight on to the bench. The receipt is not the end of the job — the
          crates are standing there waiting to be graded, packed and shelved,
          and the batch they belong to has only just come into existence. */
-      nav(`/grns/${r.id}`);
+      const firstBatch = r.batches?.find((b: any) => b.id);
+      nav(firstBatch ? `/pack-bench/${firstBatch.id}` : `/grns/${r.id}`);
     } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(false); }
   };
 

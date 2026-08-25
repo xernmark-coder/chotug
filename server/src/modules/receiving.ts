@@ -376,6 +376,10 @@ receivingRouter.post('/gate-entries/:id/boxes',
       const { rows: pl } = await tx.query(
         `SELECT id FROM po_lines WHERE po_id = $1 AND product_id = $2 LIMIT 1`,
         [entry.po_id, productId]);
+      if (entry.po_id && !pl[0]) {
+        throw ApiError.rule(
+          'This product is not on the purchase order for this vehicle. Select the same product that arrived.');
+      }
 
       /* Numbered per vehicle so the floor can shout "box 41". Taken under the
        * row lock above, so two tablets weighing at once cannot claim the same
@@ -1143,11 +1147,16 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
 
       if (l.poLineId) {
         const { rows: po } = await tx.query(
-          `SELECT pl.qty, pl.received_qty, pl.uom, p.name
+          `SELECT pl.qty, pl.received_qty, pl.uom, pl.product_id, p.name
              FROM po_lines pl JOIN products p ON p.id = pl.product_id
             WHERE pl.id = $1`, [l.poLineId]);
         const pol = po[0];
         if (pol) {
+          if (pol.product_id !== l.productId) {
+            throw ApiError.rule(
+              `The selected order line is for ${pol.name}, not the submitted product. `
+              + 'Keep the same product from box weighing through the receipt.');
+          }
           const open = round(Number(pol.qty) - Number(pol.received_qty), 3);
           const allowed = round(open * (1 + qtyTolPct / 100), 3);
           if (l.receivedQty > allowed + 0.001 && !mayOverReceive) {
