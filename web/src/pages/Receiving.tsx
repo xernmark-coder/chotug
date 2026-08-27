@@ -11,7 +11,10 @@ import { DriverModal, VehicleModal } from './Fleet';
 /* ================================================= EXPECTED ARRIVALS ===== */
 export function ArrivalsPage() {
   const nav = useNavigate();
+  const { warehouseId } = useAuth();
+  const [tab, setTab] = useState<'expected' | 'yard'>('expected');
   const { data, loading, error } = useApi<any[]>('/planning/expected-arrivals');
+  const yard = useApi<any[]>(`/receiving/pipeline?warehouseId=${warehouseId ?? ''}`, [warehouseId]);
 
   const f = useFilters<any>(data, {
     date: (a: any) => a.expected_date,
@@ -28,13 +31,36 @@ export function ArrivalsPage() {
       { label: 'Value', of: (a: any) => Number(a.grand_total) || 0, money: true },
     ],
   });
+  const yardStage = (g: any) =>
+    g.status === 'ARRIVED' && !g.has_gross ? 0
+    : g.status === 'ARRIVED' || g.status === 'WEIGHED' ? 1
+    : g.status === 'QC_PENDING' ? 2
+    : g.status === 'QC_COMPLETE' || g.status === 'GRN_PENDING' ? 3 : 4;
+  const yardNext = ['Weigh in', 'Weigh out', 'Quality check', 'Post receipt', 'Done'];
+  const yardFilters = useFilters<any>(yard.data, {
+    date: (g: any) => g.arrived_at,
+    search: (g: any) => [g.vehicle_reg_captured, g.gate_no, g.supplier_name, g.po_no].filter(Boolean).join(' '),
+    facets: [
+      { key: 'sup', label: 'supplier', of: (g: any) => g.supplier_name },
+      { key: 'st', label: 'stage', of: (g: any) => g.status },
+      { key: 'nx', label: 'next step', of: (g: any) => yardNext[yardStage(g)] },
+      { key: 'fl', label: 'flag', all: 'Any flag', of: (g: any) => g.critical_fail ? 'hygiene fail' : g.is_unplanned ? 'unplanned' : null },
+    ],
+    totals: [{ label: 'Vehicles', of: () => 1 }, { label: 'Checks done', of: (g: any) => Number(g.qc_count) || 0 }],
+  });
 
   return (
-    <Layout title="Expected arrivals" subtitle="Vehicles we are waiting for"
-      actions={<button className="btn primary" onClick={() => nav('/gate/new')}>Vehicle at gate</button>}>
-      <ErrorBanner error={error} />
-      <FilterBar f={f} placeholder="Search order, supplier, vehicle" />
-      <FilterTotals f={f} noun="arrival" />
+    <Layout title="Deliveries &amp; receiving" subtitle="Expected vehicles and the receiving yard"
+      actions={<div className="btn-row"><button className="btn" onClick={() => setTab('yard')}>Receiving yard</button><button className="btn primary" onClick={() => nav('/gate/new')}>Vehicle at gate</button></div>}>
+      <ErrorBanner error={tab === 'expected' ? error : yard.error} />
+      <div className="tabs">
+        <button className={`tab ${tab === 'expected' ? 'active' : ''}`} onClick={() => setTab('expected')}>Expected deliveries</button>
+        <button className={`tab ${tab === 'yard' ? 'active' : ''}`} onClick={() => setTab('yard')}>Vehicles at yard{yard.data?.length ? ` (${yard.data.length})` : ''}</button>
+      </div>
+      {tab === 'expected' ? <>
+        <FilterBar f={f} placeholder="Search order, supplier, vehicle" />
+        <FilterTotals f={f} noun="arrival" />
+        <div className="banner info mb"><span><Icon name="truckIn" size={16} /></span><div>Expected deliveries stay here until they arrive. Once logged at the gate, manage weighing, quality, and receipt in the <button className="btn sm" onClick={() => setTab('yard')}>receiving yard</button>.</div></div>
       <div className="card"><div className="card-body tight">
         <DataTable
           rows={f.rows} loading={loading}
@@ -61,8 +87,34 @@ export function ArrivalsPage() {
               : 'Confirm an approved purchase order to schedule an arrival.'} />}
         />
       </div></div>
+      </> : <>
+        <FilterBar f={yardFilters} placeholder="Search vehicle, gate pass, supplier, order" />
+        <FilterTotals f={yardFilters} noun="vehicle" />
+        <ReceivingYardTable rows={yardFilters.rows} loading={yard.loading} nav={nav} stage={yardStage} next={yardNext} />
+      </>}
     </Layout>
   );
+}
+
+function ReceivingYardTable({ rows, loading, nav, stage, next }: {
+  rows: any[]; loading: boolean; nav: (to: string) => void;
+  stage: (g: any) => number; next: string[];
+}) {
+  return <div className="card"><div className="card-body tight"><DataTable rows={rows} loading={loading}
+    rowTone={(g: any) => (g.critical_fail ? 'crit' : g.age_minutes > 180 ? 'warn' : undefined)}
+    onRowClick={(g: any) => nav(`/gate/${g.gate_entry_id}`)}
+    cols={[
+      { key: 'v', head: 'Vehicle', render: (g: any) => <div><b className="mono" style={{ fontSize: 15 }}>{g.vehicle_reg_captured}</b><div className="small muted">{g.gate_no}</div></div> },
+      { key: 's', head: 'Supplier', render: (g: any) => <div>{g.supplier_name}{g.po_no ? <div className="small muted mono">{g.po_no}</div> : <div><Chip tone="warn">no order</Chip></div>}</div> },
+      { key: 'st', head: 'Stage', render: (g: any) => <Chip value={g.status} /> },
+      { key: 'next', head: 'Next step', render: (g: any) => <b>{next[stage(g)]}</b> },
+      { key: 'w', head: 'Weighed', render: (g: any) => <span className="small">{g.has_gross ? '✓ gross' : '—'} {g.has_tare ? '· ✓ tare' : ''}</span> },
+      { key: 'q', head: 'QC', num: true, render: (g: any) => g.qc_count || '—' },
+      { key: 'a', head: 'Waiting', render: (g: any) => <span className={g.age_minutes > 180 ? 'chip danger' : 'small muted'}>{Math.round(g.age_minutes)} min</span> },
+      { key: 'f', head: '', render: (g: any) => g.critical_fail ? <Chip tone="danger">hygiene fail</Chip> : g.is_unplanned ? <Chip tone="warn">unplanned</Chip> : null },
+    ]}
+    empty={<Empty icon="🛃" title="No vehicles at the gate" hint="Record an arrival when a truck reaches you." />}
+  /></div></div>;
 }
 
 /* ================================================ RECEIVING PIPELINE ===== */
@@ -195,15 +247,18 @@ export function GateEntryPage() {
       const r = await api.get<any>(`/receiving/lookup/invoice?no=${encodeURIComponent(invoiceNo.trim())}`);
       setFound(r);
       if (!r.found) { toast(r.message, 'err'); return; }
+      const knownVehicle = vehicles?.find((v) => v.reg_no === (r.vehicle_reg ?? '').toUpperCase().replace(/\s/g, ''));
       setForm((f: any) => ({
         ...f,
         poId: r.po_id ?? f.poId,
         supplierId: r.supplier_id ?? f.supplierId,
         sourceType: r.source_type ?? f.sourceType,
         vehicleRegCaptured: r.vehicle_reg ?? f.vehicleRegCaptured,
+        vehicleId: knownVehicle?.id ?? f.vehicleId,
         driverName: r.driver_name ?? f.driverName,
         driverPhone: r.driver_phone ?? f.driverPhone,
         supplierInvoiceRef: r.invoice_no ?? f.supplierInvoiceRef,
+        mandiPattiNo: r.mandi_patti_no ?? f.mandiPattiNo,
         ewayBillNo: r.eway_bill_no ?? f.ewayBillNo,
       }));
       toast(`${r.po_no} — ${r.supplier_name}. Check the details and correct anything wrong.`, 'ok');
@@ -223,6 +278,10 @@ export function GateEntryPage() {
   }, [arrival, suppliers]);
 
   const vehicle = vehicles?.find((v) => v.id === form.vehicleId);
+  useEffect(() => {
+    if (!vehicle?.default_seal_no) return;
+    setForm((f: any) => ({ ...f, sealNo: f.sealNo || vehicle.default_seal_no }));
+  }, [vehicle]);
   const isUnplanned = !form.poId;
 
   const submit = async (lockNow: boolean) => {

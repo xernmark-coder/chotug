@@ -291,6 +291,85 @@ export function AiBox({ title = 'AI suggestion', confidence, usedFallback, child
 /* ------------------------------------------------------------- layout ---- */
 type NavDef = { to: string; label: string; icon: string; perms?: string[]; badge?: number };
 
+const TRANSLATION_LANGUAGES = [
+  ['en', 'English'], ['hi', 'Hindi'], ['mr', 'Marathi'], ['pa', 'Punjabi'],
+  ['bn', 'Bengali'], ['gu', 'Gujarati'], ['ta', 'Tamil'],
+] as const;
+
+export function LanguageSelector() {
+  const [language, setLanguage] = useState(() => localStorage.getItem('chotug_language') ?? 'en');
+
+  useEffect(() => {
+    const win = window as any;
+    const removeGoogleBanner = () => {
+      document.querySelectorAll('.goog-te-banner-frame, iframe.skiptranslate').forEach((node) => {
+        (node as HTMLElement).style.display = 'none';
+        (node as HTMLElement).style.visibility = 'hidden';
+      });
+      document.documentElement.style.marginTop = '0';
+      document.body.style.top = '0';
+      document.body.style.marginTop = '0';
+    };
+    const bannerObserver = new MutationObserver(removeGoogleBanner);
+    bannerObserver.observe(document.documentElement, { childList: true, subtree: true });
+    removeGoogleBanner();
+    const applySavedLanguage = () => {
+      const combo = document.querySelector<HTMLSelectElement>('.goog-te-combo');
+      if (!combo || combo.value === (language === 'en' ? '' : language)) return;
+      combo.value = language === 'en' ? '' : language;
+      combo.dispatchEvent(new Event('change'));
+    };
+    win.googleTranslateElementInit = () => {
+      if (document.getElementById('google_translate_element')?.children.length) return;
+      new win.google.translate.TranslateElement({
+        pageLanguage: 'en',
+        includedLanguages: TRANSLATION_LANGUAGES.map(([code]) => code).filter((code) => code !== 'en').join(','),
+        autoDisplay: false,
+      }, 'google_translate_element');
+      window.setTimeout(applySavedLanguage, 0);
+    };
+
+    if (!document.getElementById('google-translate-script')) {
+      const script = document.createElement('script');
+      script.id = 'google-translate-script';
+      script.src = 'https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit';
+      script.async = true;
+      document.body.appendChild(script);
+    } else if (win.google?.translate) {
+      win.googleTranslateElementInit();
+      window.setTimeout(applySavedLanguage, 0);
+    }
+    return () => bannerObserver.disconnect();
+  }, [language]);
+
+  const changeLanguage = (next: string) => {
+    setLanguage(next);
+    localStorage.setItem('chotug_language', next);
+    if (next === 'en') {
+      /* Google keeps the selected language in a cookie. Resetting only its
+       * hidden select leaves already-translated DOM nodes in place. */
+      document.cookie = 'googtrans=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+      document.cookie = 'googtrans=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=' + window.location.hostname;
+      window.location.reload();
+      return;
+    }
+    const combo = document.querySelector<HTMLSelectElement>('.goog-te-combo');
+    if (!combo) return;
+    combo.value = next === 'en' ? '' : next;
+    combo.dispatchEvent(new Event('change'));
+  };
+
+  return (
+    <div className="language-picker">
+      <label htmlFor="language-select">Language</label>
+      <select id="language-select" value={language} onChange={(e) => changeLanguage(e.target.value)}>
+        {TRANSLATION_LANGUAGES.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
+      </select>
+      <div id="google_translate_element" aria-hidden="true" />
+    </div>
+  );
+}
+
 export function Layout({ children, title, subtitle, actions, touch }: {
   children: React.ReactNode; title: string; subtitle?: string;
   actions?: React.ReactNode; touch?: boolean;
@@ -304,6 +383,7 @@ export function Layout({ children, title, subtitle, actions, touch }: {
   // Below the drawer breakpoint the sidebar is off-canvas; above it the class
   // does nothing and the aside is a plain column.
   const [navOpen, setNavOpen] = useState(false);
+  const [openGroup, setOpenGroup] = useState<string | null>(null);
 
   // Tapping a link must dismiss the drawer, or the new page opens behind it.
   useEffect(() => { setNavOpen(false); }, [pathname]);
@@ -358,10 +438,8 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     {
       label: 'Work',
       items: [
-        { to: '/', label: 'Dashboard', icon: 'dashboard' },
+        { to: '/', label: 'Home', icon: 'dashboard' },
         { to: '/my-work', label: 'My Work', icon: 'target', badge: queueCount },
-        { to: '/alerts', label: 'Alerts', icon: 'bell', badge: alertCount,
-          perms: ['reports.purchase.view', 'admin.settings.manage', 'quality.inspection.approve', 'farming.report.view'] },
       ],
     },
     {
@@ -405,15 +483,10 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     {
       label: 'Receive',
       items: [
-        { to: '/arrivals', label: 'Expected Arrivals', icon: 'truckIn', perms: ['receiving.gate.create'] },
+        { to: '/arrivals', label: 'Deliveries & Receiving', icon: 'truckIn', perms: ['receiving.gate.create'] },
         // The warehouse's own first step: weigh it, count the crates, pass it on.
         { to: '/intake', label: 'Warehouse Intake', icon: 'scale', perms: ['receiving.weighment.create'] },
-        { to: '/gate', label: 'Gate & Receiving', icon: 'gate', perms: ['receiving.gate.create', 'receiving.weighment.create', 'quality.inspection.create', 'receiving.grn.submit'] },
         { to: '/grns', label: 'Goods Receipts', icon: 'inbox', perms: ['receiving.grn.create', 'receiving.grn.submit'] },
-        { to: '/warehouse-map', label: 'Warehouse Map', icon: 'shelf',
-          perms: ['master.location.manage', 'inventory.pack.store'] },
-        { to: '/stock', label: 'Stock & Batches', icon: 'crates',
-          perms: ['receiving.grn.create', 'inventory.pack.grade', 'inventory.stock.issue', 'reports.purchase.view'] },
         // Selling is where stock stops being cost and becomes revenue, so it
         // sits with the money, not with the warehouse shelves.
         /* Quality and packing are one job at one bench, so the people who do
@@ -421,22 +494,28 @@ export function Layout({ children, title, subtitle, actions, touch }: {
            and used to be locked out of the only screen that leads there. */
         { to: '/packing', label: 'Quality & Packing', icon: 'tag',
           perms: ['inventory.stock.issue', 'inventory.pack.grade'] },
-        { to: '/sales', label: 'Sell & Profit', icon: 'coins',
-          perms: ['inventory.stock.issue', 'data.margin.view'] },
-        { to: '/fleet', label: 'Vehicles & Drivers', icon: 'truck', perms: ['master.vehicle.manage', 'receiving.gate.create'] },
+      ],
+    },
+    {
+      label: 'Inventory',
+      items: [
+        { to: '/stock', label: 'Stock & Batches', icon: 'crates',
+          perms: ['receiving.grn.create', 'inventory.pack.grade', 'inventory.stock.issue', 'reports.purchase.view'] },
+        { to: '/warehouse-map', label: 'Warehouse', icon: 'shelf',
+          perms: ['master.location.manage', 'inventory.pack.store'] },
       ],
     },
     {
       label: 'Sell',
       items: [
+        { to: '/sales', label: 'Sales & Profitability', icon: 'coins',
+          perms: ['inventory.stock.issue', 'data.margin.view'] },
         { to: '/centres', label: 'Centres', icon: 'home',
           perms: ['centre.performance.view', 'centre.day.close', 'centre.stock.receive'] },
-        { to: '/customers', label: 'Customers', icon: 'people',
-          perms: ['master.customer.manage'] },
       ],
     },
     {
-      label: 'Money',
+      label: 'Finance',
       items: [
         /* The desk comes first: it is the one screen where money actually
          * moves, and the client asked for Finance to be the centre of the
@@ -446,29 +525,55 @@ export function Layout({ children, title, subtitle, actions, touch }: {
           perms: ['finance.request.create', 'finance.request.verify', 'finance.payment.make', 'finance.receipt.record'] },
         { to: '/invoices', label: 'Invoices & Match', icon: 'invoice', perms: ['finance.invoice.create', 'finance.invoice.match'] },
         { to: '/payments', label: 'Payment Status', icon: 'card', perms: ['finance.payment.view'] },
-        { to: '/suppliers', label: 'Suppliers', icon: 'handshake',
-          perms: ['reports.supplier.view', 'master.supplier.manage'] },
       ],
     },
     {
-      label: 'Insight',
+      label: 'People',
       items: [
-        { to: '/audit', label: 'Audit', icon: 'clipboard',
-          perms: ['audit.count.record', 'audit.report.view', 'audit.task.raise'] },
+        { to: '/suppliers', label: 'Suppliers', icon: 'handshake',
+          perms: ['reports.supplier.view', 'master.supplier.manage'] },
+        { to: '/customers', label: 'Customers', icon: 'people',
+          perms: ['master.customer.manage'] },
+        { to: '/hr', label: 'Workers & Wages', icon: 'user',
+          perms: ['hr.report.view', 'hr.attendance.mark', 'hr.worker.manage'] },
+        { to: '/people', label: 'Users & Permissions', icon: 'people', perms: ['admin.rbac.manage'] },
+      ],
+    },
+    {
+      label: 'Insights',
+      items: [
+        { to: '/analytics', label: 'Analytics', icon: 'chart', perms: ['reports.purchase.view'] },
         { to: '/performance', label: 'Product Performance', icon: 'chart',
           perms: ['reports.purchase.view'] },
         { to: '/reports', label: 'Reports', icon: 'doc', perms: ['reports.purchase.view'] },
         { to: '/ai', label: 'AI Centre', icon: 'sparkle',
           perms: ['ai.feature.manage', 'ai.suggestion.accept'] },
+        { to: '/alerts', label: 'Alerts', icon: 'bell', badge: alertCount,
+          perms: ['reports.purchase.view', 'admin.settings.manage', 'quality.inspection.approve', 'farming.report.view'] },
+      ],
+    },
+    {
+      label: 'Admin',
+      items: [
         { to: '/catalogue', label: 'Catalogue', icon: 'basket',
           perms: ['master.product.manage', 'master.category.manage', 'reports.purchase.view'] },
-        { to: '/hr', label: 'Workers & Wages', icon: 'user',
-          perms: ['hr.report.view', 'hr.attendance.mark', 'hr.worker.manage'] },
-        { to: '/people', label: 'People & Access', icon: 'people', perms: ['admin.rbac.manage'] },
+        { to: '/audit', label: 'Audit', icon: 'clipboard',
+          perms: ['audit.count.record', 'audit.report.view', 'audit.task.raise'] },
         { to: '/settings', label: 'Settings', icon: 'gear', perms: ['admin.settings.manage'] },
       ],
     },
   ];
+
+  useEffect(() => {
+    const active = groups.find((g) => g.label !== 'Work' && g.items.some((i) =>
+      i.to !== '/' && (pathname === i.to || pathname.startsWith(`${i.to}/`))));
+    if (active) setOpenGroup(active.label);
+  }, [pathname]);
+
+  const sectionIcons: Record<string, string> = {
+    'Plan & Buy': 'box', Receive: 'truckIn', Inventory: 'crates', Sell: 'coins',
+    Finance: 'coins', People: 'people', Insights: 'chart', Admin: 'gear',
+  };
 
   return (
     <div className={`app ${touch ? 'touch' : ''}`}>
@@ -485,17 +590,35 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         {groups.map((g) => {
           const items = g.items.filter((i) => !i.perms || can(...i.perms));
           if (!items.length) return null;
+          const active = items.some((i) => i.to !== '/' &&
+            (pathname === i.to || pathname.startsWith(`${i.to}/`)));
+          const expandable = g.label !== 'Work' && !outside;
+          const expanded = openGroup === g.label;
           return (
-            <div className="sidebar-group" key={g.label}>
-              <div className="sidebar-group-label">{g.label}</div>
-              {items.map((i) => (
+            <div className={`sidebar-group ${active ? 'has-active' : ''}`} key={g.label}>
+              {!expandable ? <div className="sidebar-group-label">{g.label}</div> : null}
+              {expandable ? (
+                <>
+                  <button type="button" className={`nav-item nav-section ${active ? 'active-parent' : ''}`}
+                    onClick={() => setOpenGroup(expanded ? null : g.label)}
+                    aria-expanded={expanded}>
+                    <span className="ic"><Icon name={sectionIcons[g.label] ?? 'dashboard'} /></span>
+                    <span>{g.label}</span><span className="nav-chevron">{expanded ? '⌄' : '›'}</span>
+                  </button>
+                  {expanded ? <div className="nav-children">{items.map((i) => (
+                    <NavLink key={i.to} to={i.to} end={i.to === '/'}
+                      className={({ isActive }) => `nav-item nav-child ${isActive ? 'active' : ''}`}>
+                      <span>{i.label}</span>
+                      {i.badge ? <span className={`nav-badge ${i.label === 'Alerts' ? 'crit' : ''}`}>{i.badge}</span> : null}
+                    </NavLink>
+                  ))}</div> : null}
+                </>
+              ) : items.map((i) => (
                 <NavLink key={i.to} to={i.to} end={i.to === '/'}
                   className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
                   <span className="ic"><Icon name={i.icon} /></span>
                   <span>{i.label}</span>
-                  {i.badge ? (
-                    <span className={`nav-badge ${i.label === 'Alerts' ? 'crit' : ''}`}>{i.badge}</span>
-                  ) : null}
+                  {i.badge ? <span className="nav-badge">{i.badge}</span> : null}
                 </NavLink>
               ))}
             </div>
@@ -523,6 +646,7 @@ export function Layout({ children, title, subtitle, actions, touch }: {
           </div>
           <div className="spacer" />
           <div className="topbar-actions">
+            <LanguageSelector />
             {/* Branch is our internal structure — an outside user has no use for
                 it and no business seeing how many we have. */}
             {!outside && me && me.branches.length > 1 ? (

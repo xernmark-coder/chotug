@@ -6,7 +6,7 @@ import {
 import { api, useAuth, inr, num, date, ago } from '../lib/api';
 import {
   Chip, Col, DataTable, Empty, ErrorBanner, Kpi, Layout, Loading, useApi, useToast,
-  FilterBar, FilterTotals, useFilters,
+  FilterBar, FilterTotals, LanguageSelector, useFilters,
 } from '../components/ui';
 import {
   CHART, ChartCard, compact, inrCompact, Meter, RankedBars, Spark, StackedStatus, TrendArea,
@@ -48,6 +48,7 @@ export function LoginPage() {
 
   return (
     <div className="login-page">
+      <div className="login-language"><LanguageSelector /></div>
       <form className="login-card" onSubmit={submit}>
         <h1>ChotuG</h1>
         <p className="muted small mb">Purchase &amp; Receiving</p>
@@ -389,10 +390,10 @@ export function DashboardPage() {
               foot="expected vehicles" onClick={() => nav('/arrivals')} />
             <Kpi label="Waiting to be weighed" value={k.awaiting_weighment ?? 0}
               tone={(k.awaiting_weighment ?? 0) > 0 ? 'warn' : 'good'}
-              foot="in the yard, not on the weighbridge" onClick={() => nav('/gate')} />
+              foot="in the yard, not on the weighbridge" onClick={() => nav('/arrivals')} />
             <Kpi label="At the gate now" value={gateTotal}
               foot={`${k.awaiting_qc ?? 0} at QC · ${k.awaiting_grn ?? 0} to post`}
-              onClick={() => nav('/gate')} />
+              onClick={() => nav('/arrivals')} />
           </div>
         </>
       ) : null}
@@ -403,7 +404,7 @@ export function DashboardPage() {
           <div className="grid c4 mb">
             <Kpi label="To post as receipt" value={k.awaiting_grn ?? 0}
               tone={(k.awaiting_grn ?? 0) > 0 ? 'warn' : 'good'}
-              foot="quality checked, not yet stock" onClick={() => nav('/gate')} />
+              foot="quality checked, not yet stock" onClick={() => nav('/arrivals')} />
             <Kpi label="Waiting to be packed" value={k.awaiting_putaway ?? 0}
               tone={(k.awaiting_putaway ?? 0) > 0 ? 'warn' : 'good'}
               foot="booked in, no boxes made yet" onClick={() => nav('/packing')} />
@@ -448,7 +449,7 @@ export function DashboardPage() {
           <div className="grid c4 mb">
             <Kpi label="Waiting for you" value={k.awaiting_qc ?? 0}
               tone={(k.awaiting_qc ?? 0) > 0 ? 'warn' : 'good'}
-              foot="vehicles to inspect" onClick={() => nav('/gate')} />
+              foot="vehicles to inspect" onClick={() => nav('/arrivals')} />
             <Kpi label="Inspections done" value={q.inspections_30d ?? 0}
               foot="in the last 30 days" />
             <Kpi label="Rejection rate" value={`${num(q.rejection_pct_30d, 1)}%`}
@@ -596,6 +597,84 @@ export function DashboardPage() {
   );
 }
 
+export function AdminDashboardPage() {
+  const nav = useNavigate();
+  const { branchId, warehouseId, me } = useAuth();
+  const dashboard = useApi<any>(`/insights/dashboard?branchId=${branchId ?? ''}`, [branchId]);
+  const queue = useApi<any[]>('/insights/work-queue');
+  const sales = useApi<any>('/inventory/sales-summary?days=1');
+  const stockData = useApi<any[]>(`/insights/stock?warehouseId=${warehouseId ?? ''}`, [warehouseId]);
+
+  if (dashboard.loading || sales.loading || queue.loading || stockData.loading) return <Layout title="Dashboard"><Loading /></Layout>;
+
+  const k = dashboard.data?.kpis ?? {};
+  const stock = dashboard.data?.criticalStock ?? [];
+  const inventoryValue = (stockData.data ?? []).reduce((sum, item) => sum + Number(item.qty ?? 0) * Number(item.landed_rate ?? 0), 0);
+  const tasks = queue.data ?? [];
+  const operations = [
+    { label: 'Incoming deliveries', total: Number(k.arrivals_today ?? 0), pending: Number(k.awaiting_weighment ?? 0) + Number(k.awaiting_qc ?? 0) + Number(k.awaiting_grn ?? 0), pendingLabel: 'in progress', to: '/arrivals' },
+    { label: 'Purchase orders', total: Number(k.pending_pos ?? 0) + Number(k.pending_approvals ?? 0), pending: Number(k.pending_approvals ?? 0), pendingLabel: 'awaiting approval', to: '/purchase-orders' },
+    { label: 'Sales', total: Number(sales.data?.totals?.sales ?? 0), pending: 0, pendingLabel: 'processing', to: '/sales' },
+  ];
+  const attention = [
+    ...tasks.slice(0, 4).map((task: any) => ({
+      severity: task.severity ?? (task.sla_breached ? 'HIGH' : 'NORMAL'),
+      text: task.title,
+      detail: [task.subtitle, task.doc_no].filter(Boolean).join(' · '),
+      action: 'Review',
+      to: (QUEUE_ROUTE[task.queue_key] ?? (() => '/my-work'))(task),
+    })),
+    ...(stock.length ? [{
+      severity: stock.some((p: any) => Number(p.days_of_cover) < 1) ? 'CRITICAL' : 'HIGH',
+      text: `${stock.length} product${stock.length === 1 ? '' : 's'} critically low`,
+      detail: stock.slice(0, 2).map((p: any) => p.name).join(', '),
+      action: 'View inventory', to: '/buy-list',
+    }] : []),
+  ].slice(0, 5);
+
+  return (
+    <Layout title="Admin dashboard" subtitle="What is happening right now">
+      <ErrorBanner error={dashboard.error ?? sales.error} />
+      <div className="hero">
+        <div><h1>{greeting()}, {me?.fullName?.split(' ')[0] ?? 'Admin'}</h1><p>{date(new Date().toISOString())} · Today at a glance</p></div>
+        <span className="spacer" />
+        <button className="btn primary lg" onClick={() => nav('/analytics')}>View Analytics →</button>
+      </div>
+
+      <div className="section-head"><h2>Needs Attention</h2><span className="rule" /></div>
+      <div className="card mb"><div className="card-body tight">
+        {attention.length ? attention.map((item, index) => (
+          <div className="row" key={`${item.text}-${index}`} style={{ padding: '13px 0', borderBottom: index < attention.length - 1 ? '1px solid var(--line)' : undefined }}>
+            <Chip value={item.severity} />
+            <div style={{ flex: 1, minWidth: 0 }}><b>{item.text}</b><div className="small muted">{item.detail || 'Needs a decision today'}</div></div>
+            <button className="btn sm primary" onClick={() => nav(item.to)}>{item.action}</button>
+          </div>
+        )) : <Empty icon="✅" title="Everything looks good" hint="Nothing needs your attention right now." />}
+      </div></div>
+
+      <div className="section-head"><h2>Today's Operations</h2><span className="rule" /></div>
+      <div className="grid c3 mb">{operations.map((item) => <div className="card" key={item.label}>
+        <div className="card-body"><div className="small muted">{item.label}</div><div className="value" style={{ fontSize: 28, fontWeight: 700 }}>{item.total}</div><div className="small">{item.pending} {item.pendingLabel}</div><button className="btn sm ghost mt" onClick={() => nav(item.to)}>View details →</button></div>
+      </div>)}</div>
+
+      <div className="section-head"><h2>Essential KPIs</h2><span className="rule" /></div>
+      <div className="grid c4 mb">
+        <Kpi label="Today's Sales" value={inr(sales.data?.totals?.revenue, 0)} foot={`${sales.data?.totals?.sales ?? 0} orders`} onClick={() => nav('/sales')} />
+        <Kpi label="Today's Purchases" value={inr(k.purchase_value_today, 0)} foot={`${k.receipts_today ?? 0} receipts`} onClick={() => nav('/grns')} />
+        <Kpi label="Pending Payments" value={inr(k.outstanding_payable, 0)} tone={Number(k.overdue_payable) > 0 ? 'crit' : Number(k.outstanding_payable) > 0 ? 'warn' : 'good'} foot={Number(k.overdue_payable) > 0 ? `${inr(k.overdue_payable, 0)} overdue` : 'outstanding balance'} onClick={() => nav('/payments')} />
+        <Kpi label="Low Stock / Critical Items" value={stock.length} tone={stock.length ? 'warn' : 'good'} foot="items below reorder point" onClick={() => nav('/buy-list')} />
+      </div>
+
+      <div className="section-head"><h2>Business Snapshot</h2><span className="rule" /></div>
+      <div className="card"><div className="card-body"><div className="grid c3">
+        <div><div className="small muted">Revenue today</div><b>{inr(sales.data?.totals?.revenue, 0)}</b></div>
+        <div><div className="small muted">Purchases today</div><b>{inr(k.purchase_value_today, 0)}</b></div>
+        <div><div className="small muted">Inventory value</div><b>{inr(inventoryValue, 0)}</b></div>
+      </div><button className="btn sm primary mt" onClick={() => nav('/analytics')}>View Analytics →</button></div></div>
+    </Layout>
+  );
+}
+
 /* ===========================================================================
  * THE PIPELINE
  *
@@ -619,9 +698,9 @@ const FLOW_STEPS: {
   { key: 'approve',    label: 'Approve',     icon: 'checkDoc',   to: '/approvals', hot: 1 },
   { key: 'to_confirm', label: 'Send',        icon: 'box',        to: '/purchase-orders', hot: 1 },
   { key: 'in_transit', label: 'On the road', icon: 'route',      to: '/dispatch' },
-  { key: 'at_gate',    label: 'At the gate', icon: 'gate',       to: '/intake', hot: 1 },
-  { key: 'in_qc',      label: 'Quality',     icon: 'scale',      to: '/gate', hot: 1 },
-  { key: 'to_book',    label: 'Book in',     icon: 'inbox',      to: '/gate', hot: 1 },
+  { key: 'at_gate',    label: 'At the gate', icon: 'gate',       to: '/arrivals', hot: 1 },
+  { key: 'in_qc',      label: 'Quality',     icon: 'scale',      to: '/arrivals', hot: 1 },
+  { key: 'to_book',    label: 'Book in',     icon: 'inbox',      to: '/arrivals', hot: 1 },
   { key: 'to_putaway', label: 'To pack',     icon: 'shelf',      to: '/packing', hot: 1 },
   { key: 'packed',     label: 'Packed',      icon: 'tag',        to: '/packing' },
   { key: 'to_match',   label: 'Match bills', icon: 'invoice',    to: '/invoices', hot: 1 },

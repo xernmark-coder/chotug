@@ -28,7 +28,7 @@ export function InvoiceListPage() {
   });
 
   return (
-    <Layout title="Supplier invoices" subtitle="Captured, matched against receipts, then payable"
+    <Layout title="Supplier invoices" subtitle="What arrived, what is owed, and what needs action"
       actions={can('finance.invoice.create')
         ? <button className="btn primary" onClick={() => nav('/invoices/new')}>Capture invoice</button>
         : undefined}>
@@ -39,8 +39,8 @@ export function InvoiceListPage() {
         <DataTable
           rows={f.rows} loading={loading}
           onRowClick={(i: any) => nav(`/invoices/${i.id}`)}
-          rowTone={(i: any) => (i.duplicate_of_id || i.status === 'HOLD' ? 'crit'
-            : i.status === 'MISMATCH' ? 'warn' : undefined)}
+          rowTone={(i: any) => (i.duplicate_of_id || i.status === 'HOLD' || i.receipt_attention ? 'crit'
+            : i.status === 'MISMATCH' || i.receipt_status === 'PARTIAL' ? 'warn' : undefined)}
           cols={[
             { key: 'n', head: 'Invoice', render: (i: any) => (
               <div><b className="mono">{i.invoice_no}</b>
@@ -49,9 +49,17 @@ export function InvoiceListPage() {
             { key: 'd', head: 'Date', render: (i: any) => date(i.invoice_date) },
             { key: 's', head: 'Supplier', render: (i: any) => i.supplier_name },
             { key: 'po', head: 'Order', render: (i: any) => <span className="mono small">{i.po_no ?? '—'}</span> },
+            { key: 'received', head: 'Goods received', render: (i: any) => (
+              i.receipt_status === 'RECEIVED' ? <Chip tone="ok">received</Chip> :
+              i.receipt_status === 'PARTIAL' ? <Chip tone="warn">partial</Chip> :
+              <Chip tone={i.receipt_attention ? 'danger' : 'neutral'}>
+                {i.receipt_attention ? 'overdue — not received' : 'not received'}
+              </Chip>
+            ) },
             { key: 't', head: 'Total', num: true, render: (i: any) => inr(i.total) },
-            { key: 'm', head: 'Match', render: (i: any) =>
-              i.match_result ? <Chip value={i.match_result} /> : <span className="muted small">not run</span> },
+            { key: 'm', head: 'Reconciliation', render: (i: any) =>
+              i.match_result && i.match_result !== 'MATCH' ? <Chip value={i.match_result} />
+                : <span className="muted small">updated from receipt</span> },
             { key: 'b', head: 'Balance', num: true, render: (i: any) =>
               i.balance != null ? inr(i.balance) : '—' },
             { key: 'st', head: 'Status', render: (i: any) => <Chip value={i.status} /> },
@@ -224,6 +232,21 @@ export function InvoiceDetailPage() {
         </div>
       }>
       <ErrorBanner error={error} />
+      {data.receipt_status !== 'RECEIVED' ? (
+        <div className={`banner ${data.receipt_attention ? 'danger' : 'warn'} mb`}>
+          <span><Icon name={data.receipt_attention ? 'alert' : 'clock'} size={16} /></span>
+          <div>
+            <b>{data.receipt_status === 'PARTIAL' ? 'Only part of this invoice has been received.' : 'No product from this invoice has been received yet.'}</b>{' '}
+            {data.receipt_attention
+              ? 'The due date has passed. Admin or Finance should follow up before taking further action.'
+              : 'Finance can wait for the gate receipt; reconciliation will update automatically when the delivery is posted.'}
+          </div>
+        </div>
+      ) : (
+        <div className="banner ok mb"><span><Icon name="check" size={16} /></span>
+          <div><b>Products received.</b> This invoice is now linked to the posted receipt.</div>
+        </div>
+      )}
       {data.duplicate_of_id ? (
         <div className="banner danger mb"><span><Icon name="alert" size={16} /></span>
           <div><b>This looks like a duplicate invoice.</b> Verify with the supplier before paying.</div></div>

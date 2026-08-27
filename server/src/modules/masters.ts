@@ -643,6 +643,7 @@ const vehicleFields = z.object({
   pucExpiry: dateStr,
   permitExpiry: dateStr,
   transporterName: z.string().max(120).nullable().optional(),
+  defaultSealNo: z.string().max(60).nullable().optional(),
   ownerSupplierId: z.string().uuid().nullable().optional(),
   status: z.enum(['ACTIVE', 'WATCH', 'BLOCKED']).default('ACTIVE'),
   statusReason: z.string().max(300).nullable().optional(),
@@ -658,7 +659,7 @@ function assertBlockReason(input: { status: string; statusReason?: string | null
 const vehicleCols = `id, reg_no, vehicle_type, make_model, capacity_kg, is_reefer,
             reefer_min_temp_c, tare_reference_kg, fitness_expiry, insurance_expiry,
             puc_expiry, permit_expiry, status, status_reason, transporter_name,
-            owner_supplier_id, is_active, retired_at, retired_reason, trips_90d,
+            owner_supplier_id, default_seal_no, is_active, retired_at, retired_reason, trips_90d,
             (fitness_expiry < CURRENT_DATE OR insurance_expiry < CURRENT_DATE
              OR puc_expiry < CURRENT_DATE) AS compliance_expired`;
 
@@ -691,7 +692,7 @@ mastersRouter.post('/vehicles', requires('master.vehicle.manage'), h(async (req)
       input.capacityKg ?? null, input.isReefer, input.reeferMinTempC ?? null,
       input.tareReferenceKg ?? null, input.fitnessExpiry ?? null, input.insuranceExpiry ?? null,
       input.pucExpiry ?? null, input.permitExpiry ?? null, input.status, input.statusReason ?? null,
-      input.transporterName ?? null, input.ownerSupplierId ?? null, req.actor.userId,
+      input.transporterName ?? null, input.ownerSupplierId ?? null, input.defaultSealNo ?? null, req.actor.userId,
     ];
 
     if (prior[0]) {
@@ -701,8 +702,9 @@ mastersRouter.post('/vehicles', requires('master.vehicle.manage'), h(async (req)
                 reefer_min_temp_c=$7, tare_reference_kg=$8, fitness_expiry=$9,
                 insurance_expiry=$10, puc_expiry=$11, permit_expiry=$12,
                 status=$13, status_reason=$14, transporter_name=$15, owner_supplier_id=$16,
+                default_seal_no=$17,
                 is_active=true, retired_at=NULL, retired_by=NULL, retired_reason=NULL,
-                updated_by=$17
+                updated_by=$18
           WHERE company_id=$1 AND reg_no=$2
           RETURNING ${vehicleCols}`, values);
       return { ...rows[0], restored: true };
@@ -711,9 +713,9 @@ mastersRouter.post('/vehicles', requires('master.vehicle.manage'), h(async (req)
     const { rows } = await tx.query(
       `INSERT INTO vehicles (company_id, reg_no, vehicle_type, make_model, capacity_kg, is_reefer,
               reefer_min_temp_c, tare_reference_kg, fitness_expiry, insurance_expiry, puc_expiry,
-              permit_expiry, status, status_reason, transporter_name, owner_supplier_id,
+              permit_expiry, status, status_reason, transporter_name, owner_supplier_id, default_seal_no,
               created_by, updated_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$17)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$18)
        RETURNING ${vehicleCols}`, values);
     return rows[0];
   });
@@ -735,14 +737,14 @@ mastersRouter.put('/vehicles/:id', requires('master.vehicle.manage'), h(async (r
               reefer_min_temp_c=$8, tare_reference_kg=$9, fitness_expiry=$10,
               insurance_expiry=$11, puc_expiry=$12, permit_expiry=$13,
               status=$14, status_reason=$15, transporter_name=$16, owner_supplier_id=$17,
-              updated_by=$18
+              default_seal_no=$18, updated_by=$19
         WHERE id=$1 AND company_id=$2
         RETURNING ${vehicleCols}`,
       [req.params.id, req.actor.companyId, input.regNo, input.vehicleType, input.makeModel ?? null,
        input.capacityKg ?? null, input.isReefer, input.reeferMinTempC ?? null,
        input.tareReferenceKg ?? null, input.fitnessExpiry ?? null, input.insuranceExpiry ?? null,
        input.pucExpiry ?? null, input.permitExpiry ?? null, input.status, input.statusReason ?? null,
-       input.transporterName ?? null, input.ownerSupplierId ?? null, req.actor.userId]);
+      input.transporterName ?? null, input.ownerSupplierId ?? null, input.defaultSealNo ?? null, req.actor.userId]);
     if (!rows[0]) throw ApiError.notFound('Vehicle not found');
     return rows[0];
   });

@@ -82,7 +82,9 @@ export function UnloadPage() {
             Done weighing boxes →
           </button>
         ) : null}
-        <button className="btn sm" onClick={() => nav(`/gate/${id}`)}>Vehicle file →</button>
+        {!data.totalBoxes ? (
+          <button className="btn sm" onClick={() => nav(`/gate/${id}`)}>Vehicle file →</button>
+        ) : null}
       </div>}
     >
       <ErrorBanner error={postError} />

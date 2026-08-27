@@ -11,6 +11,7 @@ import {
   type QcParam,
 } from '../domain/index.js';
 import { qcPhotoAssist } from '../ai/features.js';
+import { checkInvoiceAgainstReceipts } from './costing.js';
 
 export const receivingRouter = Router();
 receivingRouter.use(authenticate);
@@ -210,6 +211,7 @@ receivingRouter.get('/lookup/invoice', requires('receiving.gate.create'), h(asyn
             COALESCE(s.trade_name, s.legal_name) AS supplier_name, s.phone AS supplier_phone,
             w.name              AS warehouse_name,
             i.invoice_no, i.invoice_date, i.total AS invoice_total,
+            e.mandi_patti_no,
             i.filed_by_supplier,
             (SELECT count(*) FROM po_lines pl WHERE pl.po_id = o.id)   AS line_count,
             /* The clerk should know, before the lorry is inside, whether this
@@ -1171,9 +1173,15 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
       }
 
       const { rows: prod } = await tx.query(
-        `SELECT name, sku, shelf_life_days, is_batch_tracked, rotation_rule, storage_type,
+        `SELECT name, sku, base_uom, shelf_life_days, is_batch_tracked, rotation_rule, storage_type,
                 is_variable_weight FROM products WHERE id=$1`, [l.productId]);
       const p = prod[0];
+      /* PO quantities stay in their commercial unit (for example 10 BOX),
+       * but stock for a weight-based product must be the measured kilograms.
+       * Otherwise packing sees the box count as kilograms and turns 150 kg
+       * received into 10 kg available. */
+      const stockQty = p?.base_uom === 'KG' && Number(l.netWeightKg) > 0
+        ? Number(l.netWeightKg) : l.acceptedQty;
 
       const lineValue = money(l.acceptedQty * l.rate);
       const { rows: glRows } = await tx.query(
@@ -1205,7 +1213,7 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
            RETURNING *`,
           [req.actor.companyId, g.branch_id, g.warehouse_id, batchNo, l.productId, grnLine.id,
            g.supplier_id, postingDate, l.harvestDate ?? null, shelfLife, l.grade ?? null,
-           l.acceptedQty, l.netWeightKg ?? null, l.rate,
+           stockQty, l.netWeightKg ?? null, l.rate,
            l.netWeightKg && l.netWeightKg > 0 ? round(lineValue / l.netWeightKg, 6) : l.rate,
            req.actor.userId]);
         const batch = bRows[0];
@@ -1244,7 +1252,7 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
           [req.actor.companyId, batch.id, lotCode.replace(/\//g, '-'),
            JSON.stringify({
              sku: p?.sku, batch: batchNo, product: p?.name, grade: l.grade,
-             receivedDate: postingDate, qty: l.acceptedQty, weightKg: l.netWeightKg,
+             receivedDate: postingDate, qty: stockQty, weightKg: l.netWeightKg,
              supplier: g.supplier_id, grn: grnNo, expiry: batch.expiry_date,
            }), req.actor.userId]);
 
@@ -1269,7 +1277,7 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
                 ref_line_id, posted_at, posted_by)
            VALUES ($1,$2,$3,$4,$5,'IN',$6,$7,$8,$9,$10,'GRN','grn',$11,$12,now(),$13)`,
           [req.actor.companyId, g.branch_id, g.warehouse_id, l.productId, batch.id,
-           l.acceptedQty, l.netWeightKg ?? null, l.uom, l.rate, lineValue,
+           stockQty, l.netWeightKg ?? null, p?.base_uom ?? l.uom, l.rate, lineValue,
            grn.id, grnLine.id, req.actor.userId]);
 
         await tx.query(
@@ -1280,7 +1288,7 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
                  weight_kg = stock_balances.weight_kg + EXCLUDED.weight_kg,
                  updated_at = now()`,
           [req.actor.companyId, g.warehouse_id, l.productId, batch.id,
-           l.acceptedQty, l.netWeightKg ?? 0]);
+           stockQty, l.netWeightKg ?? 0]);
 
         /* --- put-away suggestion (§15): FEFO/FIFO + storage type match ---- */
         const { rows: bin } = await tx.query(
@@ -1331,6 +1339,20 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
                   updated_by = $5
             WHERE id = $1`,
           [l.poLineId, l.receivedQty, l.acceptedQty, l.rejectedQty, req.actor.userId]);
+      }
+    }
+
+    /* The invoice may have been filed at supplier acceptance, before this
+     * vehicle arrived. Reconcile it now that the receipt is real, so Finance
+     * sees received/partial status immediately and only genuine exceptions
+     * remain in the invoice-match queue. */
+    if (g.po_id) {
+      const { rows: invoices } = await tx.query(
+        `SELECT id FROM supplier_invoices
+          WHERE po_id = $1 AND company_id = $2 AND status <> 'CANCELLED'`,
+        [g.po_id, req.actor.companyId]);
+      for (const invoice of invoices) {
+        await checkInvoiceAgainstReceipts(tx, req.actor, invoice.id);
       }
     }
 

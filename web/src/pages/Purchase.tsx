@@ -50,7 +50,10 @@ export function PoListPage() {
           rowTone={(o: any) => (o.is_urgent ? 'warn' : Number(o.pending_approvals) > 0 ? 'warn' : undefined)}
           cols={[
             { key: 'n', head: 'Number', render: (o: any) => (
-              <div><b className="mono">{o.po_no}</b>{o.revision_no > 0 ? <span className="small muted"> rev {o.revision_no}</span> : null}</div>
+              <div>
+                <b className="mono">{o.po_no}</b>{o.revision_no > 0 ? <span className="small muted"> rev {o.revision_no}</span> : null}
+                {o.item_summary ? <div className="small muted" title={o.item_summary}>{o.item_summary}</div> : null}
+              </div>
             ) },
             { key: 'd', head: 'Ordered', render: (o: any) => date(o.order_date) },
             { key: 's', head: 'Supplier', render: (o: any) => (

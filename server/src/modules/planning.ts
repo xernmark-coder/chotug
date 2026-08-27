@@ -657,6 +657,10 @@ planningRouter.get('/purchase-orders', h(async (req) =>
             o.grand_total, o.is_urgent, o.revision_no,
             s.trade_name AS supplier_name, s.legal_name AS supplier_legal_name,
             b.name AS branch_name,
+            (SELECT string_agg(p.name, ', ' ORDER BY l.line_no)
+               FROM po_lines l JOIN products p ON p.id = l.product_id
+              WHERE l.po_id = o.id) AS item_summary,
+            (SELECT count(*) FROM po_lines l WHERE l.po_id = o.id) AS item_count,
             /* Whether the other side has actually agreed to this. A confirmed
              * order the supplier has declined looks identical to one they are
              * loading right now unless the buyer can see the answer. */

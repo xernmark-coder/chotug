@@ -67,7 +67,8 @@ inventoryRouter.get('/issuable', h(async (req) =>
        LEFT JOIN v_batch_pricing pr ON pr.batch_id = b.id
        LEFT JOIN farms f  ON f.id = b.farm_id
       WHERE sb.company_id = $1
-        AND sb.qty - sb.reserved_qty > 0
+        AND (CASE WHEN p.base_uom = 'KG' AND COALESCE(sb.weight_kg, 0) > 0
+            THEN sb.weight_kg ELSE sb.qty END - sb.reserved_qty) > 0
         AND b.status = 'ACTIVE'
         AND ($2::uuid IS NULL OR sb.warehouse_id = $2)
         AND ($3::uuid IS NULL OR sb.product_id = $3)
@@ -524,7 +525,8 @@ inventoryRouter.get('/sell-suggestions', h(async (req) => {
     `SELECT b.id AS batch_id, b.batch_no, b.grade,
             p.id AS product_id, p.name AS product_name, p.sku, p.base_uom,
             sb.warehouse_id, w.name AS warehouse_name,
-            (sb.qty - sb.reserved_qty) AS available_qty,
+            (CASE WHEN p.base_uom = 'KG' AND COALESCE(sb.weight_kg, 0) > 0
+              THEN sb.weight_kg ELSE sb.qty END - sb.reserved_qty) AS available_qty,
             b.landed_rate, b.landed_rate_per_kg, b.initial_qty, b.received_date,
             COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date,
             (COALESCE(b.predicted_expiry_date, b.expiry_date) - CURRENT_DATE) AS days_left,
@@ -546,7 +548,8 @@ inventoryRouter.get('/sell-suggestions', h(async (req) => {
        JOIN warehouses w ON w.id = sb.warehouse_id
        LEFT JOIN v_batch_pricing pr ON pr.batch_id = b.id
       WHERE sb.company_id = $1
-        AND sb.qty - sb.reserved_qty > 0
+        AND (CASE WHEN p.base_uom = 'KG' AND COALESCE(sb.weight_kg, 0) > 0
+            THEN sb.weight_kg ELSE sb.qty END - sb.reserved_qty) > 0
         AND b.status = 'ACTIVE'
         AND ($2::uuid IS NULL OR sb.warehouse_id = $2)
       ORDER BY COALESCE(b.predicted_expiry_date, b.expiry_date) NULLS LAST
@@ -647,7 +650,8 @@ inventoryRouter.get('/packable', h(async (req) =>
     `SELECT b.id AS batch_id, b.batch_no, b.grade, p.id AS product_id,
             p.name AS product_name, p.sku, p.base_uom,
             sb.warehouse_id, w.name AS warehouse_name,
-            (sb.qty - sb.reserved_qty) AS available_qty,
+            (CASE WHEN p.base_uom = 'KG' AND COALESCE(sb.weight_kg, 0) > 0
+              THEN sb.weight_kg ELSE sb.qty END - sb.reserved_qty) AS available_qty,
             b.landed_rate, b.landed_rate_per_kg,
             COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date,
             (COALESCE(b.predicted_expiry_date, b.expiry_date) - CURRENT_DATE) AS days_left,
@@ -723,7 +727,8 @@ inventoryRouter.get('/pack-bench/:batchId', h(async (req) => {
     `SELECT b.id AS batch_id, b.batch_no, b.grade AS lot_grade,
             p.id AS product_id, p.name AS product_name, p.sku, p.icon, p.base_uom,
             sb.warehouse_id, w.name AS warehouse_name,
-            (sb.qty - sb.reserved_qty) AS available_qty,
+            (CASE WHEN p.base_uom = 'KG' AND COALESCE(sb.weight_kg, 0) > 0
+              THEN sb.weight_kg ELSE sb.qty END - sb.reserved_qty) AS available_qty,
             b.landed_rate, b.landed_rate_per_kg,
             COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date,
             COALESCE((SELECT SUM(pk.qty) FROM packs pk
@@ -802,7 +807,7 @@ inventoryRouter.post('/pack-bench/:batchId/box',
 
     return withTx(req.actor, async (tx) => {
       const { rows: sbRows } = await tx.query(
-        `SELECT sb.qty, sb.reserved_qty, sb.product_id, b.batch_no, b.status AS batch_status,
+        `SELECT sb.qty, sb.weight_kg, sb.reserved_qty, sb.product_id, b.batch_no, b.status AS batch_status,
                 p.base_uom, p.name AS product_name
            FROM stock_balances sb
            JOIN batches b ON b.id = sb.batch_id
@@ -819,7 +824,9 @@ inventoryRouter.post('/pack-bench/:batchId/box',
       const { rows: already } = await tx.query(
         `SELECT COALESCE(SUM(qty),0) AS q FROM packs
           WHERE batch_id = $1 AND status = 'IN_STOCK'`, [req.params.batchId]);
-      const free = Number(sb.qty) - Number(sb.reserved_qty) - Number(already[0].q);
+      const stockQty = sb.base_uom === 'KG' && Number(sb.weight_kg) > 0
+        ? Number(sb.weight_kg) : Number(sb.qty);
+      const free = stockQty - Number(sb.reserved_qty) - Number(already[0].q);
       if (Number(input.qty) > free + 0.001) {
         throw ApiError.rule(
           `Only ${roundQty(free)} ${sb.base_uom} of this batch is still unpacked.`,
@@ -910,7 +917,7 @@ inventoryRouter.post('/pack-bench/:batchId/run',
 
     return withTx(req.actor, async (tx) => {
       const { rows: sbRows } = await tx.query(
-        `SELECT sb.qty, sb.reserved_qty, sb.product_id, b.batch_no,
+        `SELECT sb.qty, sb.weight_kg, sb.reserved_qty, sb.product_id, b.batch_no,
                 b.status AS batch_status, p.base_uom, p.name AS product_name
            FROM stock_balances sb
            JOIN batches b ON b.id = sb.batch_id
@@ -926,7 +933,9 @@ inventoryRouter.post('/pack-bench/:batchId/run',
       const { rows: already } = await tx.query(
         `SELECT COALESCE(SUM(qty),0) AS q FROM packs
           WHERE batch_id = $1 AND status = 'IN_STOCK'`, [req.params.batchId]);
-      const free = Number(sb.qty) - Number(sb.reserved_qty) - Number(already[0].q);
+      const stockQty = sb.base_uom === 'KG' && Number(sb.weight_kg) > 0
+        ? Number(sb.weight_kg) : Number(sb.qty);
+      const free = stockQty - Number(sb.reserved_qty) - Number(already[0].q);
       if (wanted > free + 0.001) {
         throw ApiError.rule(
           `That makes ${roundQty(wanted)} ${sb.base_uom} of boxes from `

@@ -422,6 +422,29 @@ export async function checkInvoiceAgainstReceipts(tx: Tx, actor: Actor, invoiceI
     const inv = iRows[0];
     if (!inv) throw ApiError.notFound('Invoice not found');
 
+    /* An invoice can be filed before the truck arrives. Once its GRN exists,
+     * attach still-unmatched lines to this PO's receipt before comparing; the
+     * old flow only linked them during invoice capture, so a later receipt
+     * stayed invisible to Finance. */
+    await tx.query(
+      `UPDATE invoice_lines il
+          SET matched_grn_line_id = picked.grn_line_id,
+              matched_po_line_id = COALESCE(il.matched_po_line_id, picked.po_line_id)
+         FROM LATERAL (
+           SELECT gl.id AS grn_line_id, gl.po_line_id
+             FROM grn_lines gl
+             JOIN grns g ON g.id = gl.grn_id
+            WHERE gl.product_id = il.product_id
+              AND g.po_id = $2 AND g.status = 'POSTED'
+              AND NOT EXISTS (SELECT 1 FROM invoice_lines used
+                               WHERE used.matched_grn_line_id = gl.id
+                                 AND used.id <> il.id)
+            ORDER BY g.posting_date DESC, gl.line_no
+            LIMIT 1
+         ) picked
+        WHERE il.invoice_id = $1 AND il.matched_grn_line_id IS NULL`,
+      [inv.id, inv.po_id]);
+
     const { rows: lines } = await tx.query(
       `SELECT il.*, gl.accepted_qty AS grn_qty, pl.rate AS po_rate,
               p.name AS product_name
@@ -430,6 +453,14 @@ export async function checkInvoiceAgainstReceipts(tx: Tx, actor: Actor, invoiceI
          LEFT JOIN po_lines  pl ON pl.id = COALESCE(il.matched_po_line_id, gl.po_line_id)
          LEFT JOIN products  p  ON p.id  = il.product_id
         WHERE il.invoice_id=$1 ORDER BY il.line_no`, [inv.id]);
+
+    /* Receipt timing is not a price/quantity mismatch. Keep the invoice
+     * payable workflow alive while the truck is still missing or partial, and
+     * wait to run three-way reconciliation until every invoice line has a
+     * posted receipt line. */
+    if (lines.some((line: any) => !line.matched_grn_line_id)) {
+      return { invoiceStatus: inv.status, overall: 'PENDING_RECEIPT', findings: [] };
+    }
 
     const { rows: tolRows } = await tx.query(
       `SELECT * FROM tolerance_profiles WHERE company_id=$1 AND is_default LIMIT 1`,
@@ -537,8 +568,15 @@ costingRouter.get('/invoices', h(async (req) =>
   query(req.actor,
     `SELECT i.id, i.invoice_no, i.invoice_date, i.due_date, i.total, i.status, i.is_rcm,
             i.duplicate_of_id, s.trade_name AS supplier_name, o.po_no,
-            m.overall AS match_result, m.findings,
-            ps.paid_amount, ps.balance,
+              m.overall AS match_result, m.findings,
+              ps.paid_amount, ps.balance,
+              receipt.received_lines, receipt.total_lines, receipt.received_qty,
+              CASE WHEN receipt.received_lines = 0 THEN 'NOT_RECEIVED'
+                WHEN receipt.received_lines < receipt.total_lines THEN 'PARTIAL'
+                ELSE 'RECEIVED' END AS receipt_status,
+                CASE WHEN i.due_date < CURRENT_DATE
+                     AND receipt.received_lines < receipt.total_lines
+                  THEN true ELSE false END AS receipt_attention,
             CASE WHEN ps.due_date IS NOT NULL AND ps.balance > 0
                  THEN GREATEST(0, CURRENT_DATE - ps.due_date) END AS overdue_days
        FROM supplier_invoices i
@@ -546,6 +584,14 @@ costingRouter.get('/invoices', h(async (req) =>
        LEFT JOIN purchase_orders o ON o.id = i.po_id
        LEFT JOIN match_results m ON m.invoice_id = i.id AND m.is_latest
        LEFT JOIN payment_status ps ON ps.invoice_id = i.id
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS total_lines,
+               count(*) FILTER (WHERE il.matched_grn_line_id IS NOT NULL)::int AS received_lines,
+               COALESCE(SUM(gl.accepted_qty), 0) AS received_qty
+          FROM invoice_lines il
+          LEFT JOIN grn_lines gl ON gl.id = il.matched_grn_line_id
+         WHERE il.invoice_id = i.id
+      ) receipt ON true
       WHERE i.company_id=$1 AND ($2 = '' OR i.status = $2)
       ORDER BY i.received_at DESC LIMIT 200`,
     [req.actor.companyId, String(req.query.status ?? '')])));
@@ -553,9 +599,22 @@ costingRouter.get('/invoices', h(async (req) =>
 costingRouter.get('/invoices/:id', h(async (req) => {
   const [inv] = await query(req.actor,
     `SELECT i.*, s.trade_name AS supplier_name, s.legal_name, s.gstin AS supplier_master_gstin,
-            o.po_no FROM supplier_invoices i
+        o.po_no,
+        receipt.received_lines, receipt.total_lines,
+        CASE WHEN receipt.received_lines = 0 THEN 'NOT_RECEIVED'
+          WHEN receipt.received_lines < receipt.total_lines THEN 'PARTIAL'
+          ELSE 'RECEIVED' END AS receipt_status,
+        CASE WHEN i.due_date < CURRENT_DATE
+             AND receipt.received_lines < receipt.total_lines
+          THEN true ELSE false END AS receipt_attention
+      FROM supplier_invoices i
        JOIN suppliers s ON s.id = i.supplier_id
        LEFT JOIN purchase_orders o ON o.id = i.po_id
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS total_lines,
+         count(*) FILTER (WHERE il.matched_grn_line_id IS NOT NULL)::int AS received_lines
+       FROM invoice_lines il WHERE il.invoice_id = i.id
+      ) receipt ON true
       WHERE i.id=$1 AND i.company_id=$2`, [req.params.id, req.actor.companyId]);
   if (!inv) throw ApiError.notFound('Invoice not found');
   const [lines, match, notes, payment] = await Promise.all([

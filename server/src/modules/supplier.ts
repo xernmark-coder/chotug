@@ -209,6 +209,7 @@ supplierRouter.post('/orders/:id/respond', requires('supplier.order.accept'), h(
     transporter: z.string().trim().max(80).optional(),
     lrNo: z.string().trim().max(40).optional(),
     ewayBillNo: z.string().trim().max(40).optional(),
+    mandiPattiNo: z.string().trim().max(60).optional(),
   }), req.body ?? {});
 
   const supplierId = await mySupplier(req.actor);
@@ -297,11 +298,12 @@ supplierRouter.post('/orders/:id/respond', requires('supplier.order.accept'), h(
                   lr_no        = COALESCE($6, lr_no),
                   eway_bill_no = COALESCE($7, eway_bill_no),
                   supplier_invoice_no = COALESCE($8, supplier_invoice_no),
-                  updated_by = $9
+                  mandi_patti_no = COALESCE($9, mandi_patti_no),
+                  updated_by = $10
             WHERE po_id = $1 AND status <> 'CANCELLED'`,
           [o.id, input.vehicleReg ?? null, input.driverName ?? null,
            input.driverPhone ?? null, input.transporter ?? null, input.lrNo ?? null,
-           input.ewayBillNo ?? null, invoiceNo, req.actor.userId]);
+           input.ewayBillNo ?? null, invoiceNo, input.mandiPattiNo ?? null, req.actor.userId]);
       }
     }
 

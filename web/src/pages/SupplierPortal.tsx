@@ -703,6 +703,7 @@ function RespondModal({ order, onClose, onDone }: {
   const [driverPhone, setDriverPhone] = useState('');
   const [transporter, setTransporter] = useState('');
   const [lrNo, setLrNo] = useState('');
+  const [mandiPattiNo, setMandiPattiNo] = useState('');
 
   const send = async (decision: 'ACCEPT' | 'DECLINE') => {
     setBusy(true); setError(null);
@@ -719,6 +720,7 @@ function RespondModal({ order, onClose, onDone }: {
           driverPhone: driverPhone.trim() || undefined,
           transporter: transporter.trim() || undefined,
           lrNo: lrNo.trim() || undefined,
+          mandiPattiNo: mandiPattiNo.trim() || undefined,
         } : {}),
       });
       toast(r.message, decision === 'ACCEPT' ? 'ok' : 'info');
@@ -780,6 +782,8 @@ function RespondModal({ order, onClose, onDone }: {
           onChange={(e) => setDriverPhone(e.target.value)} placeholder="98220 11223" /></Field>
         <Field label="LR number"><input value={lrNo}
           onChange={(e) => setLrNo(e.target.value)} placeholder="LR-8891" /></Field>
+        <Field label="Mandi patti number"><input value={mandiPattiNo}
+          onChange={(e) => setMandiPattiNo(e.target.value)} placeholder="Optional" /></Field>
       </div>
 
       <div className="section-head sm"><h3>Message to the buyer</h3><span className="rule" /></div>

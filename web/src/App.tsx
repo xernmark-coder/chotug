@@ -2,10 +2,11 @@ import React from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useAuth } from './lib/api';
 import { Loading } from './components/ui';
-import { DashboardPage, LoginPage, WorkQueuePage } from './pages/Home';
+import { AdminDashboardPage, DashboardPage, LoginPage, WorkQueuePage } from './pages/Home';
+import { AnalyticsPage } from './pages/Analytics';
 import { BuyListPage, RequirementDetailPage, RequirementListPage } from './pages/Planning';
 import { ApprovalsPage, PoCreatePage, PoDetailPage, PoListPage } from './pages/Purchase';
-import { ArrivalsPage, GateDetailPage, GateEntryPage, GatePipelinePage } from './pages/Receiving';
+import { ArrivalsPage, GateDetailPage, GateEntryPage } from './pages/Receiving';
 import { GrnDetailPage, GrnListPage, StockPage } from './pages/Grn';
 import { FleetPage } from './pages/Fleet';
 import { AcceptInvitePage, PeoplePage } from './pages/People';
@@ -84,7 +85,8 @@ export default function App() {
       <Route path="/login" element={<Navigate to="/" replace />} />
       {/* The dashboard is the landing page: a list of tasks is what you open
           next, not what you want to be shown the moment you sign in. */}
-      <Route path="/" element={<DashboardPage />} />
+      <Route path="/" element={me.permissions.includes('admin.override')
+        ? <AdminDashboardPage /> : <DashboardPage />} />
       <Route path="/my-work" element={<WorkQueuePage />} />
       <Route path="/dashboard" element={<Navigate to="/" replace />} />
       <Route path="/alerts" element={<AlertsPage />} />
@@ -110,9 +112,12 @@ export default function App() {
       <Route path="/centres/:id" element={<CentreDayPage />} />
       <Route path="/customers" element={<CustomersPage />} />
       <Route path="/performance" element={<PerformancePage />} />
+      <Route path="/analytics" element={<AnalyticsPage />} />
       <Route path="/hr" element={<HrPage />} />
       <Route path="/dispatch" element={<LogisticsDispatchPage />} />
-      <Route path="/gate" element={<GatePipelinePage />} />
+        {/* Gate and receiving share one landing page; keep the old URL usable
+          for bookmarks while the entry and detail routes remain unchanged. */}
+        <Route path="/gate" element={<Navigate to="/arrivals" replace />} />
       <Route path="/gate/new" element={<GateEntryPage />} />
       <Route path="/gate/:id" element={<GateDetailPage />} />
       <Route path="/fleet" element={<FleetPage />} />

@@ -109,6 +109,16 @@ a:hover { text-decoration: underline; }
 }
 .nav-item:hover { background: rgba(199, 210, 254, .10); color: #fff; text-decoration: none; }
 .nav-item.active { background: var(--primary); color: #fff; }
+.nav-section {
+  width: 100%; border: 0; text-align: left; font-family: inherit;
+  background: transparent; appearance: none; -webkit-appearance: none;
+}
+.nav-section.active-parent { background: rgba(199, 210, 254, .14); color: #fff; }
+.nav-chevron { margin-left: auto; font-size: 19px; line-height: 1; color: #A5B4FC; }
+.nav-children { margin: 2px 0 4px 14px; padding-left: 10px; border-left: 1px solid rgba(199, 210, 254, .22); }
+.nav-child { padding-top: 7px; padding-bottom: 7px; font-size: 13px; }
+.nav-child.active { background: var(--primary); color: #fff; }
+.sidebar-group.has-active .sidebar-group-label { color: #C7D2FE; }
 .nav-item .ic { width: 18px; text-align: center; opacity: .9; font-size: 15px; }
 .nav-badge {
   margin-left: auto; background: var(--accent); color: #fff;
@@ -133,6 +143,16 @@ a:hover { text-decoration: underline; }
 .topbar .sub { font-size: 13px; color: var(--muted); }
 .topbar .spacer { flex: 1; }
 .topbar-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.language-picker { display: flex; align-items: center; gap: 6px; }
+.language-picker label { color: var(--muted); font-size: 12px; }
+.language-picker select { width: auto; min-width: 106px; }
+#google_translate_element { display: none; }
+.goog-te-banner-frame,
+.goog-te-banner-frame.skiptranslate,
+iframe.goog-te-banner-frame,
+iframe.skiptranslate { display: none !important; visibility: hidden !important; height: 0 !important; }
+body, html { top: 0 !important; margin-top: 0 !important; }
+#goog-gt-tt, .goog-tooltip, .goog-te-balloon-frame { display: none !important; }
 .branch-select { width: 200px; }
 .nav-toggle {
   display: none; flex: 0 0 auto;
@@ -507,6 +527,7 @@ label.check input { width: auto; }
   background: linear-gradient(140deg, #312E81 0%, #4338CA 55%, #6366F1 100%);
   padding: 20px;
 }
+.login-language { position: fixed; top: 18px; right: 22px; }
 .login-card { width: 100%; max-width: 400px; background: var(--surface); border-radius: 14px; padding: 30px; box-shadow: var(--shadow-lg); }
 .login-card h1 { margin-bottom: 4px; }
 .demo-users { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }

@@ -92,3 +92,6 @@ when the finance check the payment request they should know about the product th
 at the put on shelve if it is possible to show map of the warehouse and from there they select where to put will be good , also by typing the number is also good.
 
 when the item comes , they also want to take the weight of vehical and empty vehical but they can skip it too and take the weight of the boxes directly , this please add in that flow of qc , and they will direct enter 10 box of 20kg or weight each box , then after the qc they should open to packing page to pack the boxed , remove old flow if any prsent , and then send these packed boxed to the warehouse , modify the part in ss completely to achieve this . 
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+*on the supplier panel they should be able to see the product asked by the admin or purchaser not the po number and all  .please fix it .

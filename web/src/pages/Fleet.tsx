@@ -195,6 +195,7 @@ export function VehicleModal({ vehicle, onClose, onSaved }: {
     vehicleType: vehicle.vehicle_type ?? 'TRUCK',
     makeModel: vehicle.make_model ?? '',
     transporterName: vehicle.transporter_name ?? '',
+    defaultSealNo: vehicle.default_seal_no ?? '',
     capacityKg: vehicle.capacity_kg ?? '',
     tareReferenceKg: vehicle.tare_reference_kg ?? '',
     isReefer: !!vehicle.is_reefer,
@@ -218,6 +219,7 @@ export function VehicleModal({ vehicle, onClose, onSaved }: {
         vehicleType: f.vehicleType,
         makeModel: f.makeModel || null,
         transporterName: f.transporterName || null,
+        defaultSealNo: f.defaultSealNo || null,
         capacityKg: f.capacityKg === '' ? null : Number(f.capacityKg),
         tareReferenceKg: f.tareReferenceKg === '' ? null : Number(f.tareReferenceKg),
         isReefer: f.isReefer,
@@ -258,6 +260,11 @@ export function VehicleModal({ vehicle, onClose, onSaved }: {
           </select>
         </Field>
       </div>
+
+      <Field label="Default seal number (optional)"
+        hint="Prefills the gate form for this registered vehicle; the gate can correct it if needed.">
+        <input value={f.defaultSealNo} onChange={(e) => set('defaultSealNo', e.target.value)} />
+      </Field>
 
       <div className="grid c2">
         <Field label="Make / model (optional)">
