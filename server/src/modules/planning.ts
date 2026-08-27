@@ -322,6 +322,9 @@ planningRouter.get('/requirements', h(async (req) =>
             r.remarks, r.reasoning, b.name AS branch_name,
             cw.name AS raised_for_centre,
             (SELECT count(*) FROM requirement_lines l WHERE l.requirement_id = r.id) AS line_count,
+            (SELECT string_agg(p.name, ', ' ORDER BY l.line_no)
+               FROM requirement_lines l JOIN products p ON p.id = l.product_id
+              WHERE l.requirement_id = r.id) AS product_names,
             (SELECT COALESCE(SUM(l.final_qty),0) FROM requirement_lines l WHERE l.requirement_id = r.id) AS total_qty,
             u.full_name AS created_by_name
        FROM requirements r

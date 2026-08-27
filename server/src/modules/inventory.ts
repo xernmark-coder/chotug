@@ -150,6 +150,15 @@ export async function postIssue(tx: Tx, actor: Actor, input: IssueInput) {
   const warehouse = wh[0];
   if (!warehouse) throw ApiError.notFound('Warehouse not found');
 
+  if (input.customerId) {
+    const { rows: customers } = await tx.query(
+      `SELECT id FROM customers
+        WHERE id = $1 AND company_id = $2
+          AND (warehouse_id = $3 OR warehouse_id IS NULL) AND is_active`,
+      [input.customerId, actor.companyId, warehouse.id]);
+    if (!customers[0]) throw ApiError.rule('That customer belongs to another centre or is inactive.');
+  }
+
   const issueNo = await nextDocNo(tx, actor, warehouse.branch_id, 'ISS');
   const { rows: hdr } = await tx.query(
     `INSERT INTO stock_issues (company_id, branch_id, warehouse_id, issue_no, issue_date,
@@ -181,11 +190,16 @@ export async function postIssue(tx: Tx, actor: Actor, input: IssueInput) {
       [l.batchId, warehouse.id, actor.companyId]);
     const sb = sbRows[0];
     if (!sb) throw ApiError.notFound(`That batch is not in ${warehouse.name}.`);
-    if (sb.batch_status !== 'ACTIVE') {
-      throw ApiError.rule(`Batch ${sb.batch_no} is ${sb.batch_status.toLowerCase()} and cannot be issued.`);
-    }
 
     const available = round(Number(sb.qty) - Number(sb.reserved_qty), 3);
+    /* Packs are still sellable stock even when an older movement left the
+     * batch header marked CONSUMED. The locked balance is the source of truth
+     * for what can physically leave; keep the stricter batch gate for write-
+     * offs, transfers, and other non-sale movements. */
+    if (sb.batch_status !== 'ACTIVE'
+        && !(input.reason === 'SALE' && available >= l.qty - 0.001)) {
+      throw ApiError.rule(`Batch ${sb.batch_no} is ${sb.batch_status.toLowerCase()} and cannot be issued.`);
+    }
     if (l.qty > available + 0.001) {
       throw ApiError.rule(
         `Only ${available} ${sb.base_uom} of batch ${sb.batch_no} is available, not ${l.qty}.`);
@@ -763,8 +777,9 @@ inventoryRouter.get('/pack-bench/:batchId', h(async (req) => {
               (SELECT count(*)::int FROM packs pk
                 WHERE pk.bin_id = bn.id AND pk.status='IN_STOCK') AS packs
          FROM bins bn JOIN racks r ON r.id = bn.rack_id
-        WHERE bn.company_id = $1 AND bn.is_active
-        ORDER BY r.code, bn.code`, [req.actor.companyId]),
+         JOIN zones z ON z.id = r.zone_id
+        WHERE bn.company_id = $1 AND bn.is_active AND z.warehouse_id = $2
+        ORDER BY r.code, bn.code`, [req.actor.companyId, b.warehouse_id]),
   ]);
 
   /* Packs can outlive the stock they were made from: issuing a batch to a
@@ -837,8 +852,11 @@ inventoryRouter.post('/pack-bench/:batchId/box',
       if (input.binCode) {
         const { rows: bin } = await tx.query(
           `SELECT bn.id FROM bins bn
-            WHERE bn.company_id = $1 AND lower(bn.code) = lower($2) AND bn.is_active`,
-          [req.actor.companyId, input.binCode]);
+            JOIN racks r ON r.id = bn.rack_id
+            JOIN zones z ON z.id = r.zone_id
+            WHERE bn.company_id = $1 AND lower(bn.code) = lower($2)
+              AND bn.is_active AND z.warehouse_id = $3`,
+          [req.actor.companyId, input.binCode, input.warehouseId]);
         if (!bin[0]) throw ApiError.rule(`No shelf with the code "${input.binCode}".`);
         binId = bin[0].id;
       }
@@ -979,7 +997,7 @@ inventoryRouter.post('/pack-bench/:batchId/run',
              g.label ?? `${g.count} × ${roundQty(g.qtyPerPack)} ${sb.base_uom}`,
              g.qtyPerPack, sb.base_uom, money(g.price), g.grade.toUpperCase(),
              g.weightKgPerPack ?? null, req.actor.userId, input.note ?? null, binId]);
-          made.push(rows[0]);
+          made.push({ ...rows[0], product_name: sb.product_name });
         }
       }
 
@@ -1167,7 +1185,7 @@ inventoryRouter.post('/packs/:id/sold', requires('inventory.stock.issue'), h(asy
   });
 }));
 
-inventoryRouter.post('/packs/:id/void', requires('inventory.stock.issue'), h(async (req) => {
+inventoryRouter.post('/packs/:id/void', requires('inventory.pack.grade'), h(async (req) => {
   const input = body(z.object({
     reason: z.string().trim().min(4, 'Say why this label is being voided'),
   }), req.body);
@@ -1198,6 +1216,7 @@ inventoryRouter.post('/packs/:id/void', requires('inventory.stock.issue'), h(asy
 inventoryRouter.post('/packs/sell', requires('inventory.stock.issue'), h(async (req) => {
   const input = body(z.object({
     packIds: z.array(z.string().uuid()).min(1, 'Choose at least one pack'),
+    customerId: z.string().uuid().nullable().optional(),
     partyName: z.string().trim().optional(),
     referenceNo: z.string().trim().optional(),
   }), req.body);
@@ -1242,6 +1261,7 @@ inventoryRouter.post('/packs/sell', requires('inventory.stock.issue'), h(async (
       warehouseId: packs[0].warehouse_id,
       reason: 'SALE',
       partyName: input.partyName || undefined,
+      customerId: input.customerId || undefined,
       referenceNo: input.referenceNo || undefined,
       lines: [...byBatch.entries()].map(([batchId, v]) => ({
         batchId,

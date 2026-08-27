@@ -27,8 +27,9 @@ import { FinanceDeskPage } from './pages/FinanceDesk';
 import { UnloadPage } from './pages/Unload';
 import { PackBenchPage } from './pages/PackBench';
 import { WarehouseMapPage } from './pages/WarehouseMap';
+import { MasterDataPage } from './pages/MasterData';
 import { AuditPage, AuditDetailPage } from './pages/Audit';
-import { CentresPage, CentreDayPage, CustomersPage } from './pages/Centres';
+import { CentresPage, CentreDayPage, CentreRequirementsPage, CustomersPage } from './pages/Centres';
 import { PerformancePage } from './pages/Performance';
 import { HrPage } from './pages/Hr';
 import {
@@ -76,6 +77,20 @@ export default function App() {
         <Route path="/p/:code" element={<ScanResultPage />} />
         <Route path="/profile" element={<ProfilePage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    );
+  }
+
+  if (me.roles.includes('CENTRE_EXEC')) {
+    return (
+      <Routes>
+        <Route path="/" element={<CentreHomeRoute />} />
+        <Route path="/dashboard" element={<CentreDayPage />} />
+        <Route path="/sell" element={<SalesPage />} />
+        <Route path="/requirements" element={<CentreRequirementsPage />} />
+        <Route path="/centres/:id" element={<CentreDayPage />} />
+        <Route path="/profile" element={<ProfilePage />} />
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
     );
   }
@@ -128,7 +143,7 @@ export default function App() {
           the packing bench. The old path is kept as a redirect so a bookmark
           or an old link lands somewhere sensible rather than on nothing. */}
       <Route path="/putaway" element={<Navigate to="/packing" replace />} />
-      <Route path="/stock" element={<StockPage />} />
+      <Route path="/stock" element={<Navigate to="/analytics?tab=Inventory" replace />} />
       <Route path="/packing" element={<PackingPage />} />
       <Route path="/sales" element={<SalesPage />} />
 
@@ -136,7 +151,7 @@ export default function App() {
       <Route path="/invoices/new" element={<InvoiceCreatePage />} />
       <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
       <Route path="/payments" element={<PaymentsPage />} />
-      <Route path="/suppliers" element={<SuppliersPage />} />
+      <Route path="/suppliers" element={<Navigate to="/analytics?tab=Suppliers" replace />} />
 
       {/* Farming. /farm is the field worker's whole application. */}
       <Route path="/farm" element={<FarmTodayPage />} />
@@ -153,8 +168,9 @@ export default function App() {
       <Route path="/farm/plot/:qr" element={<PlotScanPage />} />
 
       <Route path="/catalogue" element={<CataloguePage />} />
+      <Route path="/master-data" element={<MasterDataPage />} />
       <Route path="/finance" element={<FinanceDeskPage />} />
-      <Route path="/reports" element={<ReportsPage />} />
+      <Route path="/reports" element={<Navigate to="/analytics?tab=Purchases" replace />} />
       <Route path="/ai" element={<AiCentrePage />} />
       <Route path="/people" element={<PeoplePage />} />
       <Route path="/settings" element={<SettingsPage />} />
@@ -168,4 +184,11 @@ export default function App() {
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
+}
+
+function CentreHomeRoute() {
+  const { warehouseId } = useAuth();
+  return warehouseId
+    ? <Navigate to="/dashboard" replace />
+    : <Navigate to="/profile" replace />;
 }

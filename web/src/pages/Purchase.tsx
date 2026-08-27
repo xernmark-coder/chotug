@@ -16,8 +16,8 @@ export function PoListPage() {
 
   const f = useFilters<any>(data, {
     date: (o) => o.order_date,
-    search: (o) => [o.po_no, o.supplier_name, o.supplier_legal_name, o.branch_name,
-      o.supplier_response_note].filter(Boolean).join(' '),
+    search: (o) => [o.po_no, o.item_summary, o.supplier_name, o.supplier_legal_name,
+      o.branch_name, o.supplier_response_note].filter(Boolean).join(' '),
     facets: [
       { key: 'status', label: 'status', of: (o) => o.status },
       { key: 'supplier', label: 'supplier', of: (o) => o.supplier_name ?? o.supplier_legal_name },
@@ -49,10 +49,15 @@ export function PoListPage() {
           onRowClick={(o: any) => nav(`/purchase-orders/${o.id}`)}
           rowTone={(o: any) => (o.is_urgent ? 'warn' : Number(o.pending_approvals) > 0 ? 'warn' : undefined)}
           cols={[
-            { key: 'n', head: 'Number', render: (o: any) => (
+            { key: 'n', head: 'PO number / products', render: (o: any) => (
               <div>
                 <b className="mono">{o.po_no}</b>{o.revision_no > 0 ? <span className="small muted"> rev {o.revision_no}</span> : null}
-                {o.item_summary ? <div className="small muted" title={o.item_summary}>{o.item_summary}</div> : null}
+                {o.item_summary ? (
+                  <div className="small" title={o.item_summary}>
+                    <span className="muted">{o.item_count} product{o.item_count === 1 ? '' : 's'}: </span>
+                    {o.item_summary}
+                  </div>
+                ) : <div className="small muted">No products recorded</div>}
               </div>
             ) },
             { key: 'd', head: 'Ordered', render: (o: any) => date(o.order_date) },
@@ -712,7 +717,7 @@ export function PoDetailPage() {
       <div className="grid sidebar-right">
         <div className="stack">
           <div className="card">
-            <div className="card-head"><h2>Lines</h2></div>
+            <div className="card-head"><h2>Products in {data.po_no}</h2></div>
             <div className="card-body tight">
               <DataTable
                 rows={data.lines ?? []}

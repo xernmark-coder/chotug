@@ -537,12 +537,17 @@ function PayModal({ request, onClose, onDone }: {
 }) {
   const outstanding = Number(request.amount) - Number(request.paid_amount);
   const [amount, setAmount] = useState(String(outstanding));
+  const { can } = useAuth();
+  const { data: savedModes } = useApi<string[]>('/finance/payment-modes');
   const [mode, setMode] = useState<string>('UPI');
+  const [customMode, setCustomMode] = useState('');
+  const [saveMode, setSaveMode] = useState(false);
   const [ref, setRef] = useState('');
   const [from, setFrom] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
-  const needsRef = mode !== 'CASH';
+  const actualMode = mode === '__CUSTOM__' ? customMode.trim() : mode;
+  const needsRef = actualMode !== 'CASH';
   const part = Number(amount) > 0 && Number(amount) < outstanding - 0.01;
 
   return (
@@ -552,12 +557,15 @@ function PayModal({ request, onClose, onDone }: {
       footer={<>
         <button className="btn" onClick={onClose}>Cancel</button>
         <button className="btn primary"
-          disabled={busy || !Number(amount) || (needsRef && !ref.trim())}
+          disabled={busy || !Number(amount) || actualMode.length < 2 || (needsRef && !ref.trim())}
           onClick={async () => {
             setBusy(true); setError(null);
             try {
+              if (mode === '__CUSTOM__' && saveMode) {
+                await api.post('/finance/payment-modes', { name: actualMode });
+              }
               const r = await api.post<any>(`/finance/requests/${request.id}/pay`, {
-                amount: Number(amount), mode,
+                amount: Number(amount), mode: actualMode,
                 transactionRef: ref.trim() || undefined,
                 paidFrom: from.trim() || undefined,
               });
@@ -583,16 +591,32 @@ function PayModal({ request, onClose, onDone }: {
         </Field>
         <Field label="How">
           <select value={mode} onChange={(e) => setMode(e.target.value)}>
-            {MODES.map((m) => <option key={m} value={m}>{m.toLowerCase()}</option>)}
+            {[...new Set([...(savedModes ?? MODES), ...MODES])].map((m) =>
+              <option key={m} value={m}>{m.toLowerCase()}</option>)}
+            <option value="__CUSTOM__">Other payment method…</option>
           </select>
         </Field>
       </div>
+      {mode === '__CUSTOM__' ? (
+        <div className="grid c2">
+          <Field label="Payment method">
+            <input value={customMode} autoFocus onChange={(e) => setCustomMode(e.target.value)}
+              placeholder="Wallet, RTGS, demand draft" />
+          </Field>
+          {can('finance.payment.make') ? (
+            <label className="check" style={{ alignSelf: 'end' }}>
+              <input type="checkbox" checked={saveMode} onChange={(e) => setSaveMode(e.target.checked)} />
+              Add this method to the list
+            </label>
+          ) : null}
+        </div>
+      ) : null}
       <div className="grid c2">
         <Field
           label={needsRef ? 'Transaction reference (required)' : 'Reference (optional)'}
           hint={needsRef ? 'The UPI reference, UTR or cheque number — so it can be traced.' : undefined}>
           <input value={ref} onChange={(e) => setRef(e.target.value)}
-            placeholder={mode === 'UPI' ? '4172…' : mode === 'CHEQUE' ? 'Cheque no.' : 'UTR'} />
+            placeholder={actualMode === 'UPI' ? '4172…' : actualMode === 'CHEQUE' ? 'Cheque no.' : 'UTR'} />
         </Field>
         <Field label="Paid from" hint="Which account or till.">
           <input value={from} onChange={(e) => setFrom(e.target.value)} placeholder="HDFC current" />

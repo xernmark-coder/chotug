@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api, useAuth, inr, num, ago } from '../lib/api';
 import { Chip, Empty, ErrorBanner, Kpi, Layout, Loading, Modal, useApi, useToast } from '../components/ui';
 import { Icon } from '../components/icons';
-import { LabelSheet } from './Packing';
+import { LabelSheet, RemovePackModal } from './Packing';
 
 /* ===========================================================================
  * THE PACKING BENCH — QUALITY AND PACKING ARE ONE JOB
@@ -40,6 +40,7 @@ export function PackBenchPage() {
   const [grade, setGrade] = useState('A');
   const [making, setMaking] = useState(false);
   const [printing, setPrinting] = useState<any[] | null>(null);
+  const [removing, setRemoving] = useState<any>(null);
   const [qty, setQty] = useState('');
   const [price, setPrice] = useState('');
   const [binCode, setBinCode] = useState('');
@@ -70,6 +71,7 @@ export function PackBenchPage() {
       setPriceByGrade((s) => ({ ...s, [grade]: price }));
       setNote('');
       reload();
+      setPrinting([r]);
     } catch (e: any) { setPostError(e); } finally { setBusy(false); }
   };
 
@@ -226,7 +228,13 @@ export function PackBenchPage() {
                           {p.qc_note ? ` · ${p.qc_note}` : ''}
                         </div>
                       </td>
-                      <td className="num">{inr(p.price, 0)}</td>
+                      <td className="num">
+                        <div>{inr(p.price, 0)}</div>
+                        <button className="btn sm ghost" onClick={() => setPrinting([p])}>Label</button>
+                        {canGrade ? (
+                          <button className="btn sm danger" onClick={() => setRemoving(p)}>Remove</button>
+                        ) : null}
+                      </td>
                     </tr>
                   ))}
                   {!onBench.length ? (
@@ -248,7 +256,13 @@ export function PackBenchPage() {
                         <b className="mono">{p.code}</b> <Chip tone={toneFor(p.grade)}>{p.grade}</Chip>
                         <div className="small muted">{num(p.qty, 1)} {p.uom}</div>
                       </td>
-                      <td className="num"><Chip tone="primary">{p.bin_code}</Chip></td>
+                      <td className="num">
+                        <Chip tone="primary">{p.bin_code}</Chip>
+                        <button className="btn sm ghost" onClick={() => setPrinting([p])}>Label</button>
+                        {canGrade ? (
+                          <button className="btn sm danger" onClick={() => setRemoving(p)}>Remove</button>
+                        ) : null}
+                      </td>
                     </tr>
                   ))}
                   {!(data.recent ?? []).some((p: any) => p.bin_id) ? (
@@ -263,6 +277,11 @@ export function PackBenchPage() {
 
       {printing ? (
         <LabelSheet packs={printing} onClose={() => { setPrinting(null); reload(); }} />
+      ) : null}
+
+      {removing ? (
+        <RemovePackModal pack={removing} onClose={() => setRemoving(null)}
+          onDone={() => { setRemoving(null); reload(); }} />
       ) : null}
 
       {making ? (

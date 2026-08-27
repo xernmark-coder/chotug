@@ -96,8 +96,8 @@ Pick **one** of A, B or C. A is the normal path; C is only for carrying real dat
 
 ### 6A — Automatic, on deploy (recommended)
 
-`node dist/scripts/migrate.js` runs as the API's pre-deploy command and applies all eight
-files in `db/` in order. It is idempotent: `01_schema.sql` is skipped once
+`node dist/scripts/migrate.js` runs as the API's pre-deploy command and applies every
+ordered migration file in `db/` in order. It is idempotent: `01_schema.sql` is skipped once
 `public.companies` exists, and the rest re-apply safely on every deploy. That gives you
 the schema **and** the master data (branches, products, roles, permissions).
 

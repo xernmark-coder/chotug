@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { api, useAuth, inr, num } from '../lib/api';
 import { Icon } from './icons';
@@ -7,6 +8,10 @@ import { Icon } from './icons';
 type Toast = { id: number; text: string; kind: 'ok' | 'err' | 'info' };
 const ToastCtx = createContext<(text: string, kind?: Toast['kind']) => void>(() => {});
 export const useToast = () => useContext(ToastCtx);
+const EmbeddedCtx = createContext(false);
+export const EmbeddedPage = ({ children }: { children: React.ReactNode }) => (
+  <EmbeddedCtx.Provider value>{children}</EmbeddedCtx.Provider>
+);
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [items, setItems] = useState<Toast[]>([]);
@@ -186,17 +191,17 @@ export function ReasonPicker({ bank, value, onChange, placeholder = 'Choose a re
 }
 
 /* --------------------------------------------------------------- modal --- */
-export function Modal({ title, onClose, children, footer, wide }: {
+export function Modal({ title, onClose, children, footer, wide, className }: {
   title: string; onClose: () => void; children: React.ReactNode;
-  footer?: React.ReactNode; wide?: boolean;
+  footer?: React.ReactNode; wide?: boolean; className?: string;
 }) {
   useEffect(() => {
     const h = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
   }, [onClose]);
-  return (
-    <div className="modal-back" onClick={(e) => e.target === e.currentTarget && onClose()}>
+  return createPortal((
+    <div className={`modal-back ${className ?? ''}`} onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className={`modal ${wide ? 'wide' : ''}`}>
         <div className="modal-head">
           <h2 style={{ flex: 1 }}>{title}</h2>
@@ -206,7 +211,7 @@ export function Modal({ title, onClose, children, footer, wide }: {
         {footer ? <div className="modal-foot">{footer}</div> : null}
       </div>
     </div>
-  );
+  ), document.body);
 }
 
 /* ------------------------------------------------------------- states ---- */
@@ -384,6 +389,7 @@ export function Layout({ children, title, subtitle, actions, touch }: {
   // does nothing and the aside is a plain column.
   const [navOpen, setNavOpen] = useState(false);
   const [openGroup, setOpenGroup] = useState<string | null>(null);
+  const embedded = useContext(EmbeddedCtx);
 
   // Tapping a link must dismiss the drawer, or the new page opens behind it.
   useEffect(() => { setNavOpen(false); }, [pathname]);
@@ -425,6 +431,8 @@ export function Layout({ children, title, subtitle, actions, touch }: {
 
   /* An outside supplier has one screen. Rendering the staff sidebar with 30
    * hidden items would leak the shape of our operation for no benefit. */
+  const centreUser = !!me?.roles.includes('CENTRE_EXEC');
+  const auditor = !!me?.roles.includes('AUDITOR');
   const groups: { label: string; items: NavDef[] }[] = outside ? [
     {
       label: me?.roles.includes('DRIVER') ? 'Driver' : 'Supplier',
@@ -434,12 +442,26 @@ export function Layout({ children, title, subtitle, actions, touch }: {
           : { to: '/', label: 'My orders & invoices', icon: 'doc' },
       ],
     },
+  ] : centreUser ? [
+    {
+      label: 'Centre',
+      items: [
+        { to: '/dashboard', label: 'Dashboard', icon: 'dashboard' },
+        { to: '/sell', label: 'Sell', icon: 'coins', perms: ['inventory.stock.issue'] },
+        { to: '/requirements', label: 'Raise requirement', icon: 'clipboard',
+          perms: ['purchase.requirement.create'] },
+        { to: me?.warehouses[0] ? `/centres/${me.warehouses[0].id}` : '/',
+          label: 'Receive & close day', icon: 'truckIn', perms: ['centre.stock.receive', 'centre.day.close'] },
+      ],
+    },
   ] : [
     {
       label: 'Work',
       items: [
         { to: '/', label: 'Home', icon: 'dashboard' },
         { to: '/my-work', label: 'My Work', icon: 'target', badge: queueCount },
+        { to: '/audit', label: 'Audit', icon: 'clipboard',
+          perms: ['audit.count.record', 'audit.report.view', 'audit.task.raise'] },
       ],
     },
     {
@@ -499,8 +521,6 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     {
       label: 'Inventory',
       items: [
-        { to: '/stock', label: 'Stock & Batches', icon: 'crates',
-          perms: ['receiving.grn.create', 'inventory.pack.grade', 'inventory.stock.issue', 'reports.purchase.view'] },
         { to: '/warehouse-map', label: 'Warehouse', icon: 'shelf',
           perms: ['master.location.manage', 'inventory.pack.store'] },
       ],
@@ -508,8 +528,7 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     {
       label: 'Sell',
       items: [
-        { to: '/sales', label: 'Sales & Profitability', icon: 'coins',
-          perms: ['inventory.stock.issue', 'data.margin.view'] },
+        { to: '/sales', label: 'Sell to customer', icon: 'coins', perms: ['inventory.stock.issue'] },
         { to: '/centres', label: 'Centres', icon: 'home',
           perms: ['centre.performance.view', 'centre.day.close', 'centre.stock.receive'] },
       ],
@@ -517,9 +536,6 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     {
       label: 'Finance',
       items: [
-        /* The desk comes first: it is the one screen where money actually
-         * moves, and the client asked for Finance to be the centre of the
-         * business rather than a report at the end of it. */
         { to: '/finance', label: can('finance.expense.view') ? 'Finance Desk' : 'Money Requests',
           icon: 'coins',
           perms: ['finance.request.create', 'finance.request.verify', 'finance.payment.make', 'finance.receipt.record'] },
@@ -530,8 +546,6 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     {
       label: 'People',
       items: [
-        { to: '/suppliers', label: 'Suppliers', icon: 'handshake',
-          perms: ['reports.supplier.view', 'master.supplier.manage'] },
         { to: '/customers', label: 'Customers', icon: 'people',
           perms: ['master.customer.manage'] },
         { to: '/hr', label: 'Workers & Wages', icon: 'user',
@@ -542,10 +556,12 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     {
       label: 'Insights',
       items: [
-        { to: '/analytics', label: 'Analytics', icon: 'chart', perms: ['reports.purchase.view'] },
+        { to: '/analytics', label: 'Analytics', icon: 'chart',
+          perms: ['reports.purchase.view', 'inventory.stock.issue', 'data.margin.view',
+            'reports.supplier.view', 'master.supplier.manage', 'finance.expense.view',
+            'finance.request.verify', 'finance.payment.make', 'finance.request.create'] },
         { to: '/performance', label: 'Product Performance', icon: 'chart',
           perms: ['reports.purchase.view'] },
-        { to: '/reports', label: 'Reports', icon: 'doc', perms: ['reports.purchase.view'] },
         { to: '/ai', label: 'AI Centre', icon: 'sparkle',
           perms: ['ai.feature.manage', 'ai.suggestion.accept'] },
         { to: '/alerts', label: 'Alerts', icon: 'bell', badge: alertCount,
@@ -555,10 +571,12 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     {
       label: 'Admin',
       items: [
+        { to: '/master-data', label: 'Master Data', icon: 'box',
+          perms: ['master.product.manage', 'master.category.manage', 'master.supplier.manage',
+            'master.vehicle.manage', 'master.customer.manage', 'master.location.manage',
+            'admin.settings.manage'] },
         { to: '/catalogue', label: 'Catalogue', icon: 'basket',
           perms: ['master.product.manage', 'master.category.manage', 'reports.purchase.view'] },
-        { to: '/audit', label: 'Audit', icon: 'clipboard',
-          perms: ['audit.count.record', 'audit.report.view', 'audit.task.raise'] },
         { to: '/settings', label: 'Settings', icon: 'gear', perms: ['admin.settings.manage'] },
       ],
     },
@@ -575,6 +593,18 @@ export function Layout({ children, title, subtitle, actions, touch }: {
     Finance: 'coins', People: 'people', Insights: 'chart', Admin: 'gear',
   };
 
+  if (embedded) {
+    return (
+      <div className="embedded-page">
+        <div className="embedded-head">
+          <div><h2>{title}</h2>{subtitle ? <div className="sub">{subtitle}</div> : null}</div>
+          {actions ? <div className="btn-row">{actions}</div> : null}
+        </div>
+        {children}
+      </div>
+    );
+  }
+
   return (
     <div className={`app ${touch ? 'touch' : ''}`}>
       {navOpen ? <div className="nav-backdrop" onClick={() => setNavOpen(false)} /> : null}
@@ -588,11 +618,12 @@ export function Layout({ children, title, subtitle, actions, touch }: {
           <button className="nav-close" onClick={() => setNavOpen(false)} aria-label="Close menu"><Icon name="alert" size={15} /></button>
         </div>
         {groups.map((g) => {
-          const items = g.items.filter((i) => !i.perms || can(...i.perms));
+          const items = g.items.filter((i) => !i.perms || can(...i.perms))
+            .filter((i) => !(auditor && i.to === '/alerts'));
           if (!items.length) return null;
           const active = items.some((i) => i.to !== '/' &&
             (pathname === i.to || pathname.startsWith(`${i.to}/`)));
-          const expandable = g.label !== 'Work' && !outside;
+          const expandable = g.label !== 'Work' && !outside && !centreUser;
           const expanded = openGroup === g.label;
           return (
             <div className={`sidebar-group ${active ? 'has-active' : ''}`} key={g.label}>

@@ -917,10 +917,18 @@ function BlockSupplierModal({ supplier, onClose, onDone }: {
 /* ======================================================== ALERTS ======== */
 export function AlertsPage() {
   const toast = useToast();
+  const { me } = useAuth();
   const [status, setStatus] = useState('OPEN');
   const { data, loading, error, reload } = useApi<any[]>(`/insights/alerts?status=${status}`, [status]);
+  const auditor = !!me?.roles.includes('AUDITOR');
+  const visibleAlerts = auditor
+    ? (data ?? []).filter((a: any) => {
+      const type = String(a.alert_type);
+      return !type.startsWith('CROP_') && !type.startsWith('FARM_');
+    })
+    : data;
 
-  const f = useFilters<any>(data, {
+  const f = useFilters<any>(visibleAlerts, {
     date: (a: any) => a.created_at,
     search: (a: any) => [a.title, a.message, a.alert_type].filter(Boolean).join(' '),
     facets: [

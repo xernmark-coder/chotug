@@ -1091,7 +1091,7 @@ mastersRouter.get('/users', requires('admin.rbac.manage'), h(async (req) =>
  * Every override carries a reason, because "why can Sunil approve and Ganesh
  * cannot" is asked six months later, usually by an auditor.
  * ------------------------------------------------------------------------ */
-mastersRouter.get('/users/:id/permissions', requires('admin.rbac.manage'), h(async (req) => {
+mastersRouter.get('/users/:id/permissions', requires('admin.permission.override'), h(async (req) => {
   const [u] = await query(req.actor,
     `SELECT u.id, u.full_name, u.email,
             COALESCE(array_agg(r.name ORDER BY r.name)

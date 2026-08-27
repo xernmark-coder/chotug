@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, useAuth, inr, num, date, idempotencyKey } from '../lib/api';
 import {
   Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
@@ -29,7 +30,9 @@ const URGENCY_TONE: Record<string, 'danger' | 'warn' | 'primary' | 'neutral'> = 
 
 export function SalesPage() {
   const toast = useToast();
-  const { warehouseId, can } = useAuth();
+  const { warehouseId, can, me } = useAuth();
+  const [searchParams] = useSearchParams();
+  const centreUser = !!me?.roles.includes('CENTRE_EXEC');
   const [days, setDays] = useState(30);
   const [selling, setSelling] = useState<any>(null);
   // Selling a ready-made pack is the common case: somebody already decided the
@@ -38,7 +41,7 @@ export function SalesPage() {
   const [pickedPacks, setPickedPacks] = useState<Record<string, boolean>>({});
   const [sellingPacks, setSellingPacks] = useState<any[] | null>(null);
 
-  const wh = warehouseId ?? '';
+  const wh = searchParams.get('warehouseId') || warehouseId || '';
   const summary = useApi<any>(`/inventory/sales-summary?days=${days}&warehouseId=${wh}`, [days, wh]);
   const sugg = useApi<any>(`/inventory/sell-suggestions?warehouseId=${wh}`, [wh]);
   const recent = useApi<any[]>(`/inventory/issues?warehouseId=${wh}&reason=SALE`, [wh]);
@@ -193,6 +196,7 @@ export function SalesPage() {
         </>
       ) : null}
 
+      {!centreUser ? <>
       {/* ------------------------------------------------ what to sell --- */}
       <div className="section-head"><h2>Sell these first</h2><span className="rule" /></div>
 
@@ -275,6 +279,7 @@ export function SalesPage() {
           />
         </div>
       </div>
+      </> : null}
 
       {/* --------------------------------------------- sold vs on hand --- */}
       <div className="grid sidebar-right">
@@ -409,6 +414,8 @@ export function SalesPage() {
 
 function SellModal({ row, onClose, onDone }: { row: any; onClose: () => void; onDone: () => void }) {
   const toast = useToast();
+  const { me } = useAuth();
+  const centreUser = !!me?.roles.includes('CENTRE_EXEC');
   const [qty, setQty] = useState(String(row.available_qty ?? ''));
   const [rate, setRate] = useState(row.suggestedRate != null ? String(row.suggestedRate) : '');
   const [party, setParty] = useState('');
@@ -466,6 +473,7 @@ function SellModal({ row, onClose, onDone }: { row: any; onClose: () => void; on
     <AddCustomerModal
       centres={centres.data ?? []}
       defaultCentre={row.warehouse_id}
+      lockCentre={centreUser}
       onClose={() => setAddingCustomer(false)}
       onDone={(m, c) => {
         setAddingCustomer(false);

@@ -396,7 +396,7 @@ export function RequirementListPage() {
   const f = useFilters<any>(data, {
     date: (r) => r.req_date,
     search: (r) => [r.req_no, r.branch_name, r.created_by_name, r.remarks,
-      r.reasoning, r.raised_for_centre].filter(Boolean).join(' '),
+      r.reasoning, r.raised_for_centre, r.product_names].filter(Boolean).join(' '),
     facets: [
       { key: 'status', label: 'status', of: (r) => r.status },
       { key: 'priority', label: 'priority', of: (r) => r.priority },
@@ -426,7 +426,10 @@ export function RequirementListPage() {
             { key: 'b', head: 'Branch', render: (r: any) => r.branch_name },
             { key: 'p', head: 'Priority', render: (r: any) => <Chip value={r.priority} /> },
             { key: 'src', head: 'Source', render: (r: any) => <span className="small muted">{r.source.replace(/_/g, ' ')}</span> },
-            { key: 'l', head: 'Products', num: true, render: (r: any) => r.line_count },
+            { key: 'l', head: 'Products', render: (r: any) => (
+              <div><b>{r.product_names ?? '—'}</b>
+                <div className="small muted">{r.line_count} product{Number(r.line_count) === 1 ? '' : 's'}</div>
+              </div>) },
             { key: 'q', head: 'Total qty', num: true, render: (r: any) => num(r.total_qty, 0) },
             { key: 's', head: 'Status', render: (r: any) => <Chip value={r.status} /> },
             { key: 'u', head: 'Raised by', render: (r: any) => (

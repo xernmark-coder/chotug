@@ -6,6 +6,7 @@ import {
   FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
+import { AddCustomerModal } from './Centres';
 import { Barcode } from '../components/barcode';
 
 /* ===========================================================================
@@ -35,6 +36,7 @@ export function PackingPage() {
   const packs = useApi<any[]>(`/inventory/packs?status=IN_STOCK&warehouseId=${wh}`, [wh]);
 
   const [printing, setPrinting] = useState<any[] | null>(null);
+  const [removing, setRemoving] = useState<any>(null);
   const [picked, setPicked] = useState<Record<string, boolean>>({});
 
   const chosen = inStockChosen();
@@ -227,7 +229,12 @@ export function PackingPage() {
                     <span>{num(p.qty, 2)} <span className="small muted">{p.uom}</span></span> },
                   { key: 'r', head: 'Price', num: true, render: (p: any) => <b>{inr(p.price)}</b> },
                   { key: 'x', head: '', width: 74, render: (p: any) => (
-                    <button className="btn sm ghost" onClick={() => setPrinting([p])}>Label</button>
+                    <div className="btn-row">
+                      <button className="btn sm ghost" onClick={() => setPrinting([p])}>Label</button>
+                      {can('inventory.pack.grade') ? (
+                        <button className="btn sm danger" onClick={() => setRemoving(p)}>Remove</button>
+                      ) : null}
+                    </div>
                   ) },
                 ]}
                 empty={<Empty icon="🏷️"
@@ -270,6 +277,10 @@ export function PackingPage() {
 
       {printing ? (
         <LabelSheet packs={printing} onClose={() => { setPrinting(null); packs.reload(); }} />
+      ) : null}
+      {removing ? (
+        <RemovePackModal pack={removing} onClose={() => setRemoving(null)}
+          onDone={() => { setRemoving(null); reloadAll(); }} />
       ) : null}
     </Layout>
   );
@@ -316,6 +327,7 @@ export function LabelSheet({ packs, onClose }: { packs: any[]; onClose: () => vo
       title={`${packs.length} label(s)`}
       onClose={onClose}
       wide
+      className="print-label-modal"
       footer={
         <>
           <button className="btn" onClick={onClose}>Close</button>
@@ -331,9 +343,10 @@ export function LabelSheet({ packs, onClose }: { packs: any[]; onClose: () => vo
         {packs.map((p) => (
           <div className="pack-label" key={p.id ?? p.code}>
             <div className="pl-head">
-              <b>{p.product_name}</b>
+              <b>{p.product_name ?? p.productName ?? 'Product'}</b>
               <span>{p.group_label ?? ''}</span>
             </div>
+            <div className="pl-product">Product: {p.product_name ?? p.productName ?? '—'}</div>
             <div className="pl-meta">
               <span>{num(p.qty, 2)} {p.uom}</span>
               <b>{inr(p.price)}</b>
@@ -351,6 +364,47 @@ export function LabelSheet({ packs, onClose }: { packs: any[]; onClose: () => vo
   );
 }
 
+export function RemovePackModal({ pack, onClose, onDone }: {
+  pack: any; onClose: () => void; onDone: () => void;
+}) {
+  const toast = useToast();
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  return (
+    <Modal title={`Remove pack ${pack.code}`} onClose={onClose} footer={<>
+      <button className="btn" onClick={onClose}>Cancel</button>
+      <button className="btn danger" disabled={busy || reason.trim().length < 4}
+        onClick={async () => {
+          setBusy(true); setError(null);
+          try {
+            const r = await api.post<any>(`/inventory/packs/${pack.id}/void`, { reason: reason.trim() });
+            toast(r.message ?? 'Pack removed', 'ok');
+            onDone();
+          } catch (e: any) { setError(e); } finally { setBusy(false); }
+        }}>
+        {busy ? 'Removing…' : 'Remove pack'}
+      </button>
+    </>}>
+      <ErrorBanner error={error} />
+      <p className="small muted mb">
+        This removes the label from available stock and records the reason. The quantity becomes
+        available to pack again; sold packs cannot be removed.
+      </p>
+      <dl className="kv mb">
+        <dt>Product</dt><dd>{pack.product_name ?? pack.productName}</dd>
+        <dt>Pack</dt><dd className="mono">{pack.code}</dd>
+        <dt>Size</dt><dd>{num(pack.qty, 2)} {pack.uom}</dd>
+      </dl>
+      <Field label="Why is this pack being removed?">
+        <input value={reason} autoFocus onChange={(e) => setReason(e.target.value)}
+          placeholder="Wrong size / damaged box / repacking" />
+      </Field>
+    </Modal>
+  );
+}
+
 /* ---------------------------------------------------------------- sell --- */
 
 /**
@@ -363,12 +417,17 @@ export function SellPacksModal({ packs, onClose, onDone }: {
 }) {
   const toast = useToast();
   const [party, setParty] = useState('');
+  const [customerId, setCustomerId] = useState('');
+  const [addingCustomer, setAddingCustomer] = useState(false);
   const [ref, setRef] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
 
   const revenue = packs.reduce((a, p) => a + Number(p.price), 0);
   const qty = packs.reduce((a, p) => a + Number(p.qty), 0);
+  const warehouseId = packs[0]?.warehouse_id ?? '';
+  const customers = useApi<any[]>(
+    `/centres/customers/list?warehouseId=${warehouseId}`, [warehouseId]);
 
   const submit = async () => {
     setBusy(true); setError(null);
@@ -376,6 +435,7 @@ export function SellPacksModal({ packs, onClose, onDone }: {
       const r = await api.post<any>('/inventory/packs/sell', {
         packIds: packs.map((p) => p.id),
         partyName: party || undefined,
+        customerId: customerId || undefined,
         referenceNo: ref || undefined,
       });
       toast(`${r.issue_no} — ${r.packsSold} pack(s) sold for ${inr(r.totalValue, 0)}`, 'ok');
@@ -384,6 +444,18 @@ export function SellPacksModal({ packs, onClose, onDone }: {
   };
 
   return (
+    <>
+    {addingCustomer ? <AddCustomerModal
+      centres={[]}
+      defaultCentre={warehouseId}
+      lockCentre
+      onClose={() => setAddingCustomer(false)}
+      onDone={(m, customer) => {
+        setAddingCustomer(false);
+        customers.reload();
+        if (customer?.id) { setCustomerId(customer.id); setParty(customer.name); }
+        toast(m, 'ok');
+      }} /> : null}
     <Modal
       title={`Sell ${packs.length} pack(s)`}
       onClose={onClose}
@@ -420,7 +492,22 @@ export function SellPacksModal({ packs, onClose, onDone }: {
 
       <div className="grid c2">
         <Field label="Sold to" hint="A name makes the sale traceable later.">
-          <input value={party} onChange={(e) => setParty(e.target.value)} placeholder="Buyer name" />
+          <div className="row" style={{ gap: 6 }}>
+            <select style={{ flex: 1 }} value={customerId}
+              onChange={(e) => {
+                setCustomerId(e.target.value);
+                const customer = (customers.data ?? []).find((x: any) => x.id === e.target.value);
+                setParty(customer?.name ?? '');
+              }}>
+              <option value="">Walk-in — no name</option>
+              {(customers.data ?? []).map((customer: any) => (
+                <option key={customer.id} value={customer.id}>
+                  {customer.name}{customer.phone ? ` · ${customer.phone}` : ''}
+                </option>
+              ))}
+            </select>
+            <button className="btn sm" onClick={() => setAddingCustomer(true)}>+ New</button>
+          </div>
         </Field>
         <Field label="Their reference" hint="Challan or order number, if any.">
           <input value={ref} onChange={(e) => setRef(e.target.value)} />
@@ -435,5 +522,6 @@ export function SellPacksModal({ packs, onClose, onDone }: {
         </div>
       </div>
     </Modal>
+    </>
   );
 }

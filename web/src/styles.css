@@ -353,6 +353,12 @@ body.nav-lock { overflow: hidden; }
   display: flex; align-items: baseline; gap: 10px;
   margin: 26px 0 12px;
 }
+
+.embedded-page { min-width: 0; }
+.embedded-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+.embedded-head h2 { margin: 0; font-size: 18px; }
+.embedded-head .sub { margin-top: 3px; color: var(--muted); font-size: 13px; }
+.embedded-head .btn-row { margin-left: auto; }
 .section-head:first-child { margin-top: 0; }
 .section-head h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
 /* A smaller rule for grouping fields inside a dialog, where an h2-sized
@@ -650,6 +656,7 @@ label.check input { width: auto; }
 }
 .pack-label .pl-head { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
 .pack-label .pl-head span { color: #555; font-size: 11px; }
+.pack-label .pl-product { color: #555; font-size: 10px; margin-top: 2px; }
 .pack-label .pl-meta {
   display: flex; justify-content: space-between; align-items: baseline;
   font-size: 12.5px; margin: 3px 0 6px; color: #333;
@@ -670,6 +677,18 @@ label.check input { width: auto; }
   .modal-body { overflow: visible; padding: 0; }
   .label-sheet { grid-template-columns: repeat(3, 1fr); gap: 6px; }
   .pack-label { border: 1px solid #000; }
+
+  /* The label modal lives inside the app, so hiding only the sidebar still
+     leaves the current page behind it in the browser's print tree. */
+  body:has(.print-label-modal) .app > * { visibility: hidden !important; }
+  body:has(.print-label-modal) .print-label-modal {
+    visibility: visible !important;
+    position: fixed; inset: 0; padding: 0; background: #fff; display: block;
+  }
+  body:has(.print-label-modal) .print-label-modal .modal {
+    visibility: visible; position: static; width: 100%; max-width: none;
+  }
+  body:has(.print-label-modal) .print-label-modal .modal-body { visibility: visible; }
 }
 
 /* --- public scan page --------------------------------------------------- */

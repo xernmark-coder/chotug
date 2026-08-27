@@ -1,38 +1,67 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Legend, Line, LineChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { inr, num, date, useAuth } from '../lib/api';
-import { Chip, Empty, ErrorBanner, Kpi, Layout, Loading, useApi } from '../components/ui';
+import { Chip, Empty, ErrorBanner, Kpi, Layout, Loading, EmbeddedPage, useApi } from '../components/ui';
+import { SalesPage } from './Sales';
+import { StockPage } from './Grn';
+import { SuppliersPage, ReportsPage } from './Finance';
+import { FinanceDeskPage } from './FinanceDesk';
 
 const TABS = ['Overview', 'Sales', 'Purchases', 'Inventory', 'Suppliers', 'Finance'] as const;
 type Tab = typeof TABS[number];
+const TAB_PERMISSIONS: Record<Tab, string[]> = {
+  Overview: ['reports.purchase.view', 'inventory.stock.issue', 'finance.expense.view', 'finance.receipt.record'],
+  Sales: ['inventory.stock.issue', 'data.margin.view', 'reports.purchase.view'],
+  Purchases: ['reports.purchase.view'],
+  Inventory: ['receiving.grn.create', 'inventory.pack.grade', 'inventory.stock.issue', 'reports.purchase.view'],
+  Suppliers: ['reports.supplier.view', 'master.supplier.manage'],
+  Finance: ['finance.expense.view', 'finance.request.verify', 'finance.payment.make', 'finance.request.create', 'finance.receipt.record'],
+};
 
 export function AnalyticsPage() {
-  const [tab, setTab] = useState<Tab>('Overview');
-  const { branchId, warehouseId } = useAuth();
+  const [params] = useSearchParams();
+  const requested = params.get('tab') as Tab | null;
+  const [tab, setTab] = useState<Tab>(requested && TABS.includes(requested) ? requested : 'Overview');
+  const { branchId, warehouseId, can } = useAuth();
   const nav = useNavigate();
-
-  const destinations: Record<Exclude<Tab, 'Overview'>, string> = {
-    Sales: '/sales', Purchases: '/reports', Inventory: '/stock',
-    Suppliers: '/suppliers', Finance: '/finance',
+  const visibleTabs = TABS.filter((item) => can(...TAB_PERMISSIONS[item]));
+  const activeTab = visibleTabs.includes(tab) ? tab : visibleTabs[0] ?? 'Overview';
+  useEffect(() => {
+    if (requested && TABS.includes(requested) && requested !== tab) setTab(requested);
+  }, [requested, tab]);
+  const selectTab = (item: Tab) => {
+    setTab(item);
+    nav(`/analytics?tab=${item}`);
   };
-  const selectTab = (item: Tab) => item === 'Overview' ? setTab(item) : nav(destinations[item]);
-  return <AnalyticsOverview branchId={branchId} warehouseId={warehouseId}
-    tabs={TABS} tab={tab} selectTab={selectTab} nav={nav} />;
+  return (
+    <Layout title="Analytics" subtitle="Trends, causes, comparisons, and performance"
+      actions={<button className="btn" onClick={() => nav('/')}>Back to dashboard</button>}>
+      <div className="tabs">
+        {visibleTabs.map((item) => <button key={item} className={`tab ${activeTab === item ? 'active' : ''}`} onClick={() => selectTab(item)}>{item}</button>)}
+      </div>
+      {activeTab === 'Overview' ? <AnalyticsOverview branchId={branchId} warehouseId={warehouseId} selectTab={selectTab} nav={nav} /> : null}
+      {activeTab === 'Sales' ? <EmbeddedPage><SalesPage /></EmbeddedPage> : null}
+      {activeTab === 'Purchases' ? <EmbeddedPage><ReportsPage /></EmbeddedPage> : null}
+      {activeTab === 'Inventory' ? <EmbeddedPage><StockPage /></EmbeddedPage> : null}
+      {activeTab === 'Suppliers' ? <EmbeddedPage><SuppliersPage /></EmbeddedPage> : null}
+      {activeTab === 'Finance' ? <EmbeddedPage><FinanceDeskPage /></EmbeddedPage> : null}
+    </Layout>
+  );
 }
 
-function AnalyticsOverview({ branchId, warehouseId, tabs, tab, selectTab, nav }: {
-  branchId: string | null; warehouseId: string | null; tabs: readonly Tab[]; tab: Tab;
+function AnalyticsOverview({ branchId, warehouseId, selectTab, nav }: {
+  branchId: string | null; warehouseId: string | null;
   selectTab: (tab: Tab) => void; nav: (to: string) => void;
 }) {
   const dashboard = useApi<any>(`/insights/dashboard?branchId=${branchId ?? ''}`, [branchId]);
   const sales = useApi<any>('/inventory/sales-summary?days=30');
   const stock = useApi<any[]>(`/insights/stock?warehouseId=${warehouseId ?? ''}`, [warehouseId]);
 
-  if (dashboard.loading || sales.loading || stock.loading) return <Layout title="Analytics"><Loading /></Layout>;
+  if (dashboard.loading || sales.loading || stock.loading) return <Loading />;
 
   const k = dashboard.data?.kpis ?? {};
   const totals = sales.data?.totals ?? {};
@@ -42,12 +71,8 @@ function AnalyticsOverview({ branchId, warehouseId, tabs, tab, selectTab, nav }:
   const inventoryValue = (stock.data ?? []).reduce((sum, item) => sum + Number(item.qty ?? 0) * Number(item.landed_rate ?? 0), 0);
 
   return (
-    <Layout title="Analytics" subtitle="Trends, causes, comparisons, and performance"
-      actions={<button className="btn" onClick={() => nav('/')}>Back to dashboard</button>}>
+    <>
       <ErrorBanner error={dashboard.error ?? sales.error} />
-      <div className="tabs">
-        {tabs.map((item) => <button key={item} className={`tab ${tab === item ? 'active' : ''}`} onClick={() => selectTab(item)}>{item}</button>)}
-      </div>
 
       <div className="grid c4 mb">
         <Kpi label="Revenue" value={inr(totals.revenue, 0)} foot="last 30 days" />
@@ -76,6 +101,6 @@ function AnalyticsOverview({ branchId, warehouseId, tabs, tab, selectTab, nav }:
           <div className="card"><div className="card-head"><h2>Explore detail</h2></div><div className="card-body"><p className="small muted">Use the tabs above to inspect sales, purchases, stock, suppliers, and finance without crowding the operational dashboard.</p></div></div>
         </div>
       </div>
-    </Layout>
+    </>
   );
 }

@@ -34,7 +34,7 @@ centreRouter.get('/', h(async (req) =>
   query(req.actor,
     `SELECT w.id, w.code, w.name, w.city, w.address, w.is_centre, w.opened_on,
             w.monthly_rent, w.upi_id, w.upi_payee_name,
-            u.full_name AS manager_name,
+            w.manager_user_id, u.full_name AS manager_name,
             COALESCE(s.qty, 0)        AS stock_qty,
             COALESCE(s.value, 0)      AS stock_value,
             COALESCE(t.in_transit, 0) AS in_transit_loads,
@@ -111,7 +111,7 @@ centreRouter.get('/:id/today', h(async (req) => {
       WHERE w.id = $1 AND w.company_id = $2`, [req.params.id, req.actor.companyId]);
   if (!w) throw ApiError.notFound('No such centre.');
 
-  const [stock, incoming, salesToday, closes, customers] = await Promise.all([
+  const [stock, incoming, salesToday, closes, customers, requirements] = await Promise.all([
     query(req.actor,
       `SELECT p.id AS product_id, p.name AS product_name, p.sku, p.icon, p.base_uom,
               SUM(sb.qty) AS qty, SUM(sb.qty - sb.reserved_qty) AS available,
@@ -164,8 +164,17 @@ centreRouter.get('/:id/today', h(async (req) => {
                       FROM stock_issues WHERE customer_id IS NOT NULL
                        AND status IN ('POSTED','RECEIVED')
                      GROUP BY customer_id) s ON s.customer_id = c.id
-        WHERE c.warehouse_id = $1 AND c.is_active
-        ORDER BY COALESCE(s.spent,0) DESC LIMIT 50`, [w.id]),
+          WHERE c.warehouse_id = $1 AND c.is_active
+          ORDER BY COALESCE(s.spent,0) DESC LIMIT 50`, [w.id]),
+      query(req.actor,
+        `SELECT r.id, r.req_no, r.required_date, r.priority, r.status, r.reasoning,
+                r.created_at,
+                (SELECT string_agg(p.name || ' ' || l.final_qty || ' ' || l.uom, ', ' ORDER BY l.line_no)
+                   FROM requirement_lines l JOIN products p ON p.id = l.product_id
+                  WHERE l.requirement_id = r.id) AS products
+           FROM requirements r
+          WHERE r.company_id = $1 AND r.raised_for_warehouse_id = $2
+          ORDER BY r.created_at DESC LIMIT 50`, [req.actor.companyId, w.id]),
   ]);
 
   const soldToday = salesToday.reduce((a: number, s: any) => a + Number(s.total_qty), 0);
@@ -173,7 +182,7 @@ centreRouter.get('/:id/today', h(async (req) => {
   const closedToday = closes.some((c: any) => c.close_date === new Date().toISOString().slice(0, 10));
 
   return {
-    centre: w, stock, incoming, salesToday, closes, customers,
+    centre: w, stock, incoming, salesToday, closes, customers, requirements,
     soldToday, revenueToday, closedToday,
   };
 }));
@@ -544,7 +553,7 @@ centreRouter.get('/customers/list', h(async (req) =>
                      AND status IN ('POSTED','RECEIVED')
                    GROUP BY customer_id) s ON s.customer_id = c.id
       WHERE c.company_id = $1 AND c.is_active
-        AND ($2::uuid IS NULL OR c.warehouse_id = $2)
+        AND ($2::uuid IS NULL OR c.warehouse_id = $2 OR c.warehouse_id IS NULL)
         AND ($3 = '' OR c.name ILIKE '%' || $3 || '%' OR c.phone ILIKE '%' || $3 || '%')
       ORDER BY COALESCE(s.spent,0) DESC, c.name LIMIT 200`,
     [req.actor.companyId, req.query.warehouseId || null, String(req.query.q ?? '')])));

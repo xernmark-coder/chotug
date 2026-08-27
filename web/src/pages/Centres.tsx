@@ -8,6 +8,39 @@ import {
 import { Icon } from '../components/icons';
 import { ProductModal } from './Catalogue';
 
+export function CentreRequirementsPage() {
+  const nav = useNavigate();
+  const toast = useToast();
+  const { warehouseId } = useAuth();
+  const centre = useApi<any>(warehouseId ? `/centres/${warehouseId}/today` : null, [warehouseId]);
+  const [asking, setAsking] = useState(false);
+
+  if (centre.loading) return <Layout title="Requirements"><Loading /></Layout>;
+  if (centre.error) return <Layout title="Requirements"><ErrorBanner error={centre.error} /></Layout>;
+
+  const requirements = centre.data?.requirements ?? [];
+  return (
+    <Layout title="My requirements" subtitle="Requests raised by this centre"
+      actions={<div className="btn-row">
+        <button className="btn sm" onClick={() => nav('/dashboard')}>Dashboard</button>
+        <button className="btn sm primary" onClick={() => setAsking(true)}>Raise requirement</button>
+      </div>}>
+      <div className="card"><div className="card-body tight">
+        <DataTable rows={requirements} cols={[
+          { key: 'n', head: 'Request', render: (r: any) => <b className="mono">{r.req_no}</b> },
+          { key: 'p', head: 'Products', render: (r: any) => r.products ?? '—' },
+          { key: 'd', head: 'Needed by', render: (r: any) => date(r.required_date) },
+          { key: 's', head: 'Status', render: (r: any) => <Chip tone="neutral">{r.status}</Chip> },
+          { key: 'w', head: 'Reason', render: (r: any) => r.reasoning ?? '—' },
+        ]} empty={<Empty title="No requirements raised by this centre yet"
+          hint="Raise a requirement when you need the warehouse to send more stock." />} />
+      </div></div>
+      {asking ? <AskForStockModal centre={centre.data.centre} onClose={() => setAsking(false)}
+        onDone={(m) => { setAsking(false); centre.reload(); toast(m, 'ok'); }} /> : null}
+    </Layout>
+  );
+}
+
 /* ===========================================================================
  * CENTRES — the shops
  *
@@ -131,6 +164,11 @@ export function CentresPage() {
                   : c.last_closed_on === today ? <Chip tone="ok">today</Chip>
                   : <Chip tone="warn">{date(c.last_closed_on)}</Chip>;
               } },
+              ...(can('inventory.stock.issue') ? [{ key: 'sell', head: '', width: 150,
+                render: (c: any) => <button className="btn sm primary"
+                  onClick={(e) => { e.stopPropagation(); nav(`/sales?warehouseId=${c.id}`); }}>
+                  Sell to customer
+                </button> }] : []),
             ]}
             empty={<Empty icon="🏪"
               title={f.active > 0 ? 'No centre matches those filters' : 'No centres yet'}
@@ -201,15 +239,15 @@ export function CentresPage() {
 /* ------------------------------------------------------- one centre ------ */
 
 export function CentreDayPage() {
-  const { id } = useParams();
+  const { id: routeId } = useParams();
+  const nav = useNavigate();
   const toast = useToast();
-  const { can } = useAuth();
-  const { data, loading, error, reload } = useApi<any>(`/centres/${id}/today`, [id]);
+  const { can, me, warehouseId } = useAuth();
+  const id = routeId ?? warehouseId ?? '';
+  const { data, loading, error, reload } = useApi<any>(id ? `/centres/${id}/today` : null, [id]);
   const [receiving, setReceiving] = useState<any>(null);
   const [closing, setClosing] = useState(false);
-  const [asking, setAsking] = useState(false);
   const [sending, setSending] = useState(false);
-  const { warehouseId } = useAuth();
   const centres = useApi<any[]>('/centres');
   const { data: warehouses } = useApi<any[]>('/masters/warehouses');
 
@@ -270,18 +308,13 @@ export function CentreDayPage() {
 
   return (
     <Layout
-      title={c.name}
-      subtitle={`${c.city ?? ''}${c.address ? ` · ${c.address}` : ''}`}
+      title={`${c.name} dashboard`}
+      subtitle="Sell what is packed, receive warehouse deliveries, and close the day"
       actions={
         <div className="btn-row">
-          {can('purchase.requirement.create') ? (
-            <button className="btn sm" onClick={() => setAsking(true)}>Ask for stock</button>
-          ) : null}
-          {/* Asking the buyer to purchase more, and sending what is already on
-              a warehouse shelf, are different acts by different people. Both
-              live here because this is the page you are on when you notice the
-              shop is empty. */}
-          {can('inventory.stock.issue') ? (
+          <button className="btn sm primary" onClick={() => nav('/sell')}>Sell</button>
+          <button className="btn sm" onClick={() => nav('/requirements')}>Raise requirement</button>
+          {can('inventory.stock.issue') && !me?.roles.includes('CENTRE_EXEC') ? (
             <button className="btn sm" onClick={() => setSending(true)}>Send stock here</button>
           ) : null}
           {can('centre.day.close') ? (
@@ -292,6 +325,7 @@ export function CentreDayPage() {
           ) : null}
         </div>
       }
+
     >
       <div className="grid c4 mb">
         <Kpi label="Sold today" value={inr(data.revenueToday, 0)}
@@ -309,9 +343,9 @@ export function CentreDayPage() {
 
       {data.incoming.length ? (
         <div className="card mb">
-          <div className="card-head"><h2>Coming to you</h2></div>
+          <div className="card-head"><h2>Arriving from warehouse</h2></div>
           <div className="card-body tight">
-            <FilterBar f={fIncoming} placeholder="Search transfer, vehicle, driver" />
+            <FilterBar f={fIncoming} placeholder="Search delivery, vehicle, driver" />
             <FilterTotals f={fIncoming} noun="load" />
             <DataTable
               rows={fIncoming.rows}
@@ -329,15 +363,35 @@ export function CentreDayPage() {
                     {Number(t.boxes) > 0
                       ? <div className="small muted">{t.boxes} labelled box(es)</div> : null}
                   </div>) },
-                { key: 'a', head: '', width: 130, render: (t: any) =>
+                { key: 'a', head: '', width: 150, render: (t: any) =>
                   can('centre.stock.receive')
-                    ? <button className="btn sm primary" onClick={() => setReceiving(t)}>It arrived</button>
+                    ? <button className="btn sm primary" onClick={() => setReceiving(t)}>Mark arrived</button>
                     : null },
               ]}
             />
           </div>
         </div>
       ) : null}
+
+      <div className="card mb">
+        <div className="card-head"><h2>My requirements</h2></div>
+        <div className="card-body tight">
+          <DataTable
+            rows={data.requirements ?? []}
+            cols={[
+              { key: 'n', head: 'Request', render: (r: any) => (
+                <div><b className="mono">{r.req_no}</b>
+                  <div className="small muted">{dateTime(r.created_at)}</div></div>) },
+              { key: 'p', head: 'Products', render: (r: any) => r.products ?? '—' },
+              { key: 'd', head: 'Needed by', render: (r: any) => date(r.required_date) },
+              { key: 's', head: 'Status', render: (r: any) => <Chip tone="neutral">{r.status}</Chip> },
+              { key: 'w', head: 'Why', render: (r: any) => r.reasoning ?? '—' },
+            ]}
+            empty={<Empty title="You have not raised a requirement yet"
+              hint="Ask for stock when the centre needs another product." />}
+          />
+        </div>
+      </div>
 
       <div className="grid c2">
         <div className="card">
@@ -438,11 +492,6 @@ export function CentreDayPage() {
         <DayCloseModal centre={c} onClose={() => setClosing(false)}
           onDone={(m) => { setClosing(false); reload(); toast(m, 'ok'); }} />
       ) : null}
-      {asking ? (
-        <AskForStockModal centre={c} onClose={() => setAsking(false)}
-          onDone={(m) => { setAsking(false); toast(m, 'ok'); }} />
-      ) : null}
-
       {sending ? (
         <SendToCentreModal
           centres={centres.data ?? []}
@@ -794,6 +843,18 @@ function DayCloseModal({ centre, onClose, onDone }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
 
+  React.useEffect(() => {
+    if (!draft) return;
+    const prior = draft.alreadyClosed;
+    setDeclaredRevenue(String(prior?.declared_revenue ?? draft.system_revenue ?? 0));
+    setDeclaredQty(String(prior?.declared_qty ?? draft.system_qty ?? 0));
+    setCash(String(prior?.cash_amount ?? ''));
+    setOnline(String(prior?.online_amount ?? ''));
+    setExpenses(String(prior?.expenses ?? ''));
+    setWastage(String(prior?.wastage_qty ?? ''));
+    setNote(prior?.note ?? '');
+  }, [draft]);
+
   const system = Number(draft?.system_revenue ?? 0);
   const declared = Number(declaredRevenue) || 0;
   const gap = declared - system;
@@ -839,7 +900,7 @@ function DayCloseModal({ centre, onClose, onDone }: {
       </div>
       <div className="grid c2">
         <Field label="What you took today (₹)">
-          <input type="number" step="0.01" autoFocus value={declaredRevenue}
+          <input type="number" step="0.01" value={declaredRevenue}
             onChange={(e) => setDeclaredRevenue(e.target.value)} />
         </Field>
         <Field label="How much you sold (units)">
@@ -902,11 +963,18 @@ function AskForStockModal({ centre, onClose, onDone }: {
   const { data: products, reload: reloadProducts } = useApi<any[]>('/masters/products');
   const [productId, setProductId] = useState('');
   const [qty, setQty] = useState('');
+  const [uom, setUom] = useState('KG');
   const [reasoning, setReasoning] = useState('');
   const [priority, setPriority] = useState('NORMAL');
   const [addingProduct, setAddingProduct] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
+  const selectedProduct = (products ?? []).find((p: any) => p.id === productId);
+
+  React.useEffect(() => {
+    const productUom = selectedProduct?.purchase_uom ?? selectedProduct?.base_uom;
+    if (productUom) setUom(productUom);
+  }, [selectedProduct?.id, selectedProduct?.purchase_uom, selectedProduct?.base_uom]);
 
   if (addingProduct) {
     /* One modal at a time — stacking a second over the first is how a dialog
@@ -941,7 +1009,8 @@ function AskForStockModal({ centre, onClose, onDone }: {
                 source: 'MANUAL',
                 reasoning: reasoning.trim(),
                 remarks: `${centre.name}: ${reasoning.trim()}`,
-                lines: [{ productId, qty: Number(qty) }],
+                lines: [{ productId, uom,
+                  finalQty: Number(qty) }],
               });
               onDone(r.message ?? `Sent to the purchase manager (${r.req_no ?? ''}).`);
             } catch (e: any) { setError(e); } finally { setBusy(false); }
@@ -969,7 +1038,15 @@ function AskForStockModal({ centre, onClose, onDone }: {
           </div>
         </Field>
         <Field label="How much">
-          <input type="number" step="0.001" value={qty} onChange={(e) => setQty(e.target.value)} />
+          <div className="row" style={{ gap: 6 }}>
+            <input type="number" step="0.001" value={qty}
+              onChange={(e) => setQty(e.target.value)} />
+            <select value={uom} onChange={(e) => setUom(e.target.value)} style={{ width: 120 }}>
+              {['KG', 'BOX', 'CRATE', 'PCS', 'BAG', 'DOZ', 'QTL', 'TON'].map((unit) => (
+                <option key={unit} value={unit}>{unit}</option>
+              ))}
+            </select>
+          </div>
         </Field>
       </div>
       <Field label="Why" hint="The purchase manager reads this before deciding.">
@@ -1084,8 +1161,9 @@ export function CustomersPage() {
 }
 
 /** Exported so selling can add a customer without leaving the till. */
-export function AddCustomerModal({ centres, defaultCentre, onClose, onDone }: {
+export function AddCustomerModal({ centres, defaultCentre, lockCentre, onClose, onDone }: {
   centres: any[]; defaultCentre?: string; onClose: () => void;
+  lockCentre?: boolean;
   onDone: (m: string, customer?: any) => void;
 }) {
   const [name, setName] = useState('');
@@ -1132,12 +1210,18 @@ export function AddCustomerModal({ centres, defaultCentre, onClose, onDone }: {
             <option value="ONLINE">Online</option>
           </select>
         </Field>
-        <Field label="Which centre">
-          <select value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
-            <option value="">Buys from us directly</option>
-            {centres.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </Field>
+        {lockCentre ? (
+          <Field label="Centre">
+            <input value={centres.find((c: any) => c.id === warehouseId)?.name ?? 'This centre'} readOnly />
+          </Field>
+        ) : (
+          <Field label="Which centre">
+            <select value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
+              <option value="">Buys from us directly</option>
+              {centres.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+        )}
       </div>
     </Modal>
   );

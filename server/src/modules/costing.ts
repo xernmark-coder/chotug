@@ -427,22 +427,28 @@ export async function checkInvoiceAgainstReceipts(tx: Tx, actor: Actor, invoiceI
      * old flow only linked them during invoice capture, so a later receipt
      * stayed invisible to Finance. */
     await tx.query(
-      `UPDATE invoice_lines il
-          SET matched_grn_line_id = picked.grn_line_id,
-              matched_po_line_id = COALESCE(il.matched_po_line_id, picked.po_line_id)
-         FROM LATERAL (
-           SELECT gl.id AS grn_line_id, gl.po_line_id
-             FROM grn_lines gl
-             JOIN grns g ON g.id = gl.grn_id
-            WHERE gl.product_id = il.product_id
-              AND g.po_id = $2 AND g.status = 'POSTED'
-              AND NOT EXISTS (SELECT 1 FROM invoice_lines used
-                               WHERE used.matched_grn_line_id = gl.id
-                                 AND used.id <> il.id)
-            ORDER BY g.posting_date DESC, gl.line_no
-            LIMIT 1
-         ) picked
-        WHERE il.invoice_id = $1 AND il.matched_grn_line_id IS NULL`,
+      `WITH candidates AS (
+         SELECT il.id AS invoice_line_id, picked.grn_line_id, picked.po_line_id
+           FROM invoice_lines il
+           CROSS JOIN LATERAL (
+             SELECT gl.id AS grn_line_id, gl.po_line_id
+               FROM grn_lines gl
+               JOIN grns g ON g.id = gl.grn_id
+              WHERE gl.product_id = il.product_id
+                AND g.po_id = $2 AND g.status = 'POSTED'
+                AND NOT EXISTS (SELECT 1 FROM invoice_lines used
+                                 WHERE used.matched_grn_line_id = gl.id
+                                   AND used.id <> il.id)
+              ORDER BY g.posting_date DESC, gl.line_no
+              LIMIT 1
+           ) picked
+          WHERE il.invoice_id = $1 AND il.matched_grn_line_id IS NULL
+       )
+       UPDATE invoice_lines il
+          SET matched_grn_line_id = c.grn_line_id,
+              matched_po_line_id = COALESCE(il.matched_po_line_id, c.po_line_id)
+         FROM candidates c
+        WHERE il.id = c.invoice_line_id`,
       [inv.id, inv.po_id]);
 
     const { rows: lines } = await tx.query(

@@ -77,6 +77,9 @@ export function UnloadPage() {
       subtitle={entry.po_no ? `Against ${entry.po_no}` : 'No purchase order — unplanned arrival'}
       touch
       actions={<div className="btn-row">
+        <button className="btn sm" onClick={() => nav('/intake')}>
+          Warehouse intake
+        </button>
         {data.totalBoxes > 0 ? (
           <button className="btn sm primary" onClick={() => nav(`/gate/${id}`)}>
             Done weighing boxes →

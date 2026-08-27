@@ -229,9 +229,10 @@ export function DashboardPage() {
   // Confirming an order is now an approver's act, so it is their tile.
   const canConfirm = can('purchase.po.approve');
   const seesReports = can('reports.purchase.view');
+  const auditor = me?.roles.includes('AUDITOR') ?? false;
   // The pipeline strip is only meaningful to someone who works somewhere in it.
   const seesFlow   = isBuyer || isGate || isStore || seesReports;
-  const seesAlerts = can('reports.purchase.view', 'admin.settings.manage',
+  const seesAlerts = !auditor && can('reports.purchase.view', 'admin.settings.manage',
                          'quality.inspection.approve', 'farming.report.view');
   // Everyone gets at least one tile; if none of the above fired, the work
   // queue is the whole dashboard rather than an empty page.
@@ -309,6 +310,8 @@ export function DashboardPage() {
           </button>
         ) : null}
       </div>
+
+      <QuickActions can={can} nav={nav} />
 
       {seesFlow ? (
         <>
@@ -599,7 +602,7 @@ export function DashboardPage() {
 
 export function AdminDashboardPage() {
   const nav = useNavigate();
-  const { branchId, warehouseId, me } = useAuth();
+  const { branchId, warehouseId, me, can } = useAuth();
   const dashboard = useApi<any>(`/insights/dashboard?branchId=${branchId ?? ''}`, [branchId]);
   const queue = useApi<any[]>('/insights/work-queue');
   const sales = useApi<any>('/inventory/sales-summary?days=1');
@@ -641,6 +644,8 @@ export function AdminDashboardPage() {
         <button className="btn primary lg" onClick={() => nav('/analytics')}>View Analytics →</button>
       </div>
 
+      <QuickActions can={can} nav={nav} />
+
       <div className="section-head"><h2>Needs Attention</h2><span className="rule" /></div>
       <div className="card mb"><div className="card-body tight">
         {attention.length ? attention.map((item, index) => (
@@ -672,6 +677,33 @@ export function AdminDashboardPage() {
         <div><div className="small muted">Inventory value</div><b>{inr(inventoryValue, 0)}</b></div>
       </div><button className="btn sm primary mt" onClick={() => nav('/analytics')}>View Analytics →</button></div></div>
     </Layout>
+  );
+}
+
+function QuickActions({ can, nav }: { can: (...permissions: string[]) => boolean; nav: (to: string) => void }) {
+  const actions = [
+    { label: 'Order in one flow', icon: 'bolt', to: '/order-flow', perms: ['admin.override'] },
+    { label: 'What to buy', icon: 'calculator', to: '/buy-list', perms: ['purchase.requirement.create'] },
+    { label: 'Requirements', icon: 'clipboard', to: '/requirements', perms: ['purchase.requirement.create'] },
+    { label: 'Purchase orders', icon: 'box', to: '/purchase-orders', perms: ['purchase.po.create', 'purchase.po.approve'] },
+    { label: 'Receiving', icon: 'truckIn', to: '/arrivals', perms: ['receiving.gate.create'] },
+    { label: 'Inventory', icon: 'crates', to: '/stock', perms: ['receiving.grn.create', 'inventory.pack.grade', 'inventory.stock.issue', 'reports.purchase.view'] },
+  ].filter((action) => can(...action.perms));
+
+  if (!actions.length) return null;
+
+  return (
+    <div className="quick-actions mb">
+      <div className="section-head"><h2>Quick actions</h2><span className="rule" /></div>
+      <div className="btn-row">
+        {actions.map((action) => (
+          <button key={action.to} className={`btn ${action.to === '/order-flow' ? 'primary' : ''}`}
+            onClick={() => nav(action.to)}>
+            <Icon name={action.icon} size={16} /> {action.label}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

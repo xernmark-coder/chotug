@@ -400,11 +400,13 @@ impossible.
 |---|---|---|---|
 | GET | `/expense-categories` | any | Seeded with the client's own list; `affects_landed_cost` decides whether the cost reaches the produce |
 | POST | `/expense-categories` | `admin.settings.manage` | |
+| GET | `/payment-modes` | any | Standard methods plus company-saved custom methods |
+| POST | `/payment-modes` | `finance.payment.make` | `{ name }`; saves a custom method for future Finance payments |
 | POST | `/requests` | `finance.request.create` | Held by everyone who spends: purchase, gate, QC, warehouse, farm |
 | GET | `/requests` | any | **Scoped**: without `finance.expense.view` you see only your own, `?mine=1` or not |
 | GET | `/requests/:id` | any | With its payment history |
 | POST | `/requests/:id/verify` | `finance.request.verify` | `{ decision: VERIFY \| REJECT, approvedAmount?, reason? }` — may approve *less*, never more; rejection needs a reason |
-| POST | `/requests/:id/pay` | `finance.payment.make` | Part payments allowed; non-cash needs `transactionRef`, and a reference cannot be reused |
+| POST | `/requests/:id/pay` | `finance.payment.make` | Part payments allowed; standard or custom `mode`; non-cash needs `transactionRef`, and a reference cannot be reused |
 | POST | `/payments/:id/reverse` | `finance.payment.reverse` | Needs a reason; restores the request |
 | POST | `/receipts` | `finance.receipt.record` | A *declaration*, not a confirmation |
 | GET | `/receipts` | any | Scoped like requests |

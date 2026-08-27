@@ -34,6 +34,8 @@ financeRouter.use(staffOnly);
 
 const inr = (n: number) => `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 const today = () => new Date().toISOString().slice(0, 10);
+const DEFAULT_PAYMENT_MODES = ['CASH', 'UPI', 'BANK', 'CHEQUE', 'CARD'];
+const PAYMENT_MODES_KEY = 'finance.payment_modes';
 
 /* --------------------------------------------------------------- masters -- */
 
@@ -66,6 +68,38 @@ financeRouter.post('/expense-categories', requires('admin.settings.manage'), h(a
        input.icon ?? 'receipt', input.affectsLandedCost, req.actor.userId]);
     return rows[0];
   });
+}));
+
+financeRouter.get('/payment-modes', h(async (req) => {
+  const rows = await query<{ value: any }>(req.actor,
+    `SELECT value FROM settings WHERE company_id = $1 AND key = $2`,
+    [req.actor.companyId, PAYMENT_MODES_KEY]);
+  const saved = Array.isArray(rows[0]?.value)
+    ? rows[0].value.filter((v: any) => typeof v === 'string') : [];
+  return [...new Set([...DEFAULT_PAYMENT_MODES, ...saved])];
+}));
+
+financeRouter.post('/payment-modes', requires('finance.payment.make'), h(async (req) => {
+  const input = body(z.object({ name: z.string().trim().min(2, 'Name the payment method').max(40) }), req.body);
+  const name = input.name.replace(/\s+/g, ' ');
+  const key = name.toUpperCase();
+  if (DEFAULT_PAYMENT_MODES.includes(key)) return { name: key, added: false };
+
+  const rows = await query<{ value: any }>(req.actor,
+    `SELECT value FROM settings WHERE company_id = $1 AND key = $2`,
+    [req.actor.companyId, PAYMENT_MODES_KEY]);
+  const saved = Array.isArray(rows[0]?.value)
+    ? rows[0].value.filter((v: any) => typeof v === 'string') : [];
+  const existing = saved.find((v) => v.toLowerCase() === name.toLowerCase());
+  if (existing) return { name: existing, added: false };
+  const next = [...saved, name].slice(-40);
+  await withTx(req.actor, (tx) => tx.query(
+    `INSERT INTO settings (company_id, scope, key, value, updated_by)
+     VALUES ($1, 'COMPANY', $2, $3, $4)
+     ON CONFLICT (company_id, branch_id, key)
+     DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+    [req.actor.companyId, PAYMENT_MODES_KEY, JSON.stringify(next), req.actor.userId]));
+  return { name, added: true };
 }));
 
 /* ===========================================================================
@@ -321,7 +355,7 @@ financeRouter.post('/requests/:id/verify', requires('finance.request.verify'), h
 financeRouter.post('/requests/:id/pay', requires('finance.payment.make'), h(async (req) => {
   const input = body(z.object({
     amount: z.number().positive('How much is being paid?'),
-    mode: z.enum(['CASH', 'UPI', 'BANK', 'CHEQUE', 'CARD']),
+    mode: z.string().trim().min(2, 'Choose or enter a payment method').max(40),
     transactionRef: z.string().trim().optional(),
     paidFrom: z.string().trim().optional(),
     note: z.string().trim().optional(),
