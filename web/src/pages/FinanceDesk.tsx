@@ -38,7 +38,7 @@ export function FinanceDeskPage() {
 function TheDesk() {
   const toast = useToast();
   const { can } = useAuth();
-  const [tab, setTab] = useState<'verify' | 'pay' | 'in' | 'paid' | 'spent'>('verify');
+  const [tab, setTab] = useState<'verify' | 'pay' | 'dues' | 'in' | 'paid' | 'spent'>('verify');
   const [range, setRange] = useState(30);
 
   const from = useMemo(() => {
@@ -55,6 +55,10 @@ function TheDesk() {
      ₹4 lakh had gone out and offer no way to see a single payment that made it
      up — or to reverse one paid by mistake, though the endpoint existed. */
   const paid = useApi<any[]>('/finance/requests?status=PAID');
+  /* What the business owes for goods it has already taken in — a supplier sent
+     the load without waiting for the money. Not a queue of decisions like the
+     rest of this desk: these are settled, not judged. */
+  const dues = useApi<any[]>(can('finance.due.view') ? '/finance/dues' : null);
   const [opening, setOpening] = useState<any>(null);
 
   const [verifying, setVerifying] = useState<any>(null);
@@ -83,11 +87,27 @@ function TheDesk() {
     ...requestFilterSpec(),
     totals: [{ label: 'Paid out', of: (r: any) => Number(r.paid_amount) || 0, money: true }],
   });
+  const fDues = useFilters<any>(dues.data, {
+    date: (d: any) => d.became_due_at,
+    search: (d: any) => [d.payee_name, d.request_no, d.po_no, d.invoice_no, d.due_reason]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'sup', label: 'supplier', of: (d: any) => d.payee_name },
+      { key: 'lt', label: 'timing', all: 'Late or not', of: (d: any) =>
+        (d.overdue ? 'past due' : 'not due yet') },
+      { key: 'st', label: 'status', of: (d: any) => d.status },
+    ],
+    totals: [
+      { label: 'Owed', of: (d: any) => Number(d.balance) || 0, money: true },
+      { label: 'Past due', of: (d: any) => (d.overdue ? Number(d.balance) || 0 : 0), money: true },
+    ],
+  });
   const fIn = useFilters<any>(openReceipts, receiptFilterSpec());
   const fSettled = useFilters<any>(settledReceipts, receiptFilterSpec());
 
   const reloadAll = () => {
     overview.reload(); toVerify.reload(); toPay.reload(); partPaid.reload(); receipts.reload();
+    dues.reload();
   };
 
   const netFlow = Number(k.collected ?? 0) - Number(k.paid_out ?? 0);
@@ -126,8 +146,15 @@ function TheDesk() {
           tone={(k.disputed ?? 0) > 0 ? 'crit' : (k.to_confirm ?? 0) > 0 ? 'warn' : 'good'}
           foot={(k.disputed ?? 0) > 0 ? `${k.disputed} disputed` : `${k.to_confirm ?? 0} declared`}
           onClick={() => setTab('in')} />
-        <Kpi label="Owed to suppliers" value={inr(k.supplier_outstanding, 0)}
-          foot="across all open invoices" />
+        {/* Goods already on our floor that have not been paid for. Split out
+            from the general payable because it is the number that costs a
+            supplier relationship when it is wrong. */}
+        <Kpi label="Due for goods received" value={inr(k.dues_value, 0)}
+          tone={(k.dues_overdue ?? 0) > 0 ? 'crit' : (k.dues ?? 0) > 0 ? 'warn' : 'good'}
+          foot={(k.dues_overdue ?? 0) > 0
+            ? `${k.dues_overdue} past due · ${inr(k.dues_overdue_value, 0)}`
+            : `${k.dues ?? 0} supplier due(s)`}
+          onClick={() => setTab('dues')} />
       </div>
 
       <div className="grid c4 mb">
@@ -137,6 +164,8 @@ function TheDesk() {
         <Kpi label="Net movement" value={inr(netFlow, 0)}
           tone={netFlow < 0 ? 'warn' : 'good'}
           foot={netFlow < 0 ? 'more went out than came in' : 'more came in than went out'} />
+        <Kpi label="Committed, not yet paid" value={inr(k.committed, 0)}
+          foot={`incl. ${inr(k.supplier_outstanding, 0)} on open invoices`} />
         <Kpi label="Cash vs online"
           value={(() => {
             const m = overview.data?.byMode ?? [];
@@ -150,6 +179,7 @@ function TheDesk() {
       <div className="tabs">
         {([['verify', `To verify (${k.to_verify ?? 0})`],
            ['pay', `To pay (${payable.length})`],
+           ['dues', `Dues (${(dues.data ?? []).length})`],
            ['in', `Coming in (${openReceipts.length})`],
            ['paid', `Paid (${(paid.data ?? []).length})`],
            ['spent', 'Where it went']] as const).map(([key, label]) => (
@@ -205,6 +235,102 @@ function TheDesk() {
                 : 'Nothing verified is waiting to be paid'} />}
           />
         </div></div>
+        </>
+      ) : null}
+
+      {tab === 'dues' ? (
+        <>
+          <div className="banner info mb">
+            <span><Icon name="truck" size={16} /></span>
+            <div className="small">
+              These loads were sent before the money went out — the supplier chose
+              to collect later. The goods are already ours, so the only decision
+              left is when to settle. Paying one works exactly like paying
+              anything else on this desk.
+            </div>
+          </div>
+          <FilterBar f={fDues} placeholder="Search supplier, order, invoice" />
+          <FilterTotals f={fDues} noun="due" />
+          <div className="card"><div className="card-body tight">
+            <DataTable
+              loading={dues.loading}
+              rows={fDues.rows}
+              rowTone={(d: any) => (d.overdue ? 'crit' : undefined)}
+              defaultSort="due"
+              cols={[
+                { key: 'w', head: 'Who', sort: (d: any) => d.payee_name, render: (d: any) => (
+                  <div>
+                    <b>{d.payee_name}</b>
+                    <div className="small muted mono">{d.request_no}</div>
+                  </div>
+                ) },
+                { key: 'g', head: 'Against', sort: (d: any) => d.po_no, render: (d: any) => (
+                  <div className="small">
+                    {d.po_no ? <b className="mono">{d.po_no}</b> : <span className="muted">no order</span>}
+                    {d.invoice_no ? <div className="muted">invoice {d.invoice_no}</div> : null}
+                  </div>
+                ) },
+                { key: 'sn', head: 'Sent', desc: true,
+                  sort: (d: any) => d.sent_without_payment_at ?? d.became_due_at,
+                  render: (d: any) => (
+                  <span className="small">
+                    {date(d.sent_without_payment_at ?? d.became_due_at)}
+                  </span>
+                ) },
+                { key: 'due', head: 'Due', sort: (d: any) => d.due_date, render: (d: any) => (
+                  d.due_date
+                    ? <div>
+                        <span className="small">{date(d.due_date)}</span>
+                        {d.overdue ? (
+                          <div><Chip tone="danger">{num(d.days_overdue, 0)} days late</Chip></div>
+                        ) : null}
+                      </div>
+                    : <span className="muted small">on arrival</span>
+                ) },
+                { key: 'a', head: 'Owed', num: true, desc: true,
+                  sort: (d: any) => Number(d.balance) || 0, render: (d: any) => (
+                  <div>
+                    <b>{inr(d.balance, 0)}</b>
+                    {Number(d.paid_amount) > 0 ? (
+                      <div className="small muted">{inr(d.paid_amount, 0)} of {inr(d.amount, 0)} paid</div>
+                    ) : null}
+                  </div>
+                ) },
+                { key: 'st', head: 'Stage', sort: (d: any) => d.status, render: (d: any) => (
+                  <Chip tone={d.status === 'REQUESTED' ? 'warn' : 'primary'}>
+                    {d.status === 'REQUESTED' ? 'not checked yet'
+                      : d.status === 'VERIFIED' ? 'ready to pay'
+                      : d.status.replace(/_/g, ' ').toLowerCase()}
+                  </Chip>
+                ) },
+                { key: 'act', head: '', width: 120, render: (d: any) => (
+                  /* Paying a due needs the same request row every other payment
+                     uses, so the modal is handed the shape it expects rather
+                     than the flattened view row. */
+                  d.status === 'REQUESTED'
+                    ? (can('finance.request.verify')
+                        ? <button className="btn sm" onClick={() => setVerifying({
+                            id: d.request_id, request_no: d.request_no, amount: d.amount,
+                            paid_amount: d.paid_amount, payee_name: d.payee_name,
+                            kind: 'SUPPLIER_INVOICE', note: d.note,
+                          })}>Check it</button>
+                        : null)
+                    : (can('finance.payment.make')
+                        ? <button className="btn sm primary" onClick={() => setPaying({
+                            id: d.request_id, request_no: d.request_no, amount: d.amount,
+                            paid_amount: d.paid_amount, payee_name: d.payee_name,
+                            kind: 'SUPPLIER_INVOICE', note: d.note,
+                          })}>Settle</button>
+                        : null)
+                ) },
+              ]}
+              empty={<Empty icon="🤝"
+                title={fDues.active > 0 ? 'Nothing matches those filters'
+                  : 'Nothing owed for goods already received'}
+                hint={fDues.active > 0 ? 'Clear a filter to widen the search.'
+                  : 'A due appears here when a supplier sends a load before being paid.'} />}
+            />
+          </div></div>
         </>
       ) : null}
 

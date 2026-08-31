@@ -121,28 +121,38 @@ export function PackingPage() {
             rowTone={(b: any) => (b.days_left != null && b.days_left <= 2 ? 'crit'
               : b.days_left != null && b.days_left <= 5 ? 'warn' : undefined)}
             cols={[
-              { key: 'p', head: 'Product', render: (b: any) => (
+              { key: 'p', head: 'Product', sort: (b: any) => b.product_name, render: (b: any) => (
                 <div><b>{b.product_name}</b>
                   <div className="small muted mono">{b.batch_no}{b.grade ? ` · ${b.grade}` : ''}</div>
                 </div>
               ) },
-              { key: 'a', head: 'On hand', num: true, render: (b: any) => (
+              { key: 'a', head: 'On hand', num: true,
+                sort: (b: any) => Number(b.available_qty) || 0, desc: true, render: (b: any) => (
                 <div>{num(b.available_qty, 0)} <span className="small muted">{b.base_uom}</span></div>
               ) },
-              { key: 'k', head: 'Already packed', num: true, render: (b: any) =>
+              { key: 'k', head: 'Already packed', num: true,
+                sort: (b: any) => Number(b.packed_qty) || 0, desc: true, render: (b: any) =>
                 Number(b.packed_qty) > 0
                   ? <span>{num(b.packed_qty, 0)} <span className="small muted">{b.base_uom}</span></span>
                   : <span className="muted">—</span> },
-              { key: 'u', head: 'Still loose', num: true, render: (b: any) => {
+              { key: 'u', head: 'Still loose', num: true, desc: true,
+                sort: (b: any) => (Number(b.available_qty) || 0) - (Number(b.packed_qty) || 0),
+                render: (b: any) => {
                 const free = Number(b.available_qty) - Number(b.packed_qty);
                 return <b>{num(free, 0)} <span className="small muted">{b.base_uom}</span></b>;
               } },
-              { key: 'e', head: 'Shelf life', render: (b: any) =>
+              /* Shelf life sorts ascending by default and is the table's
+                 opening order: the box closest to turning is the one that has
+                 to be graded and packed first, and no other ordering of this
+                 list is worth more than that. */
+              { key: 'e', head: 'Shelf life', sort: (b: any) => b.days_left, render: (b: any) =>
                 b.days_left == null ? <span className="muted">—</span>
                   : <Chip tone={b.days_left <= 2 ? 'danger' : b.days_left <= 5 ? 'warn' : 'neutral'}>
                       {b.days_left <= 0 ? 'past date' : `${b.days_left}d left`}
                     </Chip> },
-              { key: 'c', head: 'Cost', num: true, render: (b: any) => inr(b.landed_rate) },
+              { key: 'c', head: 'Cost', num: true, desc: true,
+                sort: (b: any) => Number(b.landed_rate) || 0,
+                render: (b: any) => inr(b.landed_rate) },
               { key: 'a2', head: '', width: 90, render: (b: any) => canPack
                 ? (
                   <div className="btn-row">
@@ -163,6 +173,7 @@ export function PackingPage() {
               title={fPackable.active > 0 ? 'No batch matches those filters' : 'Nothing in stock to pack'}
               hint={fPackable.active > 0 ? 'Clear a filter to widen the search.'
                 : 'Post a goods receipt and the batch shows up here.'} />}
+            defaultSort="e"
           />
         </div>
       </div>
@@ -204,30 +215,36 @@ export function PackingPage() {
                       checked={!!picked[p.id]}
                       onChange={(e) => setPicked((s2) => ({ ...s2, [p.id]: e.target.checked }))} />
                   ) },
-                  { key: 'c', head: 'Barcode', render: (p: any) => (
+                  { key: 'c', head: 'Barcode', sort: (p: any) => p.code, render: (p: any) => (
                     <div>
                       <b className="mono">{p.code}</b>
                       <div className="small muted">{p.group_label ?? `pack ${p.pack_no}`}</div>
                     </div>
                   ) },
-                  { key: 'p', head: 'Product', render: (p: any) => (
+                  { key: 'p', head: 'Product', sort: (p: any) => p.product_name, render: (p: any) => (
                     <div>{p.product_name}<div className="small muted mono">{p.batch_no}</div></div>
                   ) },
                   /* Grade and shelf together: the two things somebody sent to
                      fetch a box actually needs. */
-                  { key: 'g', head: 'Grade', render: (p: any) => (
+                  /* Sorting by grade is the request: A boxes are picked for one
+                     customer and C for another, and reading them out of a list
+                     ordered by barcode is how the wrong box goes in the van. */
+                  { key: 'g', head: 'Grade', sort: (p: any) => p.grade, render: (p: any) => (
                     p.grade ? <Chip tone={p.grade === 'A' ? 'ok' : p.grade === 'B' ? 'primary'
                       : p.grade === 'C' ? 'warn' : 'danger'}>{p.grade}</Chip>
                       : <span className="muted small">—</span>
                   ) },
-                  { key: 'b', head: 'Where', render: (p: any) => (
+                  { key: 'b', head: 'Where', sort: (p: any) => p.bin_code, render: (p: any) => (
                     p.bin_code
                       ? <div><b>{p.bin_code}</b><div className="small muted">rack {p.rack_code}</div></div>
                       : <span className="chip warn">on the bench</span>
                   ) },
-                  { key: 'q', head: 'Contains', num: true, render: (p: any) =>
+                  { key: 'q', head: 'Contains', num: true, desc: true,
+                    sort: (p: any) => Number(p.qty) || 0, render: (p: any) =>
                     <span>{num(p.qty, 2)} <span className="small muted">{p.uom}</span></span> },
-                  { key: 'r', head: 'Price', num: true, render: (p: any) => <b>{inr(p.price)}</b> },
+                  { key: 'r', head: 'Price', num: true, desc: true,
+                    sort: (p: any) => Number(p.price) || 0,
+                    render: (p: any) => <b>{inr(p.price)}</b> },
                   { key: 'x', head: '', width: 74, render: (p: any) => (
                     <div className="btn-row">
                       <button className="btn sm ghost" onClick={() => setPrinting([p])}>Label</button>

@@ -73,18 +73,42 @@ export function PeoplePage() {
   const [roleId, setRoleId] = useState('');
   const [supplierId, setSupplierId] = useState('');
   const [driverId, setDriverId] = useState('');
+  /* Two ways to let somebody in, and the right one depends on whether they
+     have a mailbox they can actually open. An emailed link is safer — nobody
+     but them ever knows the password. A password set here is the only thing
+     that works for the gate clerk with no email who is standing in front of
+     you, and for a site where SMTP has never been configured. */
+  const [howIn, setHowIn] = useState<'INVITE' | 'PASSWORD'>('INVITE');
+  const [password, setPassword] = useState('');
+  const [phone, setPhone] = useState('');
+  const [resetting, setResetting] = useState<Person | null>(null);
+  const [changingMine, setChangingMine] = useState(false);
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<any>(null);
   const [link, setLink] = useState<{ url: string; email: string; sent?: boolean; error?: string } | null>(null);
 
   const reset = () => {
-    setFullName(''); setEmail(''); setRoleId(''); setSupplierId(''); setDriverId(''); setFormError(null);
+    setFullName(''); setEmail(''); setRoleId(''); setSupplierId(''); setDriverId('');
+    setPassword(''); setPhone(''); setFormError(null);
+    setHowIn(can('admin.user.password') ? 'PASSWORD' : 'INVITE');
   };
 
   const invite = async () => {
     setBusy(true);
     setFormError(null);
     try {
+      if (howIn === 'PASSWORD') {
+        const r = await api.post<{ message: string }>('/masters/users', {
+          fullName, email, phone: phone || undefined, roleId, password,
+          supplierId: supplierId || null, driverId: driverId || null,
+        });
+        setLink(null);
+        setOpen(false);
+        reset();
+        reload();
+        toast(r.message, 'ok');
+        return;
+      }
       const r = await api.post<{ inviteUrl: string; email: string; emailSent: boolean; emailError?: string }>(
         '/masters/users/invite',
         { fullName, email, roleId, supplierId: supplierId || null, driverId: driverId || null });
@@ -134,8 +158,14 @@ export function PeoplePage() {
   return (
     <Layout
       title="People & Access"
-      subtitle="Add someone by email and pick their role — they set their own password"
-      actions={<button className="btn primary" onClick={() => { reset(); setOpen(true); }}>Add person</button>}
+      subtitle="Add an account, pick what it can do, and change a password"
+      actions={<div className="btn-row">
+        {/* An admin's own password used to be changeable only from a profile
+            page nobody navigates to. It belongs where they manage everybody
+            else's access. */}
+        <button className="btn sm" onClick={() => setChangingMine(true)}>My password</button>
+        <button className="btn primary" onClick={() => { reset(); setOpen(true); }}>Add person</button>
+      </div>}
     >
       <ErrorBanner error={error} />
       {link ? (
@@ -180,7 +210,7 @@ export function PeoplePage() {
             {
               key: 'act',
               head: '',
-              width: 200,
+              width: 300,
               render: (p) => (
                 <div className="btn-row">
                   {p.status !== 'ACTIVE' ? (
@@ -191,6 +221,12 @@ export function PeoplePage() {
                   ) : null}
                   {p.status === 'SUSPENDED' ? (
                     <button className="btn sm" onClick={() => setStatus(p, 'ACTIVE')}>Restore</button>
+                  ) : null}
+                  {/* The person who forgot their password and has no working
+                      email to receive a link on. Without this the only route
+                      back in was an invite to an address that does not work. */}
+                  {p.id !== me?.id && can('admin.user.password') ? (
+                    <button className="btn sm" onClick={() => setResetting(p)}>Set password</button>
                   ) : null}
                   {/* Two people on one role do not always do the same job. */}
                   {p.id !== me?.id && can('admin.permission.override') ? (
@@ -208,6 +244,16 @@ export function PeoplePage() {
           onChanged={reload} />
       ) : null}
 
+      {resetting ? (
+        <SetPasswordModal person={resetting} onClose={() => setResetting(null)}
+          onDone={(m) => { setResetting(null); reload(); toast(m, 'ok'); }} />
+      ) : null}
+
+      {changingMine ? (
+        <MyPasswordModal onClose={() => setChangingMine(false)}
+          onDone={() => { setChangingMine(false); toast('Password changed', 'ok'); }} />
+      ) : null}
+
       {open ? (
         <Modal
           title="Add a person"
@@ -215,21 +261,61 @@ export function PeoplePage() {
           footer={
             <>
               <button className="btn" onClick={() => setOpen(false)}>Cancel</button>
-              <button className="btn primary" disabled={busy} onClick={invite}>
-                {busy ? 'Creating…' : 'Create invite'}
+              <button className="btn primary"
+                disabled={busy || !fullName.trim() || !email.trim() || !roleId
+                  || (howIn === 'PASSWORD' && password.length < 8)}
+                onClick={invite}>
+                {busy ? 'Creating…' : howIn === 'PASSWORD' ? 'Create the account' : 'Create invite'}
               </button>
             </>
           }
         >
           <ErrorBanner error={formError} />
+
+          {can('admin.user.password') ? (
+            <Field label="How do they get in?">
+              <div className="tabs" style={{ marginBottom: 0 }}>
+                <button type="button" className={`tab ${howIn === 'PASSWORD' ? 'active' : ''}`}
+                  onClick={() => setHowIn('PASSWORD')}>Give them a password now</button>
+                <button type="button" className={`tab ${howIn === 'INVITE' ? 'active' : ''}`}
+                  onClick={() => setHowIn('INVITE')}>Email them a link</button>
+              </div>
+              <div className="small muted mt">
+                {howIn === 'PASSWORD'
+                  ? 'They can sign in immediately, and will be asked to choose their own '
+                    + 'password the first time. Use this for anybody without an email address.'
+                  : 'They choose their own password from a one-time link — nobody else ever '
+                    + 'knows it. Needs a mailbox they can open.'}
+              </div>
+            </Field>
+          ) : null}
+
           <Field label="Full name">
             <input value={fullName} autoFocus onChange={(e) => setFullName(e.target.value)}
               placeholder="Asha Kulkarni" />
           </Field>
-          <Field label="Email" hint="The invite link is tied to this address.">
+          <Field label="Email"
+            hint={howIn === 'PASSWORD'
+              ? 'What they sign in with. It does not have to be a mailbox they read.'
+              : 'The invite link is tied to this address.'}>
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
               placeholder="asha@chotug.in" />
           </Field>
+          {howIn === 'PASSWORD' ? (
+            <div className="grid c2">
+              <Field label="First password"
+                hint={password.length > 0 && password.length < 8
+                  ? 'At least 8 characters.'
+                  : 'They will be asked to change it when they sign in.'}>
+                <input type="text" value={password} onChange={(e) => setPassword(e.target.value)}
+                  placeholder="at least 8 characters" />
+              </Field>
+              <Field label="Phone (optional)">
+                <input value={phone} onChange={(e) => setPhone(e.target.value)}
+                  placeholder="98765 43210" />
+              </Field>
+            </div>
+          ) : null}
           <Field label="Role" hint="What they can do. You can change this later.">
             <select value={roleId} onChange={(e) => setRoleId(e.target.value)}>
               <option value="">Choose a role…</option>
@@ -268,6 +354,108 @@ export function PeoplePage() {
         </Modal>
       ) : null}
     </Layout>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * PASSWORDS
+ *
+ * Two different acts that look alike and are not:
+ *
+ *   · changing your OWN — asks for the current one first, which is the whole
+ *     protection against somebody who walked past an unlocked screen;
+ *   · setting SOMEBODY ELSE'S — does not, because the point is that they have
+ *     forgotten it. That is a real power, so it is a separate permission and
+ *     the new password is temporary by default.
+ * ------------------------------------------------------------------------ */
+
+function SetPasswordModal({ person, onClose, onDone }: {
+  person: Person; onClose: () => void; onDone: (m: string) => void;
+}) {
+  const [password, setPassword] = useState('');
+  const [mustChange, setMustChange] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  return (
+    <Modal
+      title={`Set a password for ${person.full_name}`}
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy || password.length < 8}
+          onClick={async () => {
+            setBusy(true); setError(null);
+            try {
+              const r = await api.post<{ message: string }>(
+                `/masters/users/${person.id}/set-password`, { password, mustChange });
+              onDone(r.message);
+            } catch (e: any) { setError(e); } finally { setBusy(false); }
+          }}>Set it</button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+      <p className="small muted mb">
+        Whatever they had stops working straight away. Tell them the new one in
+        person — for the few minutes until they change it, you both know it.
+      </p>
+      <Field label="New password" hint="At least 8 characters.">
+        <input type="text" autoFocus value={password}
+          onChange={(e) => setPassword(e.target.value)} />
+      </Field>
+      <label className="row" style={{ gap: 8, cursor: 'pointer' }}>
+        <input type="checkbox" style={{ width: 17, height: 17 }}
+          checked={mustChange} onChange={(e) => setMustChange(e.target.checked)} />
+        <span className="small">
+          Ask them to choose their own when they sign in.
+          <span className="muted"> Leave this on unless it is a shared tablet.</span>
+        </span>
+      </label>
+    </Modal>
+  );
+}
+
+function MyPasswordModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [again, setAgain] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  /* Checked here as well as on the server, because being told "at least 8
+     characters" after pressing the button means typing all three again. */
+  const mismatch = again.length > 0 && next !== again;
+
+  return (
+    <Modal
+      title="Change your password"
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary"
+          disabled={busy || !current || next.length < 8 || next !== again}
+          onClick={async () => {
+            setBusy(true); setError(null);
+            try {
+              await api.post('/auth/change-password',
+                { currentPassword: current, newPassword: next });
+              onDone();
+            } catch (e: any) { setError(e); } finally { setBusy(false); }
+          }}>Change it</button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+      <Field label="Your password now">
+        <input type="password" autoFocus value={current}
+          onChange={(e) => setCurrent(e.target.value)} />
+      </Field>
+      <Field label="New password" hint="At least 8 characters.">
+        <input type="password" value={next} onChange={(e) => setNext(e.target.value)} />
+      </Field>
+      <Field label="Type it again" hint={mismatch ? 'These two do not match.' : undefined}>
+        <input type="password" value={again} onChange={(e) => setAgain(e.target.value)} />
+      </Field>
+    </Modal>
   );
 }
 

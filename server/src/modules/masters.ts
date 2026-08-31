@@ -52,6 +52,7 @@ async function profile(userId: string) {
   if (!actor) throw ApiError.unauthorized();
   const { rows } = await pool.query(
     `SELECT u.id, u.full_name, u.email, u.employee_code, u.locale, u.default_branch_id,
+            u.must_change_password,
             c.trade_name AS company_name,
             (SELECT json_agg(json_build_object('id',b.id,'code',b.code,'name',b.name,'type',b.type)
                              ORDER BY b.code)
@@ -79,6 +80,9 @@ async function profile(userId: string) {
     id: r.id, fullName: r.full_name, email: r.email, employeeCode: r.employee_code,
     locale: r.locale, companyName: r.company_name,
     defaultBranchId: r.default_branch_id,
+    /* Set when an admin handed them a password. The app asks them to replace
+     * it before it lets them get on with anything. */
+    mustChangePassword: !!r.must_change_password,
     branches: r.branches ?? [], warehouses: r.warehouses ?? [],
     roles: actor.roleCodes, permissions: [...actor.permissions], limits: actor.limits,
   };
@@ -96,7 +100,8 @@ authRouter.post('/change-password', authenticate, h(async (req) => {
     throw ApiError.badRequest('Your current password is not correct');
   }
   await pool.query(
-    'UPDATE users SET password_hash = $2, password_changed_at = now() WHERE id = $1',
+    `UPDATE users SET password_hash = $2, password_changed_at = now(),
+            must_change_password = false WHERE id = $1`,
     [req.actor.userId, await hashPassword(input.newPassword)]);
   return { ok: true };
 }));
@@ -387,6 +392,108 @@ mastersRouter.put('/products/:id', requires('master.product.manage'), h(async (r
        input.shelfLifeDays ?? null, input.isActive ?? null, req.actor.userId]);
     if (!rows[0]) throw ApiError.notFound('Product not found');
     return rows[0];
+  });
+}));
+
+/* ---------------------------------------------------------------------------
+ * WHAT IT COSTS US ALL-IN, AND WHAT THAT MEANS IT HAS TO SELL FOR.
+ *
+ *   "for every product it should calculate the total cost as its cost plus cost
+ *    to take it to warehouse and then send to centers. on this total cost the
+ *    admin should be able to set particular profit such as 20% and then selling
+ *    cost will be such that overall 20% profit will be there including
+ *    transport cost."
+ *
+ * Three of the four numbers are derived and none of them is typed: what we paid
+ * (from the batches), what it costs to run the place per kilo, and what the
+ * lorry out to the shop costs per kilo. See v_product_pricing.
+ *
+ * The one thing a person sets is the margin — company-wide, or on a product
+ * that has to carry its own. Everything else moves as the business moves, which
+ * is the only way a floor price stays true for more than a fortnight.
+ * ------------------------------------------------------------------------ */
+mastersRouter.get('/pricing', h(async (req) =>
+  query(req.actor,
+    `SELECT pp.*, c.name AS category_name, c.icon AS category_icon,
+            /* What it is actually being sold at today, so a floor price that
+             * is being undercut is visible rather than theoretical. */
+            (SELECT ROUND(AVG(sil.rate), 2) FROM stock_issue_lines sil
+               JOIN stock_issues si ON si.id = sil.issue_id
+              WHERE sil.product_id = pp.product_id AND si.reason = 'SALE'
+                AND si.status <> 'CANCELLED'
+                AND si.issue_date > CURRENT_DATE - 30) AS avg_sold_at
+       FROM v_product_pricing pp
+       JOIN product_categories c ON c.id = pp.category_id
+      WHERE pp.company_id = $1
+        AND ($2 = '' OR pp.category_id = $2::uuid)
+      ORDER BY c.name, pp.product_name`,
+    [req.actor.companyId, String(req.query.categoryId ?? '')])));
+
+/** What the derived halves of the price are made of, for the one screen that
+ *  has to explain the number rather than just show it. */
+mastersRouter.get('/pricing/basis', h(async (req) => {
+  const [overhead] = await query(req.actor,
+    `SELECT * FROM v_overhead_per_kg WHERE company_id = $1`, [req.actor.companyId]);
+  const [outbound] = await query(req.actor,
+    `SELECT * FROM v_outbound_cost_per_kg WHERE company_id = $1`, [req.actor.companyId]);
+  const [company] = await query(req.actor,
+    `SELECT default_margin_pct, overhead_window_days FROM companies WHERE id = $1`,
+    [req.actor.companyId]);
+  return { overhead, outbound, company };
+}));
+
+mastersRouter.put('/products/:id/pricing', requires('master.pricing.manage'), h(async (req) => {
+  const input = body(z.object({
+    /* Null puts the product back on the company default, which is different
+     * from setting it to the same number by hand — the first follows a change
+     * of policy, the second does not. */
+    minMarginPct: z.number().min(0).max(500).nullable().optional(),
+    sellPrice: z.number().nonnegative().nullable().optional(),
+    defaultWastagePct: z.number().min(0).max(100).optional(),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE products SET
+          min_margin_pct = CASE WHEN $3::boolean THEN $4 ELSE min_margin_pct END,
+          sell_price     = CASE WHEN $5::boolean THEN $6 ELSE sell_price END,
+          default_wastage_pct = COALESCE($7, default_wastage_pct),
+          updated_by = $8
+        WHERE id = $1 AND company_id = $2 RETURNING id, name`,
+      [req.params.id, req.actor.companyId,
+       input.minMarginPct !== undefined, input.minMarginPct ?? null,
+       input.sellPrice !== undefined, input.sellPrice ?? null,
+       input.defaultWastagePct ?? null, req.actor.userId]);
+    if (!rows[0]) throw ApiError.notFound('Product not found');
+
+    /* Read back through the transaction, not through the pool. The first
+     * version of this used query(), which takes its own connection and
+     * therefore could not see the UPDATE above — so saving a 20% margin
+     * answered with the old 15% and the screen showed the change had not
+     * taken, when it had. */
+    const { rows: pr } = await tx.query(
+      `SELECT * FROM v_product_pricing WHERE product_id = $1`, [req.params.id]);
+    const priced = pr[0];
+
+    /* A selling price under the floor is allowed — a manager clearing stock
+     * before it turns knows exactly what they are doing — but it is said out
+     * loud, because the other way it happens is by arithmetic nobody checked. */
+    const belowFloor = priced && input.sellPrice
+      && Number(input.sellPrice) < Number(priced.min_sell_price);
+
+    await emit(tx, req.actor, 'product', rows[0].id, 'product.priced', {
+      name: rows[0].name, marginPct: input.minMarginPct ?? null,
+      sellPrice: input.sellPrice ?? null,
+    });
+
+    return {
+      ...priced,
+      message: belowFloor
+        ? `Saved — but ₹${Number(input.sellPrice).toFixed(2)} is below the `
+          + `₹${Number(priced.min_sell_price).toFixed(2)} it needs to make `
+          + `${Number(priced.margin_pct).toFixed(0)}%.`
+        : `${rows[0].name} priced.`,
+    };
   });
 }));
 
@@ -1306,6 +1413,146 @@ async function deliverInvite(companyId: string, userId: string, url: string) {
   const r = await sendMail(companyId, u.email, mail.subject, mail.html, mail.text);
   return { emailSent: r.sent, emailError: r.sent ? undefined : r.reason };
 }
+
+/* ---------------------------------------------------------------------------
+ * ADDING SOMEBODY WHO HAS NO EMAIL.
+ *
+ *   "admin should be able to change their password add new accounts of admin or
+ *    any other position from their panel"
+ *
+ * Inviting by email is still the right way to add a colleague with a mailbox,
+ * and it stays. It is useless for the gate clerk with no email address who is
+ * standing in front of the admin waiting to be let into the system, and for a
+ * site where SMTP has never been configured — which is most of them on day one.
+ *
+ * So the admin may set the first password directly. The trade is real and
+ * deliberate: for a moment two people know that password. It is mitigated the
+ * only way that actually works — the person is made to change it the first time
+ * they sign in — and gated behind its own CRITICAL permission rather than being
+ * folded into "manage people".
+ * ------------------------------------------------------------------------ */
+mastersRouter.post('/users', requires('admin.user.password'), h(async (req) => {
+    const input = body(z.object({
+      fullName: z.string().trim().min(2, 'Enter their full name'),
+      email: z.string().trim().email('Enter a valid email address'),
+      phone: z.string().trim().max(20).optional(),
+      employeeCode: z.string().trim().max(30).optional(),
+      roleId: z.string().uuid('Choose a role'),
+      password: z.string().min(8, 'Use at least 8 characters'),
+      /* Off only for a shared-device login (a gate tablet) where forcing a
+       * change on first use locks the shift out of the system. */
+      mustChange: z.boolean().default(true),
+      supplierId: z.string().uuid().nullable().optional(),
+      driverId: z.string().uuid().nullable().optional(),
+      branchId: z.string().uuid().nullable().optional(),
+    }), req.body);
+
+    const email = input.email.toLowerCase();
+    const existing = await pool.query(
+      'SELECT id, status FROM users WHERE company_id = $1 AND lower(email) = $2',
+      [req.actor.companyId, email]);
+    if (existing.rowCount) {
+      throw ApiError.conflict(existing.rows[0].status === 'INVITED'
+        ? 'That person has already been invited. Use "Send new link", or set their password from their row.'
+        : 'Someone with that email already has an account.');
+    }
+
+    const role = await pool.query(
+      'SELECT id, code, name FROM roles WHERE id = $1 AND company_id = $2',
+      [input.roleId, req.actor.companyId]);
+    if (!role.rowCount) throw ApiError.badRequest('That role does not exist.');
+
+    /* The same pairing rules as an invite. A supplier login with no supplier
+     * sees nothing; an inside role carrying a supplier link would quietly scope
+     * a colleague to one vendor. */
+    const isSupplierRole = role.rows[0].code === 'SUPPLIER';
+    const isDriverRole = role.rows[0].code === 'DRIVER';
+    if (isSupplierRole && !input.supplierId) {
+      throw ApiError.badRequest('Choose which supplier this person belongs to.');
+    }
+    if (!isSupplierRole && input.supplierId) {
+      throw ApiError.badRequest('Only the Supplier role can be linked to a supplier.');
+    }
+    if (isDriverRole && !input.driverId) {
+      throw ApiError.badRequest('Choose which driver this login belongs to.');
+    }
+    if (!isDriverRole && input.driverId) {
+      throw ApiError.badRequest('Only the Driver role can be linked to a driver.');
+    }
+
+    const hash = await hashPassword(input.password);
+
+    return withTx(req.actor, async (tx) => {
+      const { rows } = await tx.query(
+        `INSERT INTO users (company_id, full_name, email, phone, employee_code, status,
+                default_branch_id, supplier_id, driver_id, password_hash,
+                password_changed_at, must_change_password, created_by)
+         VALUES ($1,$2,$3,$4,$5,'ACTIVE',$6,$7,$8,$9,now(),$10,$11)
+         RETURNING id, full_name, email, status`,
+        [req.actor.companyId, input.fullName, email, input.phone ?? null,
+         input.employeeCode ?? null, input.branchId ?? req.actor.branchId,
+         input.supplierId ?? null, input.driverId ?? null, hash,
+         input.mustChange, req.actor.userId]);
+
+      await tx.query(
+        `INSERT INTO user_role_assignments (company_id, user_id, role_id, created_by)
+         VALUES ($1,$2,$3,$4)`,
+        [req.actor.companyId, rows[0].id, input.roleId, req.actor.userId]);
+
+      await emit(tx, req.actor, 'user', rows[0].id, 'user.created_with_password',
+        { email, role: role.rows[0].name, mustChange: input.mustChange });
+
+      return {
+        ...rows[0], roleName: role.rows[0].name,
+        message: `${input.fullName} can sign in now as ${email}.`
+          + (input.mustChange ? ' They will be asked to choose their own password.' : ''),
+      };
+    });
+  }));
+
+/**
+ * Setting somebody else's password — for the person who has forgotten theirs
+ * and has no working email to receive a link on.
+ *
+ * Never returns the old password and never reveals whether one existed: this
+ * replaces, it does not read.
+ */
+mastersRouter.post('/users/:id/set-password', requires('admin.user.password'), h(async (req) => {
+    const input = body(z.object({
+      password: z.string().min(8, 'Use at least 8 characters'),
+      mustChange: z.boolean().default(true),
+    }), req.body);
+
+    if (req.params.id === req.actor.userId) {
+      /* Changing your own password requires the current one — that check is the
+       * whole protection against somebody who walked past an unlocked screen. */
+      throw ApiError.badRequest(
+        'Use "Change password" on your own profile — it asks for your current one first.');
+    }
+
+    const { rows } = await pool.query(
+      'SELECT id, full_name, email FROM users WHERE id = $1 AND company_id = $2',
+      [req.params.id, req.actor.companyId]);
+    const u = rows[0];
+    if (!u) throw ApiError.notFound('No such person');
+
+    const hash = await hashPassword(input.password);
+    return withTx(req.actor, async (tx) => {
+      await tx.query(
+        `UPDATE users SET password_hash = $2, password_changed_at = now(),
+                must_change_password = $3, status = 'ACTIVE',
+                failed_login_count = 0, locked_until = NULL, updated_at = now()
+          WHERE id = $1`,
+        [u.id, hash, input.mustChange]);
+      await emit(tx, req.actor, 'user', u.id, 'user.password_reset_by_admin',
+        { email: u.email });
+      return {
+        ok: true,
+        message: `${u.full_name} can sign in with the new password.`
+          + (input.mustChange ? ' They will be asked to change it.' : ''),
+      };
+    });
+  }));
 
 /** Re-issues the link — for an invite that expired, or one that never arrived. */
 mastersRouter.post('/users/:id/reinvite', requires('admin.rbac.manage'), h(async (req) => {

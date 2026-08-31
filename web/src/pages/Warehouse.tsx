@@ -35,6 +35,12 @@ const STAGE: Record<string, { label: string; tone: 'warn' | 'primary' | 'ok' | '
   COMPLETED:    { label: 'Booked in', tone: 'ok' },
 };
 
+/* The chain, in the order it actually happens. Sorting the Stage column reads
+   this rather than the label, because the labels are English sentences and
+   English sentences do not sort into a workflow. */
+const STAGE_ORDER = ['ARRIVED', 'WEIGHED', 'QC_PENDING', 'QC_COMPLETE',
+  'GRN_PENDING', 'COMPLETED', 'REJECTED_AT_GATE'];
+
 export function WarehouseIntakePage() {
   const nav = useNavigate();
   const { can } = useAuth();
@@ -91,14 +97,28 @@ export function WarehouseIntakePage() {
             rows={f.rows}
             rowTone={(g: any) => (g.status === 'ARRIVED' ? 'warn' : undefined)}
             cols={[
-              { key: 'v', head: 'Vehicle', render: (g: any) => (
+              { key: 'v', head: 'Vehicle', sort: (g: any) => g.vehicle_reg_captured, render: (g: any) => (
                 <div>
                   <b className="mono">{g.vehicle_reg_captured ?? '—'}</b>
                   <div className="small muted">{g.gate_no}{g.supplier_name ? ` · ${g.supplier_name}` : ''}</div>
                 </div>
               ) },
-              { key: 'w', head: 'Waiting', render: (g: any) => (
+              /* Sorts on the raw age in minutes, not on the words "3h ago" —
+                 which would order 9h before 3h because that is how strings
+                 compare. Longest wait first, which is the order the yard is
+                 actually worked in. */
+              { key: 'w', head: 'Waiting', desc: true,
+                sort: (g: any) => Number(g.age_minutes) || 0, render: (g: any) => (
                 <span className="small">{g.arrived_at ? ago(g.arrived_at) : '—'}</span>
+              ) },
+              /* Where the load is standing while quality look at it. Before
+                 this there was no answer to "which bay is gate 41 in" except
+                 asking whoever carried it. */
+              { key: 'bay', head: 'In QC bay', sort: (g: any) => g.qc_bay_code, render: (g: any) => (
+                g.qc_bay_code
+                  ? <div><b className="mono">{g.qc_bay_code}</b>
+                      <div className="small muted">{g.qc_parked_at ? ago(g.qc_parked_at) : ''}</div></div>
+                  : <span className="muted small">—</span>
               ) },
               { key: 'r', head: 'Readings', render: (g: any) => (
                 <div className="small">
@@ -111,7 +131,11 @@ export function WarehouseIntakePage() {
                   </Chip>
                 </div>
               ) },
-              { key: 's', head: 'Stage', render: (g: any) => {
+              { key: 's', head: 'Stage',
+                /* Sorted by where it is in the chain, not alphabetically —
+                   "Booked in" before "Waiting to be weighed" is no use to
+                   anybody standing in the yard. */
+                sort: (g: any) => STAGE_ORDER.indexOf(g.status), render: (g: any) => {
                 const st = STAGE[g.status] ?? { label: g.status, tone: 'neutral' as const };
                 return <Chip tone={st.tone as any}>{st.label}</Chip>;
               } },
@@ -145,6 +169,7 @@ export function WarehouseIntakePage() {
               title={f.active > 0 ? 'No vehicle matches those filters' : 'Nothing in the yard'}
               hint={f.active > 0 ? 'Clear a filter to widen the search.'
                 : 'Vehicles appear here once the gate has logged them in.'} />}
+            defaultSort="w"
           />
         </div>
       </div>

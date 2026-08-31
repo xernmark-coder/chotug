@@ -27,6 +27,282 @@ import { Icon } from '../components/icons';
  *                         packing and at audit.
  * ======================================================================== */
 
+/* ===========================================================================
+ * WHAT IT COSTS US, ALL IN — AND WHAT THAT MEANS IT HAS TO SELL FOR
+ *
+ *   "for every product it should calculate the total cost as its cost plus cost
+ *    to take it to warehouse and then send to centers. on this total cost the
+ *    admin should be able to set particular profit such as 20% and then selling
+ *    cost will be such that overall 20% profit will be there including
+ *    transport cost."
+ *
+ * The breakdown is shown rather than a single total, because the only useful
+ * reaction to "this has to sell at ₹94" is to see which of the four numbers
+ * made it ₹94 — and three of the four are things the business can change.
+ *
+ * None of them is typed. The purchase price comes off the batches, the overhead
+ * off what Finance actually paid, the outbound freight off what the trips to
+ * the shops actually cost. The one thing set by hand is the margin.
+ * ======================================================================== */
+function PricingPanel() {
+  const toast = useToast();
+  const { can } = useAuth();
+  const rows = useApi<any[]>('/masters/pricing');
+  const basis = useApi<any>('/masters/pricing/basis');
+  const [editing, setEditing] = useState<any>(null);
+
+  const canPrice = can('master.pricing.manage');
+  const o = basis.data?.overhead ?? {};
+  const ob = basis.data?.outbound ?? {};
+  const co = basis.data?.company ?? {};
+
+  const f = useFilters<any>(rows.data, {
+    search: (r: any) => [r.product_name, r.sku, r.category_name].filter(Boolean).join(' '),
+    facets: [
+      { key: 'c', label: 'category', of: (r: any) => r.category_name },
+      { key: 'm', label: 'margin', all: 'Any margin', of: (r: any) =>
+        (r.margin_is_own ? 'set on this product' : 'company default') },
+      { key: 'u', label: 'selling', all: 'Priced or not', of: (r: any) =>
+        (r.sell_price == null ? 'no price set'
+          : Number(r.sell_price) < Number(r.min_sell_price) ? 'below the floor'
+          : 'at or above the floor') },
+    ],
+    totals: [
+      { label: 'Stock', of: (r: any) => Number(r.qty_on_hand) || 0 },
+      { label: 'At cost', of: (r: any) =>
+        (Number(r.qty_on_hand) || 0) * (Number(r.total_cost) || 0), money: true },
+    ],
+  });
+
+  if (rows.loading || basis.loading) return <Loading />;
+
+  return (
+    <>
+      <ErrorBanner error={rows.error} />
+
+      {/* The two derived numbers, said out loud with what they were derived
+          from. A per-kilo overhead nobody can trace is a per-kilo overhead
+          nobody believes. */}
+      <div className="grid c3 mb">
+        <div className="card"><div className="card-body">
+          <div className="small muted">Running the place, per kg</div>
+          <div className="value" style={{ fontSize: 26, fontWeight: 700 }}>
+            {inr(o.overhead_per_kg, 2)}
+          </div>
+          <div className="small muted">
+            {inr(o.operating_spend, 0)} paid over {num(o.kg_handled, 0)} kg received
+            in {o.window_days ?? 30} days
+          </div>
+        </div></div>
+        <div className="card"><div className="card-body">
+          <div className="small muted">Getting it to the shops, per kg</div>
+          <div className="value" style={{ fontSize: 26, fontWeight: 700 }}>
+            {inr(ob.outbound_per_kg, 2)}
+          </div>
+          <div className="small muted">
+            {inr(ob.outbound_spend, 0)} on {num(ob.trips, 0)} trip(s) carrying{' '}
+            {num(ob.kg_moved, 0)} kg
+          </div>
+        </div></div>
+        <div className="card"><div className="card-body">
+          <div className="small muted">Profit we aim for</div>
+          <div className="value" style={{ fontSize: 26, fontWeight: 700 }}>
+            {num(co.default_margin_pct, 0)}%
+          </div>
+          <div className="small muted">
+            the company default, on the whole cost including both trips.
+            Change it in Settings, or per product below.
+          </div>
+        </div></div>
+      </div>
+
+      <div className="card"><div className="card-body tight">
+        <FilterBar f={f} placeholder="Search product, code, category" />
+        <FilterTotals f={f} noun="product" />
+        <DataTable
+          rows={f.rows}
+          defaultSort="t"
+          rowTone={(r: any) => (r.sell_price != null
+            && Number(r.sell_price) < Number(r.min_sell_price) ? 'crit' : undefined)}
+          cols={[
+            { key: 'p', head: 'Product', sort: (r: any) => r.product_name, render: (r: any) => (
+              <div className="row" style={{ gap: 8 }}>
+                <Icon name={r.icon ?? 'produce'} size={17} />
+                <div><b>{r.product_name}</b>
+                  <div className="small muted">{r.category_name} · {r.sku}</div></div>
+              </div>
+            ) },
+            { key: 'b', head: 'Bought at', num: true, desc: true,
+              sort: (r: any) => Number(r.cost_to_warehouse) || 0, render: (r: any) => (
+              <span>{inr(r.cost_to_warehouse, 2)}
+                <div className="small muted">per {r.base_uom?.toLowerCase() ?? 'kg'}</div></span>
+            ) },
+            { key: 'o', head: 'Handling', num: true, desc: true,
+              sort: (r: any) => Number(r.overhead_cost) || 0,
+              render: (r: any) => inr(r.overhead_cost, 2) },
+            { key: 'f', head: 'To the shop', num: true, desc: true,
+              sort: (r: any) => Number(r.cost_to_centre) || 0,
+              render: (r: any) => inr(r.cost_to_centre, 2) },
+            { key: 't', head: 'Total cost', num: true, desc: true,
+              sort: (r: any) => Number(r.total_cost) || 0, render: (r: any) => (
+              <b>{inr(r.total_cost, 2)}</b>
+            ) },
+            { key: 'm', head: 'Margin', num: true, desc: true,
+              sort: (r: any) => Number(r.margin_pct) || 0, render: (r: any) => (
+              <span>
+                {num(r.margin_pct, 0)}%
+                <div className="small muted">{r.margin_is_own ? 'its own' : 'company'}</div>
+              </span>
+            ) },
+            { key: 'w', head: 'Wastage', num: true,
+              sort: (r: any) => Number(r.wastage_pct) || 0, render: (r: any) =>
+              Number(r.wastage_pct) > 0
+                ? <span>{num(r.wastage_pct, 0)}%</span>
+                : <span className="muted">—</span> },
+            /* The number the whole table exists to produce. */
+            { key: 'x', head: 'Sell at least for', num: true, desc: true,
+              sort: (r: any) => Number(r.min_sell_price) || 0, render: (r: any) => (
+              <b style={{ fontSize: 15 }}>{inr(r.min_sell_price, 2)}</b>
+            ) },
+            { key: 'a', head: 'Actually selling at', num: true, desc: true,
+              sort: (r: any) => Number(r.sell_price ?? r.avg_sold_at) || 0, render: (r: any) => {
+              const at = r.sell_price ?? r.avg_sold_at;
+              if (at == null) return <span className="muted">—</span>;
+              const under = Number(at) < Number(r.min_sell_price);
+              return (
+                <span>
+                  <b>{inr(at, 2)}</b>
+                  <div className="small">
+                    {under
+                      ? <Chip tone="danger">below the floor</Chip>
+                      : <span className="muted">
+                          {r.sell_price != null ? 'list price' : 'last 30 days'}
+                        </span>}
+                  </div>
+                </span>
+              );
+            } },
+            { key: 'act', head: '', width: 90, render: (r: any) => canPrice
+              ? <button className="btn sm" onClick={() => setEditing(r)}>Price it</button>
+              : null },
+          ]}
+          empty={<Empty icon="🏷️"
+            title={f.active > 0 ? 'No product matches those filters' : 'No products yet'} />}
+        />
+      </div></div>
+
+      {editing ? (
+        <PriceModal row={editing} onClose={() => setEditing(null)}
+          onDone={(m) => { setEditing(null); rows.reload(); toast(m, 'ok'); }} />
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * Setting the margin on one product, with the floor price moving as it is
+ * typed. The number that matters is the one at the bottom, so it is shown
+ * before the button is pressed rather than after.
+ */
+function PriceModal({ row, onClose, onDone }: {
+  row: any; onClose: () => void; onDone: (m: string) => void;
+}) {
+  const [ownMargin, setOwnMargin] = useState(!!row.margin_is_own);
+  const [margin, setMargin] = useState(String(row.margin_pct ?? ''));
+  const [wastage, setWastage] = useState(String(row.wastage_pct ?? '0'));
+  const [sell, setSell] = useState(row.sell_price != null ? String(row.sell_price) : '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  const cost = Number(row.total_cost) || 0;
+  const w = Math.min(Math.max(Number(wastage) || 0, 0), 95);
+  const m = Number(margin) || 0;
+  /* The same arithmetic the database does, so the preview and the saved value
+     cannot disagree. The wastage DIVIDES: if a tenth is thrown away, the nine
+     tenths that sell have to carry the whole crate. */
+  const floor = cost / Math.max(1 - w / 100, 0.05) * (1 + m / 100);
+  const belowFloor = sell !== '' && Number(sell) < floor;
+
+  return (
+    <Modal
+      title={`Price ${row.product_name}`}
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy} onClick={async () => {
+          setBusy(true); setError(null);
+          try {
+            const r = await api.put<any>(`/masters/products/${row.product_id}/pricing`, {
+              minMarginPct: ownMargin ? Number(margin) : null,
+              sellPrice: sell === '' ? null : Number(sell),
+              defaultWastagePct: Number(wastage) || 0,
+            });
+            onDone(r.message);
+          } catch (e: any) { setError(e); } finally { setBusy(false); }
+        }}>Save</button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+
+      <div className="card mb"><div className="card-body">
+        <table className="data" style={{ minWidth: 0 }}>
+          <tbody>
+            <tr><td>What we paid for it</td>
+              <td className="num mono">{inr(row.cost_to_warehouse, 2)}</td></tr>
+            <tr><td>Handling — wages, power, cold store, rent</td>
+              <td className="num mono">{inr(row.overhead_cost, 2)}</td></tr>
+            <tr><td>Carrying it out to the shops</td>
+              <td className="num mono">{inr(row.cost_to_centre, 2)}</td></tr>
+            <tr><td><b>Total cost per {row.base_uom?.toLowerCase() ?? 'kg'}</b></td>
+              <td className="num mono"><b>{inr(cost, 2)}</b></td></tr>
+          </tbody>
+        </table>
+      </div></div>
+
+      <label className="row mb" style={{ gap: 8, cursor: 'pointer' }}>
+        <input type="checkbox" style={{ width: 17, height: 17 }}
+          checked={ownMargin} onChange={(e) => setOwnMargin(e.target.checked)} />
+        <span className="small">
+          Give this product its own profit target.
+          <span className="muted">
+            {' '}Off means it follows the company default, and moves when that moves.
+          </span>
+        </span>
+      </label>
+
+      <div className="grid c2">
+        <Field label="Profit on top of total cost" hint="20 means twenty per cent.">
+          <input type="number" min={0} max={500} value={margin} disabled={!ownMargin}
+            onChange={(e) => setMargin(e.target.value)} />
+        </Field>
+        <Field label="Wastage we expect"
+          hint="What gets thrown away. The rest has to carry its cost.">
+          <input type="number" min={0} max={95} value={wastage}
+            onChange={(e) => setWastage(e.target.value)} />
+        </Field>
+      </div>
+
+      <div className={`banner ${belowFloor ? 'danger' : 'ok'} mb`}>
+        <span><Icon name={belowFloor ? 'alert' : 'check'} size={16} /></span>
+        <div>
+          <b>Sell at {inr(floor, 2)} or more</b>
+          <div className="small">
+            to make {num(m, 0)}% on a total cost of {inr(cost, 2)}
+            {w > 0 ? `, with ${num(w, 0)}% thrown away` : ''}.
+          </div>
+        </div>
+      </div>
+
+      <Field label="List price (optional)"
+        hint="Leave it empty to sell off the floor price above.">
+        <input type="number" min={0} step="0.01" value={sell}
+          onChange={(e) => setSell(e.target.value)}
+          placeholder={floor.toFixed(2)} />
+      </Field>
+    </Modal>
+  );
+}
+
 const ICON_CHOICES = [
   'mango', 'apple', 'banana', 'grapes', 'tomato', 'onion', 'potato',
   'leafy', 'cauliflower', 'cucumber', 'capsicum', 'produce', 'basket', 'sprout',
@@ -39,7 +315,7 @@ export function CataloguePage() {
   const prods = useApi<any[]>('/masters/products');
   const links = useApi<any[]>('/masters/supplier-products');
 
-  const [tab, setTab] = useState<'tree' | 'codes'>('tree');
+  const [tab, setTab] = useState<'tree' | 'codes' | 'price'>('tree');
   const [addCat, setAddCat] = useState<any>(null);      // parent, or {} for top level
   const [addProd, setAddProd] = useState<any>(null);    // the category it goes in
   const [addLink, setAddLink] = useState(false);
@@ -77,7 +353,10 @@ export function CataloguePage() {
     const isOpen = open[c.id] ?? depth < 1;
     return (
       <React.Fragment key={c.id}>
-        <div className="cat-row" style={{ paddingLeft: 14 + depth * 26 }}>
+        {/* The indent is a CSS variable rather than a pixel padding so a phone
+            can shrink the step — a four-deep tree indented 26px a level eats
+            half a 390px screen before the name starts. */}
+        <div className="cat-row" style={{ '--depth': depth } as React.CSSProperties}>
           <button className="cat-toggle" onClick={() => setOpen((s) => ({ ...s, [c.id]: !isOpen }))}
             disabled={!kids.length && !mine.length}>
             {kids.length || mine.length ? (isOpen ? '−' : '+') : '·'}
@@ -101,7 +380,7 @@ export function CataloguePage() {
         {isOpen ? (
           <>
             {mine.map((p: any) => (
-              <div key={p.id} className="prod-row" style={{ paddingLeft: 52 + depth * 26 }}>
+              <div key={p.id} className="prod-row" style={{ '--depth': depth } as React.CSSProperties}>
                 <Icon name={p.effective_icon ?? p.icon ?? 'produce'} size={17} />
                 <span>{p.name}</span>
                 {p.name_hi ? <span className="small muted">{p.name_hi}</span> : null}
@@ -141,7 +420,12 @@ export function CataloguePage() {
         <button className={`tab ${tab === 'codes' ? 'active' : ''}`} onClick={() => setTab('codes')}>
           Supplier codes {links.data?.length ? `(${links.data.length})` : ''}
         </button>
+        <button className={`tab ${tab === 'price' ? 'active' : ''}`} onClick={() => setTab('price')}>
+          Cost &amp; price
+        </button>
       </div>
+
+      {tab === 'price' ? <PricingPanel /> : null}
 
       {tab === 'tree' ? (
         <div className="card">
@@ -158,7 +442,7 @@ export function CataloguePage() {
             </div>
           </div>
         </div>
-      ) : (
+      ) : tab === 'codes' ? (
         <div className="card"><div className="card-body tight">
           <FilterBar f={fLinks} placeholder="Search product, supplier, code" />
           <FilterTotals f={fLinks} noun="code" />
@@ -191,7 +475,7 @@ export function CataloguePage() {
                 : 'Record what each supplier calls a product and their delivery note reads itself.'} />}
           />
         </div></div>
-      )}
+      ) : null}
 
       {addCat ? (
         <CategoryModal parent={addCat.parent} onClose={() => setAddCat(null)}

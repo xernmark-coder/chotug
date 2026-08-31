@@ -104,16 +104,41 @@ export type IssueInput = z.infer<typeof IssueIn>;
 
 /** Gates that are about the REQUEST rather than the posting. */
 function assertIssueAllowed(actor: Actor, input: IssueInput) {
-  // Anything that is not a sale destroys value with nothing coming back, so it
-  // needs both a written reason and the higher permission.
+  /* PRODUCE IS SOLD AS BOXES, NEVER AS LOOSE KILOS.
+   *
+   *   "they can sell in packed boxes only, so remove that issue directly —
+   *    they will only sell the packed products from the warehouse."
+   *
+   * A loose sale skipped the packing bench, and with it the grade given to
+   * that box, its label, the shelf it came off and the price printed on it.
+   * The same crate could leave the building by two routes with two different
+   * records, and the bench was left holding labels for fruit already sold.
+   *
+   * This guard sits on the ROUTE, not in postIssue(): the pack sale calls
+   * postIssue directly and writes exactly this kind of row — it just does it
+   * with a box behind every kilo. One rule, one place, and the honest path
+   * stays open.
+   */
+  if (input.reason === 'SALE') {
+    throw ApiError.rule(
+      'Stock is sold as packed boxes. Pack and grade it on the packing bench first, '
+      + 'then sell the boxes — the price, the grade and the label all come with them.');
+  }
+
+  // Writing stock off destroys value with nothing coming back, so it needs both
+  // a written reason and the higher permission.
   if (WRITE_OFF_REASONS.has(input.reason)) {
     if (!actor.permissions.has('inventory.stock.writeoff')
         && !actor.permissions.has('admin.override')) {
       throw ApiError.forbidden(
-        'Writing stock off as wastage or an adjustment needs a manager. You can still record a sale, transfer, return or consumption.');
+        'Writing stock off as wastage or an adjustment needs a manager. '
+        + 'You can still transfer it, return it or record it as consumed.');
     }
   }
-  if (input.reason !== 'SALE' && !input.note?.trim()) {
+  /* Every reason that reaches here moves stock without money coming back, so
+   * every one of them needs somebody's account of why. (A sale would have been
+   * the exception; sales no longer come through this door.) */
+  if (!input.note?.trim()) {
     throw ApiError.rule(
       `Stock leaving as ${input.reason.replace(/_/g, ' ').toLowerCase()} needs a written reason.`);
   }
@@ -658,6 +683,27 @@ function packCode() {
   return out;
 }
 
+/**
+ * The box sizes the shops are actually waiting for.
+ *
+ *   "if any center wants boxes of different kg they can make request
+ *    accordingly to send stock to them like 20 5kg boxes of apples."
+ *
+ * A request that only reaches the buyer is half a request: the buyer decides
+ * whether to buy the apples, but somebody at the bench still has to decide what
+ * size to pack them into, and until this existed they decided it by packing
+ * whatever they packed yesterday. This puts the ask in front of the person
+ * holding the box.
+ */
+inventoryRouter.get('/pack-demand', h(async (req) =>
+  query(req.actor,
+    `SELECT * FROM v_pack_size_demand
+      WHERE company_id = $1
+        AND ($2::uuid IS NULL OR warehouse_id = $2)
+        AND ($3::uuid IS NULL OR product_id = $3)
+      ORDER BY needed_by NULLS LAST, centre_name, product_name`,
+    [req.actor.companyId, req.query.warehouseId ?? null, req.query.productId ?? null])));
+
 /** What can still be packed: on-hand batches with how much is already packed. */
 inventoryRouter.get('/packable', h(async (req) =>
   query(req.actor,
@@ -746,17 +792,24 @@ inventoryRouter.get('/pack-bench/:batchId', h(async (req) => {
             b.landed_rate, b.landed_rate_per_kg,
             COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date,
             COALESCE((SELECT SUM(pk.qty) FROM packs pk
-                       WHERE pk.batch_id = b.id AND pk.status = 'IN_STOCK'), 0) AS packed_qty
+                       WHERE pk.batch_id = b.id AND pk.status = 'IN_STOCK'), 0) AS packed_qty,
+            /* Selling now happens only from a packed box, so the price on the
+             * label IS the selling price — this bench is where it is decided.
+             * The person setting it needs the floor in front of them, or they
+             * are guessing against a cost nobody showed them. */
+            pr.overhead_per_kg, pr.cost_to_centre, pr.true_cost, pr.min_sell_price,
+            pr.margin_pct, pr.wastage_pct
        FROM stock_balances sb
        JOIN batches b ON b.id = sb.batch_id
        JOIN products p ON p.id = sb.product_id
        JOIN warehouses w ON w.id = sb.warehouse_id
+       LEFT JOIN v_batch_pricing pr ON pr.batch_id = b.id
       WHERE b.id = $1 AND sb.company_id = $2
       LIMIT 1`,
     [req.params.batchId, req.actor.companyId]);
   if (!b) throw ApiError.notFound('That batch is not in stock anywhere.');
 
-  const [byGrade, recent, bins] = await Promise.all([
+  const [byGrade, recent, bins, wanted] = await Promise.all([
     query(req.actor,
       `SELECT grade, count(*)::int AS packs, SUM(qty) AS qty,
               SUM(COALESCE(weight_kg,0)) AS weight_kg,
@@ -780,6 +833,12 @@ inventoryRouter.get('/pack-bench/:batchId', h(async (req) => {
          JOIN zones z ON z.id = r.zone_id
         WHERE bn.company_id = $1 AND bn.is_active AND z.warehouse_id = $2
         ORDER BY r.code, bn.code`, [req.actor.companyId, b.warehouse_id]),
+    /* Which shops asked for which size of this product. Packing 2 kg bags
+     * while three centres are waiting for 5 kg boxes is work done twice. */
+    query(req.actor,
+      `SELECT * FROM v_pack_size_demand
+        WHERE company_id = $1 AND product_id = $2
+        ORDER BY needed_by NULLS LAST`, [req.actor.companyId, b.product_id]),
   ]);
 
   /* Packs can outlive the stock they were made from: issuing a batch to a
@@ -795,7 +854,7 @@ inventoryRouter.get('/pack-bench/:batchId', h(async (req) => {
     ...b,
     unpacked: Math.max(0, raw),
     overPacked: raw < 0 ? Math.abs(raw) : 0,
-    byGrade, recent, bins,
+    byGrade, recent, bins, wanted,
   };
 }));
 
@@ -1274,6 +1333,11 @@ inventoryRouter.post('/packs/sell', requires('inventory.stock.issue'), h(async (
       `UPDATE packs SET status='SOLD', sold_issue_id=$2, sold_at=now()
         WHERE id = ANY($1::uuid[])`,
       [input.packIds, issue.id]);
+
+    /* Recorded rather than assumed. Every sale is a box sale now, but a report
+     * that has to infer that from a join is a report that will quietly stop
+     * being true the day somebody adds a second sale path. */
+    await tx.query(`UPDATE stock_issues SET from_packs = true WHERE id = $1`, [issue.id]);
 
     await emit(tx, req.actor, 'stock_issue', issue.id, 'packs.sold', {
       issueNo: issue.issue_no, packs: packs.map((k: any) => k.code),

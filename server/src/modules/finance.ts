@@ -193,6 +193,160 @@ export async function createRequest(tx: any, actor: any, r: {
   return pr;
 }
 
+/* ---------------------------------------------------------------------------
+ * ONE PAYABLE PER ORDER, FROM THE MOMENT WE BUY.
+ *
+ * The client's rule: "suppose we buy any product, it should immediately come in
+ * expense of the finance panel". Before this, Finance learnt about a purchase
+ * when somebody filed an invoice against it — which on a cash trade might be
+ * days after the money was promised, and on an order paid at confirmation was
+ * simply too late to be of any use.
+ *
+ * The hazard in raising it early is raising it TWICE: the order queues a claim,
+ * then the invoice queues a second one for the same goods, and the business
+ * pays for one lorry-load of mango twice. So there is exactly one payable per
+ * order, and when the invoice turns up the standing claim is MOVED onto it
+ * rather than a new one being made.
+ *
+ * Everything that makes an order payable goes through here.
+ * ------------------------------------------------------------------------ */
+
+/** The one live claim against an order, whichever document it hangs off. */
+export async function orderPayable(tx: any, companyId: string, poId: string) {
+  const { rows } = await tx.query(
+    `SELECT pr.* FROM payment_requests pr
+      WHERE pr.company_id = $1 AND pr.status <> 'CANCELLED'
+        AND ((pr.source_type = 'purchase_order' AND pr.source_id = $2)
+          OR (pr.source_type = 'supplier_invoice' AND pr.source_id IN (
+                SELECT id FROM supplier_invoices
+                 WHERE po_id = $2 AND status <> 'CANCELLED')))
+      ORDER BY pr.requested_at LIMIT 1`,
+    [companyId, poId]);
+  return rows[0] ?? null;
+}
+
+/**
+ * Make sure Finance is holding a claim for this order, and that it is holding
+ * exactly one.
+ *
+ * Called when the order is confirmed (the moment we have committed to spend the
+ * money) and again whenever an invoice arrives for it. The second call moves
+ * the claim onto the invoice and corrects the amount to what was actually
+ * billed — but only while nothing has been paid against it, because re-pointing
+ * a claim that has money on it would detach that payment from the document it
+ * settled.
+ */
+export async function ensureOrderPayable(tx: any, actor: any, o: {
+  poId: string; poNo: string; branchId: string; supplierId: string;
+  supplierName: string; amount: number; warehouseId?: string | null;
+  dueDate?: string | null; priority?: string;
+  /** The invoice this order is now billed under, if one has been filed. */
+  invoiceId?: string | null; invoiceNo?: string | null;
+  note?: string;
+}) {
+  const standing = await orderPayable(tx, actor.companyId, o.poId);
+
+  if (!standing) {
+    return createRequest(tx, actor, {
+      kind: o.invoiceId ? 'SUPPLIER_INVOICE' : 'ADVANCE',
+      amount: o.amount,
+      payeeName: o.supplierName,
+      branchId: o.branchId,
+      supplierId: o.supplierId,
+      warehouseId: o.warehouseId ?? null,
+      dueDate: o.dueDate ?? undefined,
+      priority: o.priority ?? 'NORMAL',
+      note: o.note ?? (o.invoiceNo ? `Invoice ${o.invoiceNo} for ${o.poNo}` : `${o.poNo} — ordered`),
+      sourceType: o.invoiceId ? 'supplier_invoice' : 'purchase_order',
+      sourceId: o.invoiceId ?? o.poId,
+      systemRaised: true,
+    });
+  }
+
+  // Confirmed twice, or re-confirmed. The claim already says everything.
+  if (!o.invoiceId) return standing;
+
+  if (standing.source_type === 'supplier_invoice') {
+    // The same invoice again — a retry, or a screen that saved twice.
+    if (standing.source_id === o.invoiceId) return standing;
+
+    /* A DIFFERENT invoice against the same order. That is not a duplicate: a
+     * part-delivered order is legitimately billed twice, and folding the second
+     * bill into the first would leave the supplier unpaid for half the load
+     * with nothing on any screen to say why. It gets its own claim. */
+    return createRequest(tx, actor, {
+      kind: 'SUPPLIER_INVOICE',
+      amount: o.amount,
+      payeeName: o.supplierName,
+      branchId: o.branchId,
+      supplierId: o.supplierId,
+      warehouseId: o.warehouseId ?? null,
+      dueDate: o.dueDate ?? undefined,
+      priority: o.priority ?? 'NORMAL',
+      note: o.note ?? `Invoice ${o.invoiceNo} for ${o.poNo}`,
+      sourceType: 'supplier_invoice',
+      sourceId: o.invoiceId,
+      systemRaised: true,
+    });
+  }
+
+  if (Number(standing.paid_amount) > 0.001 || standing.status === 'PAID') {
+    /* Money has already moved against the order. Leave the claim where the
+     * payment can be found and note the invoice on it instead — a paid advance
+     * re-labelled as an unpaid invoice is how a supplier gets paid twice. */
+    await tx.query(
+      `UPDATE payment_requests
+          SET note = COALESCE(note, '') || $2, updated_by = $3
+        WHERE id = $1`,
+      [standing.id, ` · billed on invoice ${o.invoiceNo}`, actor.userId]);
+    return standing;
+  }
+
+  const { rows } = await tx.query(
+    `UPDATE payment_requests
+        SET source_type = 'supplier_invoice', source_id = $2,
+            kind = 'SUPPLIER_INVOICE',
+            amount = $3,
+            due_date = COALESCE($4::date, due_date),
+            note = $5,
+            updated_by = $6
+      WHERE id = $1 RETURNING *`,
+    [standing.id, o.invoiceId, money(o.amount), o.dueDate ?? null,
+     o.note ?? `Invoice ${o.invoiceNo} for ${o.poNo}`, actor.userId]);
+
+  await emit(tx, actor, 'payment_request', standing.id, 'payment.rebilled', {
+    requestNo: standing.request_no, poNo: o.poNo, invoiceNo: o.invoiceNo,
+    was: Number(standing.amount), now: o.amount,
+  });
+  return rows[0];
+}
+
+/**
+ * The goods went without the money. The claim is no longer a proposal Finance
+ * may turn down — it is a debt against produce already on our floor.
+ *
+ * Kept here rather than in the supplier module because a due is a Finance fact:
+ * the desk's whole due list is `became_due_at IS NOT NULL`, and only one piece
+ * of code may set it.
+ */
+export async function markPayableDue(tx: any, actor: any, requestId: string, reason: string) {
+  const { rows } = await tx.query(
+    `UPDATE payment_requests
+        SET became_due_at = COALESCE(became_due_at, now()),
+            due_reason = COALESCE(due_reason, $2),
+            priority = CASE WHEN priority IN ('LOW','NORMAL') THEN 'HIGH' ELSE priority END,
+            updated_by = $3
+      WHERE id = $1 AND status NOT IN ('PAID','CANCELLED')
+      RETURNING *`,
+    [requestId, reason, actor.userId]);
+  const pr = rows[0];
+  if (!pr) return null;
+
+  await emit(tx, actor, 'payment_request', pr.id, 'payment.became_due',
+    { requestNo: pr.request_no, amount: Number(pr.amount), reason });
+  return pr;
+}
+
 /** The inbox, and everything already dealt with. */
 financeRouter.get('/requests', h(async (req) => {
   /* What a wage bill is for, and who asked for it, is Finance's business.
@@ -261,6 +415,27 @@ financeRouter.get('/requests', h(async (req) => {
      req.query.from || null, req.query.to || null,
      !seesAll || req.query.mine ? req.actor.userId : '']);
 }));
+
+/* ---------------------------------------------------------------------------
+ * WHAT WE OWE FOR GOODS WE ALREADY HAVE.
+ *
+ * A due is not another queue to work through — it is the subset of the pay
+ * queue where the argument is over. The goods are on our floor; the only
+ * question left is when the money goes out, which is why this list is ordered
+ * by how late it is rather than by who asked first.
+ * ------------------------------------------------------------------------ */
+financeRouter.get('/dues', requires('finance.due.view'), h(async (req) =>
+  query(req.actor,
+    `SELECT d.*, s.phone AS supplier_phone, s.payment_terms_days
+       FROM v_supplier_dues d
+       LEFT JOIN suppliers s ON s.id = d.supplier_id
+      WHERE d.company_id = $1
+        AND ($2 = '' OR d.supplier_id = $2::uuid)
+        AND ($3 = '' OR ($3 = 'overdue') = d.overdue)
+      ORDER BY d.overdue DESC, d.due_date NULLS LAST, d.became_due_at
+      LIMIT 300`,
+    [req.actor.companyId, String(req.query.supplierId ?? ''),
+     String(req.query.only ?? '')])));
 
 financeRouter.get('/requests/:id', h(async (req) => {
   const [pr] = await query(req.actor,
@@ -624,6 +799,237 @@ financeRouter.get('/receipts', h(async (req) => {
 /* ===========================================================================
  * WHAT FINANCE OPENS IN THE MORNING
  * ======================================================================== */
+/* ===========================================================================
+ * WHERE THE MONEY CAME FROM, AND WHERE IT WENT
+ *
+ *   "there will be a page on which there will be total graph of where money
+ *    went from where it came, also the latest money went and came should come
+ *    there, it should update with every money transaction like payment to
+ *    vehical, driver, any other cost. every income that warehouse has got
+ *    there actually."
+ *
+ * The desk already answers "what do I have to do next". This answers the other
+ * question an owner asks, which the desk deliberately does not: what happened
+ * to the money.
+ *
+ * Two rules shape what is counted.
+ *
+ * ONE: this reports CASH, not promises. A sale that has been billed but not
+ * collected is not income yet, and an invoice sitting in the inbox is not
+ * spend yet. Both are real and both are shown — but beside the cash figures,
+ * never inside them. The commonest way a money dashboard lies is by adding
+ * what is owed to what arrived.
+ *
+ * TWO: every rupee that moved appears exactly once. Payments and receipts are
+ * the only two things that move money, so those two tables are the whole of
+ * it — and anything that spends money WITHOUT passing through them is called
+ * out rather than quietly folded in, because that is a hole in the process and
+ * hiding it is how it stays open.
+ * ======================================================================== */
+financeRouter.get('/money-flow', requires('finance.expense.view'), h(async (req) => {
+  const days = Math.min(365, Math.max(1, Number(req.query.days ?? 30)));
+  const p = [req.actor.companyId, String(days)];
+
+  const [
+    totals, sources, destinations, modesIn, modesOut, daily, latest, context,
+  ] = await Promise.all([
+    /* The two figures the page leads with. Cash only: `payments` is money that
+     * left, `money_receipts` that Finance has confirmed is money that landed. */
+    query(req.actor,
+      `SELECT
+         COALESCE((SELECT SUM(amount) FROM payments
+                    WHERE company_id=$1 AND status='POSTED'
+                      AND paid_at > now() - ($2 || ' days')::interval), 0)        AS out_amount,
+         (SELECT count(*) FROM payments
+           WHERE company_id=$1 AND status='POSTED'
+             AND paid_at > now() - ($2 || ' days')::interval)::int                AS out_count,
+         COALESCE((SELECT SUM(COALESCE(confirmed_amount, amount)) FROM money_receipts
+                    WHERE company_id=$1 AND status IN ('CONFIRMED','DISPUTED')
+                      AND received_on > CURRENT_DATE - $2::int), 0)               AS in_amount,
+         (SELECT count(*) FROM money_receipts
+           WHERE company_id=$1 AND status IN ('CONFIRMED','DISPUTED')
+             AND received_on > CURRENT_DATE - $2::int)::int                       AS in_count`,
+      p),
+
+    /* WHERE IT CAME FROM. A centre handing over the day's takings and a
+     * customer paying an invoice are different kinds of income and the owner
+     * reads them differently, so they are not one bar called "receipts". */
+    query(req.actor,
+      `SELECT CASE mr.source
+                WHEN 'CENTRE'   THEN COALESCE(w.name, 'A centre')
+                WHEN 'CUSTOMER' THEN 'Customers'
+                ELSE 'Other income' END                       AS label,
+              CASE mr.source WHEN 'CENTRE' THEN 'home'
+                             WHEN 'CUSTOMER' THEN 'people'
+                             ELSE 'coins' END                 AS icon,
+              mr.source                                       AS kind,
+              SUM(COALESCE(mr.confirmed_amount, mr.amount))   AS amount,
+              count(*)::int                                   AS movements
+         FROM money_receipts mr
+         LEFT JOIN warehouses w ON w.id = mr.warehouse_id
+        WHERE mr.company_id = $1 AND mr.status IN ('CONFIRMED','DISPUTED')
+          AND mr.received_on > CURRENT_DATE - $2::int
+        GROUP BY 1, 2, 3
+        ORDER BY amount DESC`,
+      p),
+
+    /* WHERE IT WENT. The expense category is the honest label where there is
+     * one; where there is not, the kind of claim it was — said in English,
+     * because "SUPPLIER_INVOICE" is a database word and this is a page an
+     * owner reads. Transport and fuel are the ones the client named (the
+     * vehicle, the driver) and they fall out of this naturally. */
+    query(req.actor,
+      `SELECT COALESCE(ec.name, CASE pr.kind
+                WHEN 'SUPPLIER_INVOICE' THEN 'Paid to suppliers'
+                WHEN 'WAGES'            THEN 'Wages'
+                WHEN 'TRANSPORT'        THEN 'Transport & freight'
+                WHEN 'ADVANCE'          THEN 'Advances'
+                WHEN 'REFUND'           THEN 'Refunds'
+                ELSE initcap(replace(lower(pr.kind), '_', ' ')) END)  AS label,
+              COALESCE(ec.icon, CASE pr.kind
+                WHEN 'SUPPLIER_INVOICE' THEN 'truckIn'
+                WHEN 'WAGES'            THEN 'people'
+                WHEN 'TRANSPORT'        THEN 'truck'
+                ELSE 'receipt' END)                                   AS icon,
+              SUM(pay.amount)                                         AS amount,
+              count(*)::int                                           AS movements
+         FROM payments pay
+         JOIN payment_requests pr ON pr.id = pay.request_id
+         LEFT JOIN expense_categories ec ON ec.id = pr.expense_category_id
+        WHERE pay.company_id = $1 AND pay.status = 'POSTED'
+          AND pay.paid_at > now() - ($2 || ' days')::interval
+        GROUP BY 1, 2
+        ORDER BY amount DESC`,
+      p),
+
+    query(req.actor,
+      `SELECT mode, SUM(COALESCE(confirmed_amount, amount)) AS amount, count(*)::int AS movements
+         FROM money_receipts
+        WHERE company_id=$1 AND status IN ('CONFIRMED','DISPUTED')
+          AND received_on > CURRENT_DATE - $2::int
+        GROUP BY mode ORDER BY amount DESC`, p),
+
+    query(req.actor,
+      `SELECT mode, SUM(amount) AS amount, count(*)::int AS movements
+         FROM payments
+        WHERE company_id=$1 AND status='POSTED'
+          AND paid_at > now() - ($2 || ' days')::interval
+        GROUP BY mode ORDER BY amount DESC`, p),
+
+    /* One row per day whether or not anything happened, so a quiet week reads
+     * as a flat run rather than as missing data. */
+    query(req.actor,
+      `SELECT d::date::text AS date,
+              COALESCE((SELECT SUM(COALESCE(mr.confirmed_amount, mr.amount))
+                          FROM money_receipts mr
+                         WHERE mr.company_id=$1 AND mr.status IN ('CONFIRMED','DISPUTED')
+                           AND mr.received_on = d::date), 0) AS in_amount,
+              COALESCE((SELECT SUM(pay.amount) FROM payments pay
+                         WHERE pay.company_id=$1 AND pay.status='POSTED'
+                           AND pay.paid_at::date = d::date), 0) AS out_amount
+         FROM generate_series(CURRENT_DATE - ($2::int - 1), CURRENT_DATE, interval '1 day') d
+        ORDER BY d`, p),
+
+    /* THE LATEST MOVEMENTS — both directions in one list, newest first.
+     *
+     * Two tables, one feed. Reading them separately means holding two clocks in
+     * your head to answer "what has happened today", which is the question this
+     * list exists for. */
+    query(req.actor,
+      /* Windowed to the same period as everything above it. The first version
+       * was not, and the feed's own totals strip then disagreed with the
+       * headline figures by ₹38,000 — two numbers for the same thing on one
+       * page, which is worse than either number being missing. */
+      `(SELECT pay.paid_at                              AS at,
+               'OUT'                                    AS direction,
+               pay.amount                               AS amount,
+               pay.mode                                 AS mode,
+               pay.transaction_ref                      AS reference,
+               pay.payment_no                           AS doc_no,
+               pr.payee_name                            AS party,
+               COALESCE(ec.name, CASE pr.kind
+                 WHEN 'SUPPLIER_INVOICE' THEN 'Paid to suppliers'
+                 WHEN 'WAGES'            THEN 'Wages'
+                 WHEN 'TRANSPORT'        THEN 'Transport & freight'
+                 ELSE initcap(replace(lower(pr.kind), '_', ' ')) END) AS what,
+               pr.note                                  AS note,
+               u.full_name                              AS by_name,
+               w.name                                   AS place,
+               pay.status                               AS status
+          FROM payments pay
+          JOIN payment_requests pr ON pr.id = pay.request_id
+          LEFT JOIN expense_categories ec ON ec.id = pr.expense_category_id
+          LEFT JOIN users u ON u.id = pay.paid_by
+          LEFT JOIN warehouses w ON w.id = pr.warehouse_id
+         WHERE pay.company_id = $1
+           AND pay.paid_at > now() - ($2 || ' days')::interval)
+       UNION ALL
+       (SELECT COALESCE(mr.confirmed_at, mr.created_at) AS at,
+               'IN'                                     AS direction,
+               COALESCE(mr.confirmed_amount, mr.amount) AS amount,
+               mr.mode                                  AS mode,
+               mr.transaction_ref                       AS reference,
+               mr.receipt_no                            AS doc_no,
+               mr.payer_name                            AS party,
+               CASE mr.source WHEN 'CENTRE' THEN 'Takings from a centre'
+                              WHEN 'CUSTOMER' THEN 'Paid by a customer'
+                              ELSE 'Other income' END   AS what,
+               mr.note                                  AS note,
+               COALESCE(cu.full_name, du.full_name)     AS by_name,
+               w.name                                   AS place,
+               mr.status                                AS status
+          FROM money_receipts mr
+          LEFT JOIN warehouses w ON w.id = mr.warehouse_id
+          LEFT JOIN users cu ON cu.id = mr.confirmed_by
+          LEFT JOIN users du ON du.id = mr.declared_by
+         WHERE mr.company_id = $1
+           AND mr.received_on > CURRENT_DATE - $2::int)
+       ORDER BY at DESC NULLS LAST
+       LIMIT 200`, p),
+
+    /* What is true but is NOT cash, kept separate from everything above.
+     *
+     * The last of these is the uncomfortable one: money spent against a crop
+     * that never passed through this desk at all. The client's rule is that
+     * every rupee leaves through Finance; this is the measure of how far that
+     * is from true, and it is on the page precisely so it cannot be ignored. */
+    query(req.actor,
+      `SELECT
+         COALESCE((SELECT SUM(si.total_value) FROM stock_issues si
+                    WHERE si.company_id=$1 AND si.reason='SALE' AND si.status <> 'CANCELLED'
+                      AND si.issue_date > CURRENT_DATE - $2::int), 0)          AS revenue_booked,
+         COALESCE((SELECT SUM(mr.amount) FROM money_receipts mr
+                    WHERE mr.company_id=$1 AND mr.status='DECLARED'), 0)       AS awaiting_confirmation,
+         (SELECT count(*) FROM money_receipts
+           WHERE company_id=$1 AND status='DECLARED')::int                     AS awaiting_count,
+         COALESCE((SELECT SUM(pr.amount - pr.paid_amount) FROM payment_requests pr
+                    WHERE pr.company_id=$1
+                      AND pr.status IN ('REQUESTED','VERIFIED','PART_PAID')),0) AS owed_out,
+         COALESCE((SELECT SUM(fe.amount) FROM farm_expenses fe
+                    WHERE fe.company_id=$1
+                      AND fe.expense_date > CURRENT_DATE - $2::int), 0)        AS off_desk_spend,
+         (SELECT count(*) FROM farm_expenses
+           WHERE company_id=$1 AND expense_date > CURRENT_DATE - $2::int)::int AS off_desk_count`,
+      p),
+  ]);
+
+  const t = totals[0] ?? {};
+  return {
+    windowDays: days,
+    totals: {
+      in: Number(t.in_amount ?? 0),
+      out: Number(t.out_amount ?? 0),
+      net: round(Number(t.in_amount ?? 0) - Number(t.out_amount ?? 0), 2),
+      inCount: Number(t.in_count ?? 0),
+      outCount: Number(t.out_count ?? 0),
+    },
+    sources, destinations,
+    byMode: { in: modesIn, out: modesOut },
+    daily, latest,
+    context: context[0] ?? {},
+  };
+}));
+
 financeRouter.get('/overview', requires('finance.expense.view'), h(async (req) => {
   const from = (req.query.from as string) || null;
   const to = (req.query.to as string) || null;
@@ -651,7 +1057,22 @@ financeRouter.get('/overview', requires('finance.expense.view'), h(async (req) =
                     AND ($3::date IS NULL OR mr.received_on <= $3::date)),0)                    AS collected,
        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.company_id=$1
                   AND p.status='POSTED' AND p.paid_at::date = CURRENT_DATE),0)                  AS paid_today,
-       COALESCE((SELECT SUM(ps.balance) FROM payment_status ps WHERE ps.company_id=$1),0)       AS supplier_outstanding`,
+       COALESCE((SELECT SUM(ps.balance) FROM payment_status ps WHERE ps.company_id=$1),0)       AS supplier_outstanding,
+       /* Goods already taken in and not yet paid for. Separated from the rest
+        * of the pay queue because these are not decisions any more — the
+        * produce is on our floor and the only question is when. */
+       (SELECT count(*) FROM v_supplier_dues WHERE company_id=$1)::int                          AS dues,
+       COALESCE((SELECT SUM(balance) FROM v_supplier_dues WHERE company_id=$1),0)               AS dues_value,
+       (SELECT count(*) FROM v_supplier_dues WHERE company_id=$1 AND overdue)::int              AS dues_overdue,
+       COALESCE((SELECT SUM(balance) FROM v_supplier_dues
+                  WHERE company_id=$1 AND overdue),0)                                           AS dues_overdue_value,
+       /* Money we have committed to but not yet moved — the order is placed,
+        * the claim is in this inbox. An owner asking "what have I spent this
+        * week" means this plus what actually went out. */
+       COALESCE((SELECT SUM(amount - paid_amount) FROM payment_requests
+                  WHERE company_id=$1 AND status IN ('REQUESTED','VERIFIED','PART_PAID')
+                    AND ($2::date IS NULL OR requested_at::date >= $2::date)
+                    AND ($3::date IS NULL OR requested_at::date <= $3::date)),0)                 AS committed`,
     [req.actor.companyId, from, to]);
 
   // Where the money went, which is the question an owner actually asks.

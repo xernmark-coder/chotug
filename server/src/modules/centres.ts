@@ -628,7 +628,7 @@ centreRouter.post('/:id/day-close', requires('centre.day.close'), h(async (req) 
 
   return withTx(req.actor, async (tx) => {
     const { rows: w } = await tx.query(
-      `SELECT id, name, branch_id FROM warehouses WHERE id=$1 AND company_id=$2`,
+      `SELECT id, code, name, branch_id FROM warehouses WHERE id=$1 AND company_id=$2`,
       [req.params.id, req.actor.companyId]);
     if (!w[0]) throw ApiError.notFound('No such centre.');
 
@@ -643,7 +643,7 @@ centreRouter.post('/:id/day-close', requires('centre.day.close'), h(async (req) 
      * The first version of this inserted a fresh receipt each time and collided
      * on the receipt number — so a centre that miscounted could not fix it. */
     const { rows: prior } = await tx.query(
-      `SELECT c.id, c.receipt_id, r.status AS receipt_status
+      `SELECT c.id, c.receipt_id, c.expense_request_id, r.status AS receipt_status
          FROM centre_day_close c
          LEFT JOIN money_receipts r ON r.id = c.receipt_id
         WHERE c.warehouse_id = $1 AND c.close_date = $2::date`, [w[0].id, date]);
@@ -681,11 +681,50 @@ centreRouter.post('/:id/day-close', requires('centre.day.close'), h(async (req) 
       }
     }
 
+    /* ------------------------------------------------ the day's spending ---
+     *
+     *   "when the day is closed by the center the money sent by the center
+     *    should also come automatically there."
+     *
+     * The takings reach Finance as a receipt above. What the shop SPENT that
+     * day — ice, an auto to the market, a boy paid to sweep — was typed into a
+     * box on this screen and then read back only on this screen. It is real
+     * money out of the business, so it joins the same inbox everything else
+     * leaves through, and the day's margin stops being a guess. */
+    let expenseRequestId: string | null = prior[0]?.expense_request_id ?? null;
+    if (i.expenses > 0 && !expenseRequestId) {
+      /* An EXPENSE claim must say what kind of expense it is — the database
+       * insists, because "₹4,300, centre" is not a thing anybody can report on.
+       * Nothing about closing a shop's day should fail over a missing master
+       * row, so it falls back to whatever category exists and only then gives
+       * up on categorising it. */
+      const { rows: cat } = await tx.query(
+        `SELECT id FROM expense_categories
+          WHERE company_id = $1 AND is_active
+          ORDER BY (code = 'OTHER') DESC, sort_order LIMIT 1`,
+        [req.actor.companyId]);
+      const claim = cat[0] ? await createRequest(tx, req.actor, {
+        kind: 'EXPENSE',
+        amount: i.expenses,
+        payeeName: w[0].name,
+        branchId: w[0].branch_id,
+        warehouseId: w[0].id,
+        expenseCategoryId: cat[0]?.id ?? null,
+        dueDate: date,
+        note: `${w[0].name} — spending on ${date}${i.note ? ` · ${i.note}` : ''}`,
+        sourceType: 'centre_day_close',
+        sourceId: null,
+        systemRaised: true,
+      }) : null;
+      expenseRequestId = claim?.id ?? null;
+    }
+
     const { rows } = await tx.query(
       `INSERT INTO centre_day_close (company_id, warehouse_id, close_date,
               system_qty, system_revenue, declared_qty, declared_revenue,
-              cash_amount, online_amount, expenses, wastage_qty, note, closed_by, receipt_id)
-       VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+              cash_amount, online_amount, expenses, wastage_qty, note, closed_by, receipt_id,
+              expense_request_id)
+       VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        ON CONFLICT (warehouse_id, close_date) DO UPDATE
          SET declared_qty = EXCLUDED.declared_qty,
              declared_revenue = EXCLUDED.declared_revenue,
@@ -694,11 +733,14 @@ centreRouter.post('/:id/day-close', requires('centre.day.close'), h(async (req) 
              expenses = EXCLUDED.expenses,
              wastage_qty = EXCLUDED.wastage_qty,
              note = EXCLUDED.note, closed_by = EXCLUDED.closed_by, closed_at = now(),
-             receipt_id = COALESCE(centre_day_close.receipt_id, EXCLUDED.receipt_id)
+             receipt_id = COALESCE(centre_day_close.receipt_id, EXCLUDED.receipt_id),
+             expense_request_id = COALESCE(centre_day_close.expense_request_id,
+                                           EXCLUDED.expense_request_id)
        RETURNING *`,
       [req.actor.companyId, w[0].id, date, sys[0].qty, sys[0].revenue,
        i.declaredQty, i.declaredRevenue, i.cashAmount, i.onlineAmount,
-       i.expenses, i.wastageQty, i.note ?? null, req.actor.userId, receiptId]);
+       i.expenses, i.wastageQty, i.note ?? null, req.actor.userId, receiptId,
+       expenseRequestId]);
     const close = rows[0];
 
     const variance = Number(close.variance);
@@ -715,11 +757,19 @@ centreRouter.post('/:id/day-close', requires('centre.day.close'), h(async (req) 
     await emit(tx, req.actor, 'centre_day_close', close.id, 'centre.day.closed',
       { centre: w[0].name, date, declared: i.declaredRevenue, system: sys[0].revenue });
 
+    /* Say where the money went, because "closed" on its own leaves the person
+     * at the counter wondering whether anybody knows they handed over ₹18,000. */
+    const sentOn = [
+      handedOver > 0 && receiptId ? `₹${handedOver.toFixed(0)} is with Finance to confirm` : null,
+      expenseRequestId ? `₹${Number(i.expenses).toFixed(0)} of spending has been claimed` : null,
+    ].filter(Boolean).join(' · ');
+
     return {
       ...close,
-      message: Math.abs(variance) < 0.01
+      message: (Math.abs(variance) < 0.01
         ? `${w[0].name} closed for ${date}. Everything ties.`
-        : `${w[0].name} closed for ${date} — ${variance > 0 ? 'over' : 'short'} by ${Math.abs(variance)}.`,
+        : `${w[0].name} closed for ${date} — ${variance > 0 ? 'over' : 'short'} by ${Math.abs(variance)}.`)
+        + (sentOn ? ` ${sentOn}.` : ''),
     };
   });
 }));

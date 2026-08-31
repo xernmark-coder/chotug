@@ -118,6 +118,8 @@ export function WarehouseMapPage() {
           foot={`${num(allShelves.reduce((a: number, s: any) => a + Number(s.packs), 0), 0)} boxes stored`} />
       </div>
 
+      <QcAreaPanel warehouseId={wh} />
+
       <div className="search-bar">
         <select value={only} onChange={(e) => setOnly(e.target.value as any)}>
           <option value="">Every shelf</option>
@@ -177,16 +179,23 @@ export function WarehouseMapPage() {
               <div className="card-body">
                 {!g.sections.length ? (
                   <Empty title="No sections on this floor yet"
-                    hint="A section is a cold room, a ripening chamber, an ambient hall." />
+                    hint="A section is a cold room, a ripening chamber, an ambient hall —
+                          or the quality-check area a lorry is emptied into." />
                 ) : null}
                 {g.sections.map((s: any) => (
                   <div className="loc-section" key={s.id}>
                     <div className="loc-head">
                       <div>
                         <b>{s.name}</b> <span className="small muted mono">{s.code}</span>
+                        {s.purpose && s.purpose !== 'STORAGE' ? (
+                          <Chip tone={s.purpose === 'QC' ? 'warn' : 'neutral'}>
+                            {s.purpose === 'QC' ? 'quality check' : String(s.purpose).toLowerCase()}
+                          </Chip>
+                        ) : null}
                         <div className="small muted">
                           {s.racks.length} racks ·{' '}
-                          {s.racks.reduce((a: number, r: any) => a + r.shelves.length, 0)} shelves
+                          {s.racks.reduce((a: number, r: any) => a + r.shelves.length, 0)}{' '}
+                          {s.purpose === 'QC' ? 'bays' : 'shelves'}
                         </div>
                       </div>
                       <div className="btn-row">
@@ -245,6 +254,107 @@ export function WarehouseMapPage() {
   );
 }
 
+/* ---------------------------------------------------------------------------
+ * THE QUALITY-CHECK AREA
+ *
+ * Between the lorry and the shelf there is a gap of several hours that no
+ * screen had a word for: the boxes were weighed and then, as far as the system
+ * knew, they were nowhere. In practice they were stacked by the shutter, and
+ * "where is the Kesar off gate 41" was answered by asking whoever carried it.
+ *
+ * Nothing here is stock. It is a location, which is exactly what an auditor or
+ * a picker standing in front of the bay needs it to be.
+ * ------------------------------------------------------------------------ */
+function QcAreaPanel({ warehouseId }: { warehouseId: string }) {
+  const q = warehouseId ? `?warehouseId=${warehouseId}` : '';
+  const bays = useApi<any[]>(`/warehouse/qc-bays${q}`, [warehouseId]);
+  const holding = useApi<any[]>(`/warehouse/qc-holding${q}`, [warehouseId]);
+
+  if (bays.loading) return null;
+  const rows = holding.data ?? [];
+
+  if (!(bays.data ?? []).length) {
+    return (
+      <div className="banner info mb">
+        <span><Icon name="info" size={16} /></span>
+        <div className="small">
+          <b>No quality-check area here yet.</b> Add a section and set what it is
+          for to <b>Quality check</b>, then a rack with a few bays under it. Goods
+          coming off a vehicle are parked in one of those bays until they are
+          accepted, so anybody can be sent straight to them.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card mb">
+      <div className="card-head">
+        <h2>Quality check area</h2>
+        <Chip tone={rows.length ? 'warn' : 'ok'}>
+          {rows.length ? `${rows.length} load(s) standing` : 'empty'}
+        </Chip>
+        <span className="spacer" />
+        <span className="small muted">
+          Goods off a vehicle wait here. Nothing in this area is stock yet.
+        </span>
+      </div>
+      <div className="card-body">
+        <div className="shelf-row mb">
+          {(bays.data ?? []).map((b: any) => (
+            <div key={b.id} className={`shelf ${Number(b.holding) ? 'full' : ''}`}
+              title={b.qr_code}>
+              <b>{b.code}</b>
+              <span className="small">
+                {Number(b.holding)
+                  ? `${b.holding} load${Number(b.holding) === 1 ? '' : 's'}`
+                  : 'free'}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {rows.length ? (
+          <div className="table-wrap">
+          <table className="data">
+            <thead><tr>
+              <th>Bay</th><th>Vehicle</th><th>Supplier</th>
+              <th className="num">Boxes</th><th className="num">Weight</th>
+              <th>Waiting</th><th>Stage</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r: any) => (
+                <tr key={r.gate_entry_id}
+                  className={Number(r.waiting_minutes) > 240 ? 'row-crit'
+                    : Number(r.waiting_minutes) > 120 ? 'row-warn' : ''}>
+                  <td><b className="mono">{r.bay_code ?? 'not set'}</b></td>
+                  <td><b>{r.gate_no}</b>
+                    {r.po_no ? <div className="small muted mono">{r.po_no}</div> : null}</td>
+                  <td>{r.supplier_name}</td>
+                  <td className="num mono">{num(r.boxes, 0)}</td>
+                  <td className="num mono">{num(r.net_kg, 1)} kg</td>
+                  {/* Produce waiting to be checked is produce losing money, so
+                      the time is the column that decides the row colour. */}
+                  <td>{num(Number(r.waiting_minutes) / 60, 1)} h</td>
+                  <td><Chip tone={r.status === 'QC_COMPLETE' ? 'ok' : 'primary'}>
+                    {String(r.status).replace(/_/g, ' ').toLowerCase()}
+                  </Chip></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          </div>
+        ) : (
+          <div className="small muted">
+            Nothing standing in quality check. Loads appear here as soon as the
+            floor says which bay they were unloaded into.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const LEVELS: Record<string, { title: string; path: string; hint: string; bulk: boolean }> = {
   FLOOR:   { title: 'Add a floor', path: '/warehouse/floors', bulk: false,
              hint: 'Ground floor, first floor, mezzanine.' },
@@ -264,6 +374,10 @@ function AddLocationModal({ spec, warehouseId, onClose, onDone }: {
   const [name, setName] = useState('');
   const [count, setCount] = useState('1');
   const [capacity, setCapacity] = useState('');
+  /* What a section is FOR. Most are storage; the one that changes behaviour is
+     the quality-check area, which holds goods that have come off a lorry and
+     have not been accepted yet. */
+  const [purpose, setPurpose] = useState('STORAGE');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
 
@@ -284,6 +398,7 @@ function AddLocationModal({ spec, warehouseId, onClose, onDone }: {
                 name: name.trim() || undefined,
                 count: L.bulk ? Number(count) || 1 : 1,
                 capacityKg: capacity ? Number(capacity) : undefined,
+                purpose: spec.level === 'SECTION' ? purpose : undefined,
               });
               onDone(r.made ? `${r.made} added.` : `${r.name ?? r.code} added.`);
             } catch (e: any) { setError(e); } finally { setBusy(false); }
@@ -311,6 +426,22 @@ function AddLocationModal({ spec, warehouseId, onClose, onDone }: {
           </Field>
         )}
       </div>
+      {spec.level === 'SECTION' ? (
+        <Field label="What is this section for?"
+          hint={purpose === 'QC'
+            ? 'Goods that have come off a lorry stand here until quality have '
+              + 'looked at them. They are not stock yet, and nothing can be put '
+              + 'away onto a bay in this section.'
+            : 'Storage is the ordinary case — a cold room, a ripening chamber, an ambient hall.'}>
+          <select value={purpose} onChange={(e) => setPurpose(e.target.value)}>
+            <option value="STORAGE">Storage</option>
+            <option value="QC">Quality check — goods off the vehicle wait here</option>
+            <option value="PACKING">Packing bench</option>
+            <option value="DISPATCH">Dispatch / loading</option>
+            <option value="RETURNS">Returns</option>
+          </select>
+        </Field>
+      ) : null}
       {spec.level === 'SHELF' ? (
         <Field label="How much fits on one shelf (kg)" hint="Optional — used to warn when a shelf is over-filled.">
           <input type="number" value={capacity} onChange={(e) => setCapacity(e.target.value)} />

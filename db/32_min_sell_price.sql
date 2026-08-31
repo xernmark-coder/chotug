@@ -86,8 +86,16 @@ SELECT w.company_id,
   LEFT JOIN spend s   ON s.company_id = w.company_id
   LEFT JOIN handled h ON h.company_id = w.company_id;
 
-/* The number the person at the till needs, per batch, computed once. */
-CREATE OR REPLACE VIEW v_batch_pricing AS
+/* The number the person at the till needs, per batch, computed once.
+ *
+ * DROP first rather than CREATE OR REPLACE. 41_dues_costing_and_qc_area
+ * rebuilds this view with the outbound freight in it, and Postgres refuses to
+ * REPLACE a view with fewer columns than the one already there — so on any
+ * database that has reached 41, re-running this file failed and every
+ * migration after it was skipped. Nothing in the schema selects from this view;
+ * only application queries do. */
+DROP VIEW IF EXISTS v_batch_pricing;
+CREATE VIEW v_batch_pricing AS
 SELECT b.id                       AS batch_id,
        b.company_id,
        b.product_id,

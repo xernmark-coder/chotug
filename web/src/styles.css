@@ -238,47 +238,6 @@ body.nav-lock { overflow: hidden; }
   .sidebar { transition: none; }
 }
 
-/* --- phone-width tightening ---------------------------------------------- */
-@media (max-width: 560px) {
-  h1 { font-size: 19px; }
-  .card-body { padding: 13px; }
-  .card-head { padding: 12px 13px; }
-  /* Several screens set an inline pixel width on a select (e.g. the product
-     picker). max-width beats an inline width, so nothing can push the page
-     into a horizontal scroll. */
-  input, select, textarea { max-width: 100%; }
-  .card-head { flex-wrap: wrap; }
-
-  .kv { grid-template-columns: minmax(0, 1fr); gap: 0 0; }
-  .kv dt { margin-top: 8px; font-size: 12.5px; }
-  .kv dd { margin-bottom: 2px; }
-  .grade-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .search-bar input, .search-bar select { max-width: none; flex: 1 1 150px; }
-  /* Let the table keep readable column widths and scroll inside .table-wrap.
-     Without a min-width, width:100% crushes every column to a few characters
-     and each cell wraps into a vertical ribbon of single words. */
-  table.data { font-size: 13px; min-width: 660px; }
-  table.data th, table.data td { padding: 9px 10px; }
-  .table-wrap { -webkit-overflow-scrolling: touch; }
-  .kpi .value { font-size: 22px; }
-  .scale-readout { font-size: 34px; }
-  .btn-row .btn { flex: 1 1 auto; }
-  .timeline img { max-width: 100%; }
-
-  /* Dialogs become bottom sheets — reachable, and they no longer overflow
-     a short viewport when the on-screen keyboard opens. */
-  .modal-back { padding: 0; align-items: flex-end; }
-  .modal {
-    max-width: none; max-height: 92dvh;
-    border-radius: 14px 14px 0 0;
-    padding-bottom: env(safe-area-inset-bottom);
-  }
-  .modal-foot { flex-wrap: wrap; }
-  .modal-foot .btn { flex: 1 1 auto; }
-
-  .toast-wrap { left: 12px; right: 12px; bottom: 12px; }
-  .toast { max-width: none; }
-}
 
 /* --- KPI ---------------------------------------------------------------- */
 .kpi {
@@ -377,6 +336,14 @@ table.data th {
   padding: 9px 12px; border-bottom: 1px solid var(--border);
   background: var(--surface-2); white-space: nowrap; position: sticky; top: 0;
 }
+/* Sortable headings. The arrow is dim until the column is the one in use, so
+   a table of twelve columns does not read as twelve competing controls. */
+table.data th.sortable { cursor: pointer; user-select: none; }
+table.data th.sortable:hover { color: var(--text); }
+table.data th.sorted { color: var(--text); }
+table.data th .sort-arrow { margin-left: 5px; font-size: 9px; opacity: .35; }
+table.data th.sortable:hover .sort-arrow { opacity: .7; }
+table.data th.sorted .sort-arrow { opacity: 1; }
 table.data td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 table.data tbody tr:hover { background: var(--surface-2); }
 table.data tr.clickable { cursor: pointer; }
@@ -828,9 +795,13 @@ label.check input { width: auto; }
    ======================================================================== */
 .cat-tree { padding: 6px 0; }
 .cat-row, .prod-row {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 9px 14px; border-bottom: 1px solid var(--border);
+  /* --step is the indent per level; the phone query shrinks it. */
+  --step: 26px;
+  padding-left: calc(14px + var(--depth, 0) * var(--step));
 }
+.prod-row { padding-left: calc(52px + var(--depth, 0) * var(--step)); }
 .cat-row { background: var(--surface-2); font-size: 14.5px; }
 .prod-row { font-size: 13.5px; color: var(--text-2); }
 .cat-row:last-child, .prod-row:last-child { border-bottom: none; }
@@ -975,9 +946,16 @@ table.mini tr.voided { opacity: .5; text-decoration: line-through; }
   border-bottom: 1px solid var(--border); }
 .att-row:last-child { border-bottom: 0; }
 .att-row.unmarked { background: var(--accent-soft); }
+/* The strip under a filtered list: how many rows, and what they add up to.
+   It wraps, because the totals are the point of it — pushing them off the
+   right-hand edge of a phone loses the one number somebody filtered in order
+   to see. The inner row wraps too: three or four totals will not sit on one
+   390px line however small the type gets. */
 .filter-total { display: flex; justify-content: space-between; align-items: baseline;
+  flex-wrap: wrap; gap: 6px 14px;
   padding: 10px 14px; border-top: 2px solid var(--border-strong);
   background: var(--surface-2); font-size: 14px; }
+.filter-total > .row { flex-wrap: wrap; min-width: 0; }
 .filter-total b { font-size: 17px; font-variant-numeric: tabular-nums; }
 
 .filter-total .ft-num { display: flex; flex-direction: column; align-items: flex-end; }
@@ -1012,3 +990,418 @@ table.mini tr.voided { opacity: .5; text-decoration: line-through; }
 .store-map .loc-rack { padding: 6px 0; }
 .shelf.on { border-color: var(--primary); background: var(--accent-soft);
   box-shadow: 0 0 0 1px var(--primary) inset; }
+
+/* ------------------------------------------------------ the money board --
+   Where it came from, facing where it went. Two part-to-whole columns and a
+   spine; on a phone the spine goes and they become two stacked lists.
+
+   Bars are thin and their ends are rounded away from the baseline they grow
+   from, so length stays the thing being read. */
+.flow-board {
+  display: grid; align-items: start; gap: 0 18px;
+  grid-template-columns: minmax(0, 1fr) 1px minmax(0, 1fr);
+}
+.flow-spine { background: var(--border-strong); align-self: stretch; min-height: 100%; }
+.flow-side { min-width: 0; display: flex; flex-direction: column; gap: 9px; }
+.flow-side-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  font-size: 11.5px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .055em; color: var(--muted);
+  padding-bottom: 7px; border-bottom: 1px solid var(--border);
+}
+.flow-side-head b { font-size: 15px; letter-spacing: 0; text-transform: none;
+  font-variant-numeric: tabular-nums; }
+
+/* Two explicit rows — name and amount on the first, the bar beneath spanning
+   both columns. Placed by name rather than left to auto-placement, which put
+   the amount on a third row of its own and left the two sides aligned
+   differently once the phone rules flipped one of them. */
+.flow-row {
+  display: grid; gap: 3px 10px; align-items: center; min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: 'name value' 'bar bar';
+}
+.flow-label { grid-area: name; }
+.flow-value { grid-area: value; }
+.flow-track { grid-area: bar; }
+/* Money in reads right-to-left into the spine; money out reads away from it.
+   The mirroring is what makes the two columns read as one flow rather than as
+   two unrelated charts. */
+.flow-side.from .flow-row { grid-template-areas: 'value name' 'bar bar';
+  grid-template-columns: auto minmax(0, 1fr); }
+.flow-side.from .flow-label { text-align: right; }
+.flow-side.from .flow-track { justify-content: flex-end; }
+.flow-side.to   .flow-track { justify-content: flex-start; }
+
+.flow-label {
+  font-size: 13px; color: var(--text-2); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.flow-value {
+  font-size: 13px; font-weight: 650; color: var(--text);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.flow-track { display: flex; height: 9px; border-radius: 999px; background: var(--surface-2); }
+.flow-track > i { display: block; height: 100%; border-radius: 999px; min-width: 3px; }
+.flow-none { font-size: 12.5px; color: var(--muted); padding: 10px 0; }
+
+/* The three figures the page opens with. The net is the one being compared, so
+   it is the one that carries a sign and a colour. */
+.flow-heads { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.flow-head {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 15px 16px; box-shadow: var(--shadow);
+  border-top: 3px solid var(--border-strong);
+}
+.flow-head .lbl {
+  display: block; font-size: 11.5px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .055em; color: var(--muted); margin-bottom: 5px;
+}
+.flow-head .amt { font-size: 27px; font-weight: 700; letter-spacing: -.03em; line-height: 1.1; }
+.flow-head .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+/* Money that is real but is not cash — billed, owed, or spent off the desk.
+   Visually quieter than the cash figures on purpose: mixing the two is the
+   commonest way a money page tells a lie. */
+.flow-aside { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.flow-aside > div {
+  border: 1px dashed var(--border-strong); border-radius: var(--radius);
+  padding: 11px 13px; background: var(--surface-2);
+}
+.flow-aside em {
+  font-style: normal; display: block; font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px;
+}
+.flow-aside b { font-size: 17px; font-variant-numeric: tabular-nums; }
+.flow-aside span { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
+/* A movement in the feed. The direction mark is a glyph as well as a colour,
+   so "in" and "out" survive being printed in black and white. */
+.mv-dir {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 999px; flex: 0 0 auto;
+  font-size: 13px; font-weight: 700; line-height: 1;
+}
+
+/* ===========================================================================
+   SMALL SCREENS — the phone pass
+   ===========================================================================
+
+   The app was laid out for a desk. Most of it already reflowed, because the
+   grids and the drawer nav were built to; what is below is everything a real
+   390px viewport turned up that they did not cover.
+
+   Two rules govern the whole section:
+
+     · The page never scrolls sideways. A row that cannot fit wraps, or it
+       scrolls INSIDE its own box. A data table is the one honest exception —
+       eight columns of numbers do not become readable by being stacked — and
+       it scrolls within .table-wrap, never taking the page with it.
+
+     · Nothing is hidden. Every control that exists on a desktop exists here.
+       A phone user with a warehouse to run is not a lesser user, and a
+       "mobile version" that drops the button they came for is worse than a
+       layout they have to pinch.
+   ======================================================================== */
+
+/* --------------------------------------------------------------- tablet -- */
+@media (max-width: 900px) {
+  /* The drawer overlays the page, so the page beneath it must not scroll —
+     .nav-lock on <body> does that. But iOS ignores overflow:hidden on body
+     when a child is the scroll container, so the position lock goes here too. */
+  body.nav-lock { position: relative; overscroll-behavior: none; }
+
+  /* A dialog opened from a wide screen keeps a desktop's worth of columns
+     inside it otherwise. */
+  .modal.wide .grid.c3, .modal.wide .grid.c4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+  /* Two panes side by side stop being side by side. */
+  .grid.sidebar-right { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ---------------------------------------------------------------- phone -- */
+@media (max-width: 640px) {
+  /* THE TOPBAR.
+     Title, language, branch and the page's own buttons cannot share one
+     390px line, and letting them wrap inside a sticky bar grew it until it
+     ate a third of the screen. The actions get their own line and scroll
+     sideways within it; the title line stays one line, always. */
+  .topbar { flex-wrap: wrap; padding: 9px 12px; row-gap: 8px; }
+  .topbar-head { flex: 1 1 auto; min-width: 0; }
+  .topbar .spacer { display: none; }
+  .topbar-actions {
+    flex: 1 0 100%; justify-content: flex-start; flex-wrap: nowrap;
+    gap: 8px; overflow-x: auto; scrollbar-width: none;
+    /* The row is a scroller, so its children must not be squeezed to fit. */
+    padding-bottom: 2px;
+  }
+  .topbar-actions::-webkit-scrollbar { display: none; }
+  .topbar-actions > * { flex: 0 0 auto; }
+  .topbar .sub {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* "Language" spelled out costs a third of the row for a control whose
+     dropdown already says what it is. */
+  .language-picker label { display: none; }
+  .language-picker select { min-width: 84px; }
+  .branch-select { width: auto; max-width: 42vw; }
+
+  /* THE PAGE HEADER on embedded pages (Master Data's inner tabs). */
+  .embedded-head { flex-direction: column; gap: 10px; }
+  .embedded-head .btn-row { margin-left: 0; }
+
+  /* SECTION HEADERS keep their rule but stop forcing a minimum width. */
+  .section-head h2 { min-width: 0; }
+
+  /* HERO — the greeting block. Its call to action goes full width rather
+     than stranding itself in a corner. */
+  .hero { padding: 14px; gap: 10px; }
+  .hero h1 { font-size: 18px; }
+  .hero p { font-size: 12.5px; }
+  .hero .spacer { display: none; }
+  .hero .btn { width: 100%; }
+
+  /* KPI TILES stay two-up rather than one-up: four figures a screen is worth
+     more than four enormous ones, and the value text is what carries them. */
+  .grid.c2, .grid.c4, .grid.c5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+  /* A three-across row is one column below 1100px, which is right for three
+     form fields and wrong for three summary cards — those become three full
+     screens of scrolling to read six numbers. Told apart by what is inside
+     them: cards and tiles pair up, fields do not.
+     :has() is the whole point here; where it is unsupported the rule simply
+     does not match and the single-column layout stands, which is what was
+     there before. */
+  .grid.c3:has(> .card), .grid.c3:has(> .kpi) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .grid { gap: 10px; }
+  .kpi { padding: 12px 12px 11px; }
+  .kpi .value { font-size: 21px; }
+  .kpi .label { font-size: 10.5px; letter-spacing: .04em; }
+  .kpi .foot { font-size: 11px; }
+  .kpi .spark { margin: 8px -12px -11px; }
+
+  /* Anything genuinely two-column in content — a form, a pair of panes —
+     opts out with .grid.keep2 rather than every c2 becoming unreadable. */
+  .grid.c2.stack-1 { grid-template-columns: minmax(0, 1fr); }
+
+  /* THE MONEY BOARD. Facing columns need a middle to face across, and there
+     is none at 390px — so the spine goes and the two sides become two lists,
+     both reading left-to-right like everything else on the page. */
+  .flow-board { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .flow-spine { display: none; }
+  /* No spine to face across, so the "came from" side stops mirroring and
+     reads the same way round as everything else on the page. */
+  .flow-side.from .flow-row { grid-template-areas: 'name value' 'bar bar';
+    grid-template-columns: minmax(0, 1fr) auto; }
+  .flow-side.from .flow-label { text-align: left; }
+  .flow-side.from .flow-track { justify-content: flex-start; }
+  .flow-heads { grid-template-columns: minmax(0, 1fr); }
+  .flow-head .amt { font-size: 23px; }
+  .flow-aside { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+  /* THE FLOW STRIP — eleven pipeline stages. Three across reads as a strip;
+     one across reads as a list of eleven cards nobody scrolls to the end of. */
+  .flow { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .flow-step { padding: 9px 8px; }
+  .flow-step .n { font-size: 17px; }
+  .flow-step .t { font-size: 9.5px; letter-spacing: .03em; }
+
+  /* TABS scroll rather than squash. Tab labels carry counts, so a truncated
+     tab is a lie about how much work is in it. */
+  .tabs { gap: 0; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { padding: 10px 12px; font-size: 13.5px; flex: 0 0 auto; }
+
+  /* THE FILTER BAR. Every control gets a usable width; the search box takes
+     the whole line because it is the one people type into. */
+  .search-bar { gap: 8px; }
+  .search-bar input, .search-bar select {
+    max-width: none; flex: 1 1 138px; min-width: 0;
+  }
+  .search-bar input[type='search'], .search-bar > input:not([type]) { flex-basis: 100%; }
+
+  /* TREE ROWS — categories and their breeds. A four-deep tree indented 26px
+     a level leaves no room for the name on a phone. */
+  .cat-row, .prod-row { --step: 11px; padding-top: 10px; padding-bottom: 10px; }
+  .prod-row { padding-left: calc(30px + var(--depth, 0) * var(--step)); }
+  .cat-row .spacer, .prod-row .spacer { display: none; }
+  .cat-row .btn, .prod-row .btn { flex: 1 1 auto; }
+
+  /* THE WAREHOUSE MAP. A rack's name beside its shelves needs 120px it does
+     not have, so the name sits above the shelves it labels. */
+  .loc-rack { flex-direction: column; gap: 6px; }
+  .loc-rack-name { min-width: 0; display: flex; align-items: center;
+    flex-wrap: wrap; gap: 8px; }
+  .loc-head { flex-direction: column; gap: 8px; }
+  .shelf { min-width: 72px; flex: 1 1 auto; }
+  .store-map { max-height: 40vh; }
+
+  /* THE PRICE LADDER. A fixed 118px label column plus a number plus a note
+     does not fit; the note drops under the number it annotates. */
+  .price-ladder > div { flex-wrap: wrap; }
+  .price-ladder span { min-width: 0; flex: 1 1 auto; }
+  .price-ladder em { margin-left: 0; flex-basis: 100%; text-align: left; }
+
+  /* PRODUCT PERFORMANCE — one row per product, opening into a card. */
+  .perf-head { flex-wrap: wrap; gap: 8px 12px; padding: 11px 12px; }
+  .perf-nums { justify-content: flex-start; gap: 10px 16px; }
+  .perf-nums > span { min-width: 68px; font-size: 12.5px; }
+
+  /* PERMISSIONS. Name and switch side by side, never overlapping. */
+  .perm-row { gap: 8px; }
+  .perm-row > *:first-child { min-width: 0; }
+
+  /* SMALL TABLES (.mini) are layout, not data — they must fit rather than
+     scroll, so long codes and UPI handles are allowed to break. */
+  table.mini td { overflow-wrap: anywhere; }
+  table.mini td.num { white-space: normal; }
+
+  /* DATA TABLES keep their columns and scroll inside the card. The shadow is
+     the only signal that there is more to the right — without it people read
+     a truncated table as the whole truth. */
+  .table-wrap {
+    background:
+      linear-gradient(to right, var(--surface) 30%, rgba(255, 255, 255, 0)),
+      linear-gradient(to right, rgba(255, 255, 255, 0), var(--surface) 70%) 100% 0,
+      radial-gradient(farthest-side at 0 50%, rgba(15, 23, 42, .14), rgba(15, 23, 42, 0)),
+      radial-gradient(farthest-side at 100% 50%, rgba(15, 23, 42, .14), rgba(15, 23, 42, 0)) 100% 0;
+    background-repeat: no-repeat;
+    background-size: 34px 100%, 34px 100%, 13px 100%, 13px 100%;
+    background-attachment: local, local, scroll, scroll;
+  }
+
+  /* LABEL SHEETS and PLOT CARDS: two up, not one enormous one. */
+  .label-sheet { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .plot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .icon-picker { gap: 6px; }
+
+  /* THE LOGIN CARD. 30px of padding on a 390px screen is 15% of it. */
+  .login-page { padding: 14px; align-items: flex-start; padding-top: 8vh; }
+  .login-card { padding: 22px 18px; }
+  .login-language { top: 10px; right: 12px; }
+
+  /* THE STEP STRIP. Narrower steps mean more of the chain is on screen. */
+  .step { min-width: 92px; padding: 8px 9px; font-size: 11.5px; }
+
+  /* TOASTS clear the home indicator. */
+  .toast-wrap { bottom: calc(12px + env(safe-area-inset-bottom)); }
+
+  /* Long unbroken identifiers — invoice numbers, QR codes, emails — are the
+     commonest single cause of a page that will not fit. */
+  .mono, .prefill input, .banner, .empty, .toast { overflow-wrap: anywhere; }
+  .prefill { flex-wrap: wrap; }
+  .prefill input { flex: 1 1 100%; }
+}
+
+/* --------------------------------------------- inherited phone tightening --
+   These rules predate the pass above and used to sit near the top of the file,
+   where a plain `.grade-row` or `.modal` declared later beat them on source
+   order — so the bottom-sheet dialogs, the single-column key/value lists and
+   the two-up grading rows were all inert. Same declarations, moved to where
+   they take effect, and widened to the same 640px breakpoint as the rest of
+   the phone pass so there is one phone story rather than two.
+   ------------------------------------------------------------------------ */
+@media (max-width: 640px) {
+  h1 { font-size: 19px; }
+  .card-body { padding: 13px; }
+  .card-head { padding: 12px 13px; }
+  /* Several screens set an inline pixel width on a select (e.g. the product
+     picker). max-width beats an inline width, so nothing can push the page
+     into a horizontal scroll. */
+  input, select, textarea { max-width: 100%; }
+  .card-head { flex-wrap: wrap; }
+
+  .kv { grid-template-columns: minmax(0, 1fr); gap: 0 0; }
+  .kv dt { margin-top: 8px; font-size: 12.5px; }
+  .kv dd { margin-bottom: 2px; }
+  .grade-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .search-bar input, .search-bar select { max-width: none; flex: 1 1 150px; }
+  /* Let the table keep readable column widths and scroll inside .table-wrap.
+     Without a min-width, width:100% crushes every column to a few characters
+     and each cell wraps into a vertical ribbon of single words. */
+  table.data { font-size: 13px; min-width: 660px; }
+  table.data th, table.data td { padding: 9px 10px; }
+  .table-wrap { -webkit-overflow-scrolling: touch; }
+  .kpi .value { font-size: 22px; }
+  .scale-readout { font-size: 34px; }
+  .btn-row .btn { flex: 1 1 auto; }
+  .timeline img { max-width: 100%; }
+
+  /* Dialogs become bottom sheets — reachable, and they no longer overflow
+     a short viewport when the on-screen keyboard opens. */
+  .modal-back { padding: 0; align-items: flex-end; }
+  .modal {
+    max-width: none; max-height: 92dvh;
+    border-radius: 14px 14px 0 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .modal-foot { flex-wrap: wrap; }
+  .modal-foot .btn { flex: 1 1 auto; }
+
+  .toast-wrap { left: 12px; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom)); }
+  .toast { max-width: none; }
+}
+
+/* ------------------------------------------------- small phones (≤430px) -- */
+@media (max-width: 430px) {
+  /* Below this the two-up KPI row stops helping: the figures themselves
+     start wrapping, which is worse than a taller page. */
+  .grid.c4, .grid.c5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.c2 { grid-template-columns: minmax(0, 1fr); }
+  .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .label-sheet, .plot-grid { grid-template-columns: minmax(0, 1fr); }
+  /* KPI tiles keep pairing up — they hold one figure and a label, and two of
+     those are still legible in 150px. Full cards do not: a permission chip
+     reading "purchase.requirement.approve" is 190px on its own, and no amount
+     of wrapping makes it fit half of a 320px screen. So tiles pair, cards
+     take the width. */
+  .grid.c2:has(> .kpi), .grid.c3:has(> .kpi) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .grid.c2:has(> .card), .grid.c3:has(> .card) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Long machine-readable strings — permission codes, QR values, invoice
+     numbers — are allowed to break rather than push the page sideways. */
+  .chip { overflow-wrap: anywhere; }
+  .content { padding: 12px 11px 76px; }
+  .card-body { padding: 12px; }
+
+  /* A row of actions on a card head stacks under the heading rather than
+     squeezing it to two words. */
+  .card-head { gap: 8px; }
+  .card-head h2 { flex: 1 1 100%; }
+}
+
+/* --------------------------------------------------------- touch targets --
+   Independent of width: a coarse pointer needs a bigger target whatever the
+   screen is. Applied by input type rather than by breakpoint, so a tablet on
+   a stand and a phone in a glove both get it. */
+@media (pointer: coarse) {
+  .btn { min-height: 40px; }
+  .btn.sm { min-height: 34px; padding: 7px 12px; }
+  input, select, textarea {
+    /* 16px is the threshold below which iOS Safari zooms the page on focus.
+       That zoom does not undo itself, and the user is left on a page they
+       have to pinch back — the single worst thing a form can do on a phone. */
+    font-size: 16px; min-height: 40px;
+  }
+  input.inline { font-size: 15px; min-height: 34px; }
+  .tab { min-height: 42px; }
+  .nav-item { min-height: 42px; }
+  .cat-toggle { width: 26px; height: 26px; }
+  table.data td, table.data th { padding-top: 11px; padding-bottom: 11px; }
+}
+
+/* Landscape on a short screen — a phone turned sideways to read a table.
+   The drawer and any dialog have to stay usable at 380px of height. */
+@media (max-height: 460px) and (orientation: landscape) {
+  .modal { max-height: 96dvh; }
+  .modal-body { padding: 12px 14px; }
+  .modal-head { padding: 10px 14px; }
+  .modal-foot { padding: 10px 14px; }
+  .login-page { padding-top: 14px; align-items: flex-start; }
+}

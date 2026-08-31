@@ -4,7 +4,9 @@ import { pool, query, withTx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
 import { authenticate, requires } from '../platform/auth.js';
 import { emit, pushTask, resolveTask, raiseAlert } from '../platform/services.js';
-import { createRequest } from './finance.js';
+import {
+  createRequest, ensureOrderPayable, markPayableDue, orderPayable as orderPaymentRequest,
+} from './finance.js';
 import { checkInvoiceAgainstReceipts } from './costing.js';
 
 /* ===========================================================================
@@ -76,6 +78,7 @@ supplierRouter.get('/orders', requires('supplier.order.view'), h(async (req) => 
                internally but not yet placed it. */
             (o.status <> 'APPROVED')                                   AS placed,
             o.supplier_response, o.supplier_responded_at, o.supplier_response_note,
+            o.sent_without_payment, o.sent_without_payment_at,
             /* What the supplier needs to know about their own money: have they
              * asked, and has it been paid. Without this the portal can offer
              * "send it" on an order Finance has not released. */
@@ -84,6 +87,7 @@ supplierRouter.get('/orders', requires('supplier.order.view'), h(async (req) => 
             pr.amount      AS payment_amount,
             pr.paid_amount AS payment_paid,
             pr.reject_reason AS payment_reject_reason,
+            pr.became_due_at AS payment_due_since,
             ea.supplier_marked_sent_at,
             ea.vehicle_hint,
             ea.expected_date AS arrival_date,
@@ -97,11 +101,12 @@ supplierRouter.get('/orders', requires('supplier.order.view'), h(async (req) => 
        JOIN branches b ON b.id = o.branch_id
        LEFT JOIN expected_arrivals ea ON ea.po_id = o.id AND ea.status <> 'CANCELLED'
        /* One claim per order, whichever document it hangs off — see
-        * orderPaymentRequest(). A join on source_type='purchase_order' alone
-        * would show "not asked for yet" on an order whose invoice is already
-        * with Finance. */
+        * orderPayable(). A join on source_type='purchase_order' alone would
+        * show "not asked for yet" on an order whose invoice is already with
+        * Finance. */
        LEFT JOIN LATERAL (
-         SELECT x.request_no, x.status, x.amount, x.paid_amount, x.reject_reason
+         SELECT x.request_no, x.status, x.amount, x.paid_amount, x.reject_reason,
+                x.became_due_at
            FROM payment_requests x
           WHERE x.company_id = o.company_id AND x.status <> 'CANCELLED'
             AND ((x.source_type = 'purchase_order' AND x.source_id = o.id)
@@ -135,16 +140,18 @@ supplierRouter.get('/orders/:id', requires('supplier.order.view'), h(async (req)
             ea.transporter, ea.lr_no, ea.eway_bill_no, ea.supplier_marked_sent_at,
             pr.request_no AS payment_request_no, pr.status AS payment_status,
             pr.amount AS payment_amount, pr.paid_amount AS payment_paid,
-            pr.reject_reason AS payment_reject_reason
+            pr.reject_reason AS payment_reject_reason,
+            pr.became_due_at AS payment_due_since
        FROM purchase_orders o
        JOIN branches b ON b.id = o.branch_id
        LEFT JOIN expected_arrivals ea ON ea.po_id = o.id AND ea.status <> 'CANCELLED'
        /* One claim per order, whichever document it hangs off — see
-        * orderPaymentRequest(). A join on source_type='purchase_order' alone
-        * would show "not asked for yet" on an order whose invoice is already
-        * with Finance. */
+        * orderPayable(). A join on source_type='purchase_order' alone would
+        * show "not asked for yet" on an order whose invoice is already with
+        * Finance. */
        LEFT JOIN LATERAL (
-         SELECT x.request_no, x.status, x.amount, x.paid_amount, x.reject_reason
+         SELECT x.request_no, x.status, x.amount, x.paid_amount, x.reject_reason,
+                x.became_due_at
            FROM payment_requests x
           WHERE x.company_id = o.company_id AND x.status <> 'CANCELLED'
             AND ((x.source_type = 'purchase_order' AND x.source_id = o.id)
@@ -163,26 +170,10 @@ supplierRouter.get('/orders/:id', requires('supplier.order.view'), h(async (req)
   return { ...o, lines };
 }));
 
-/**
- * The one live money claim against an order — whether it was raised against the
- * order itself or against the invoice the supplier filed for it.
- *
- * Two source types can point at the same goods, and a claim the code cannot see
- * is a claim it will happily let somebody raise a second time. Every rule about
- * this order's money reads through here.
- */
-async function orderPaymentRequest(tx: any, companyId: string, poId: string) {
-  const { rows } = await tx.query(
-    `SELECT pr.* FROM payment_requests pr
-      WHERE pr.company_id = $1 AND pr.status <> 'CANCELLED'
-        AND ((pr.source_type = 'purchase_order' AND pr.source_id = $2)
-          OR (pr.source_type = 'supplier_invoice' AND pr.source_id IN (
-                SELECT id FROM supplier_invoices
-                 WHERE po_id = $2 AND status <> 'CANCELLED')))
-      ORDER BY pr.requested_at LIMIT 1`,
-    [companyId, poId]);
-  return rows[0] ?? null;
-}
+/* The one live money claim against an order lives in the Finance module now —
+ * see orderPayable(). Two source types can point at the same goods, and a claim
+ * the code cannot see is a claim it will happily let somebody raise twice, so
+ * there is one definition of it and both sides read that one. */
 
 /* ---------------------------------------------------------------------------
  * "Yes, I will supply this." — the answer we never used to record.
@@ -283,6 +274,29 @@ supplierRouter.post('/orders/:id/respond', requires('supplier.order.accept'), h(
            input.invoiceNo, input.invoiceDate ?? new Date().toISOString().slice(0, 10),
            o.expected_date ?? null, total, req.actor.userId]);
         invoiceNo = input.invoiceNo;
+
+        /* Confirming the order already put a claim in Finance's inbox. The
+         * invoice is the document that claim is really against, so it moves
+         * onto it and takes the billed amount with it. Raising a second claim
+         * here is how a supplier gets paid twice for one lorry. */
+        const { rows: invRow } = await tx.query(
+          `SELECT id, invoice_no, total, due_date FROM supplier_invoices
+            WHERE company_id = $1 AND po_id = $2 AND lower(invoice_no) = lower($3)
+            ORDER BY created_at DESC LIMIT 1`,
+          [req.actor.companyId, o.id, input.invoiceNo]);
+        const { rows: sup } = await tx.query(
+          `SELECT COALESCE(trade_name, legal_name) AS name FROM suppliers WHERE id = $1`,
+          [supplierId]);
+        if (invRow[0]) {
+          await ensureOrderPayable(tx, req.actor, {
+            poId: o.id, poNo: o.po_no, branchId: o.branch_id,
+            supplierId, supplierName: sup[0]?.name ?? 'Supplier',
+            amount: Number(invRow[0].total), warehouseId: o.warehouse_id,
+            dueDate: invRow[0].due_date ?? o.expected_date,
+            invoiceId: invRow[0].id, invoiceNo: invRow[0].invoice_no,
+            note: `Invoice ${invRow[0].invoice_no} for ${o.po_no} — filed by the supplier`,
+          });
+        }
       }
 
       /* The vehicle, onto the row the gate already reads. Confirming the order
@@ -482,6 +496,14 @@ supplierRouter.post('/orders/:id/dispatch', requires('supplier.order.dispatch'),
     vehicleReg: z.string().trim().min(4, 'Which vehicle is it on?').optional(),
     expectedDate: z.string().optional(),
     note: z.string().trim().optional(),
+    /* "supplier should be able to send without the payment, this payment will
+     *  come into due of finance which later finance will settle."
+     *
+     * The supplier chooses this deliberately, per load. It is not a silent
+     * fallback when the payment has not come through — a supplier who did not
+     * mean to send on credit must still be stopped, because the whole value of
+     * the gate is that it holds. */
+    withoutPayment: z.boolean().default(false),
   }), req.body ?? {});
 
   const supplierId = await mySupplier(req.actor);
@@ -508,13 +530,31 @@ supplierRouter.post('/orders/:id/dispatch', requires('supplier.order.dispatch'),
         ? 'You declined this order, so it cannot be sent.'
         : 'Accept the order before sending it.');
     }
-    if (pay && pay.status !== 'PAID') {
+    /* Sending on credit. The supplier is telling us the load is coming anyway
+     * and they will collect later — so what was a claim Finance might decline
+     * becomes a debt against produce that will be on our floor tomorrow.
+     *
+     * A rejected claim is the one case this cannot cover: Finance has looked at
+     * this money and said no, and the answer to that is a conversation with the
+     * buyer, not a lorry. */
+    if (input.withoutPayment) {
+      if (pay?.status === 'REJECTED') {
+        throw ApiError.rule(
+          `Finance turned down ${pay.request_no}. Speak to the buyer before sending anything — `
+          + 'sending now would leave a due nobody has agreed to.');
+      }
+      if (!req.actor.permissions.has('supplier.order.send_unpaid')) {
+        throw ApiError.forbidden(
+          'Your login cannot send an order before it is paid for. Ask the buyer to enable it.');
+      }
+    } else if (pay && pay.status !== 'PAID') {
       throw ApiError.rule(
         pay.status === 'REJECTED'
           ? `Finance turned down ${pay.request_no}. Speak to the buyer before sending anything.`
           : `Finance has not released ${pay.request_no} yet `
             + `(₹${Number(pay.paid_amount).toFixed(0)} of ₹${Number(pay.amount).toFixed(0)} paid). `
-            + 'You will be able to send this order once the payment is made.');
+            + 'Send it without payment if you are happy to collect later, '
+            + 'or wait for Finance to release it.');
     }
 
     if (o.status === 'APPROVED') {
@@ -563,14 +603,94 @@ supplierRouter.post('/orders/:id/dispatch', requires('supplier.order.dispatch'),
       requiredPermission: 'receiving.gate.create', slaMinutes: 720,
     });
 
+    /* ------------------------------------------------------- the due --- */
+    let due: any = null;
+    if (input.withoutPayment) {
+      const { rows: sup } = await tx.query(
+        `SELECT COALESCE(trade_name, legal_name) AS name, payment_terms_days
+           FROM suppliers WHERE id = $1`, [supplierId]);
+
+      /* There is normally already a claim — confirming the order raised one.
+       * Where there is not (an order confirmed before that existed, or one the
+       * supplier never asked against) the debt still has to be recorded, so
+       * one is opened here rather than the goods arriving against nothing. */
+      let claim = pay;
+      if (!claim) {
+        const { rows: inv } = await tx.query(
+          `SELECT id, invoice_no, total, due_date FROM supplier_invoices
+            WHERE company_id = $1 AND po_id = $2 AND status <> 'CANCELLED'
+            ORDER BY created_at LIMIT 1`, [req.actor.companyId, o.id]);
+        claim = await ensureOrderPayable(tx, req.actor, {
+          poId: o.id, poNo: o.po_no, branchId: o.branch_id,
+          supplierId, supplierName: sup[0]?.name ?? 'Supplier',
+          amount: Number(inv[0]?.total ?? o.grand_total),
+          warehouseId: o.warehouse_id,
+          dueDate: inv[0]?.due_date ?? when,
+          invoiceId: inv[0]?.id ?? null, invoiceNo: inv[0]?.invoice_no ?? null,
+          note: `${o.po_no} — sent before payment`,
+        });
+      }
+
+      /* Payment terms are what the supplier agreed to wait, so they set the
+       * date Finance is late from. Without a term the goods are due on
+       * arrival, which is what "send now, collect on delivery" means. */
+      const terms = Number(sup[0]?.payment_terms_days ?? 0) || 0;
+      const dueOn = new Date(when ?? new Date());
+      dueOn.setDate(dueOn.getDate() + terms);
+
+      if (claim) {
+        await tx.query(
+          `UPDATE payment_requests SET due_date = COALESCE(due_date, $2::date) WHERE id = $1`,
+          [claim.id, dueOn.toISOString().slice(0, 10)]);
+        due = await markPayableDue(tx, req.actor, claim.id,
+          `Sent against ${o.po_no} before payment${input.note ? ` — ${input.note}` : ''}`);
+      }
+
+      await tx.query(
+        `UPDATE purchase_orders
+            SET sent_without_payment = true, sent_without_payment_at = now(),
+                sent_without_payment_note = $2, updated_by = $3
+          WHERE id = $1`,
+        [o.id, input.note ?? null, req.actor.userId]);
+
+      /* Finance has to know that a decision they were still holding has been
+       * overtaken by a lorry. This is the whole point of the feature and it
+       * must not arrive as a row in a list nobody sorted. */
+      await raiseAlert(tx, req.actor, {
+        alertType: 'GOODS_SENT_UNPAID', severity: 'HIGH', branchId: o.branch_id,
+        entityType: 'purchase_order', entityId: o.id,
+        title: `${o.po_no} sent before payment — ₹${Number(due?.amount ?? o.grand_total).toFixed(0)} now due`,
+        message: `${sup[0]?.name ?? 'The supplier'} has sent this load and will collect later.`
+          + (terms ? ` Terms ${terms} days — due ${dueOn.toISOString().slice(0, 10)}.` : ' Due on arrival.')
+          + (input.note ? ` ${input.note}` : ''),
+      });
+      await pushTask(tx, req.actor, {
+        branchId: o.branch_id, queueKey: 'FINANCE_EXCEPTION',
+        docType: 'PAYMENT_REQUEST', docId: due?.id ?? o.id,
+        docNo: due?.request_no ?? o.po_no,
+        title: `Settle ${sup[0]?.name ?? 'supplier'} — goods already sent`,
+        subtitle: `${o.po_no} · ₹${Number(due?.amount ?? o.grand_total).toFixed(0)}`,
+        severity: 'warn', requiredPermission: 'finance.request.verify', slaMinutes: 1440,
+      });
+    }
+
     await emit(tx, req.actor, 'purchase_order', o.id, 'supplier.dispatched', {
       poNo: o.po_no, vehicleReg: input.vehicleReg ?? null, expectedDate: when,
+      withoutPayment: input.withoutPayment,
     });
 
     return {
       ok: true, poNo: o.po_no, expectedDate: when,
       vehicleReg: input.vehicleReg ?? null,
-      message: `Thank you — we have told the gate to expect ${o.po_no}.`,
+      withoutPayment: input.withoutPayment,
+      dueRequestNo: due?.request_no ?? null,
+      message: input.withoutPayment
+        ? `Thank you — we have told the gate to expect ${o.po_no}. `
+          + (due
+            ? `₹${Number(due.amount).toFixed(0)} is now a due with Finance (${due.request_no}) `
+              + 'and will be settled from there.'
+            : 'Finance has been told you are still to be paid.')
+        : `Thank you — we have told the gate to expect ${o.po_no}.`,
     };
   });
 }));
@@ -713,18 +833,33 @@ supplierRouter.post('/invoices', requires('supplier.invoice.submit'), h(async (r
      * on our side opens. Finance still verifies it before paying. */
     const { rows: me } = await tx.query(
       `SELECT COALESCE(trade_name, legal_name) AS name FROM suppliers WHERE id=$1`, [supplierId]);
-    await createRequest(tx, req.actor, {
-      kind: 'SUPPLIER_INVOICE',
-      amount: Number(inv.total),
-      payeeName: me[0]?.name ?? 'Supplier',
-      branchId: inv.branch_id,
-      supplierId,
-      dueDate: inv.due_date ?? undefined,
-      note: `Invoice ${inv.invoice_no} — filed by the supplier`,
-      sourceType: 'supplier_invoice',
-      sourceId: inv.id,
-      systemRaised: true,
-    });
+    if (grn.po_id) {
+      /* One claim per order — the order raised it when it was confirmed, and
+       * this is the document it is really against. See ensureOrderPayable(). */
+      const { rows: poRow } = await tx.query(
+        `SELECT po_no, warehouse_id FROM purchase_orders WHERE id=$1`, [grn.po_id]);
+      await ensureOrderPayable(tx, req.actor, {
+        poId: grn.po_id, poNo: poRow[0]?.po_no ?? 'the order',
+        branchId: inv.branch_id, supplierId, supplierName: me[0]?.name ?? 'Supplier',
+        amount: Number(inv.total), warehouseId: poRow[0]?.warehouse_id ?? null,
+        dueDate: inv.due_date ?? null,
+        invoiceId: inv.id, invoiceNo: inv.invoice_no,
+        note: `Invoice ${inv.invoice_no} — filed by the supplier`,
+      });
+    } else {
+      await createRequest(tx, req.actor, {
+        kind: 'SUPPLIER_INVOICE',
+        amount: Number(inv.total),
+        payeeName: me[0]?.name ?? 'Supplier',
+        branchId: inv.branch_id,
+        supplierId,
+        dueDate: inv.due_date ?? undefined,
+        note: `Invoice ${inv.invoice_no} — filed by the supplier`,
+        sourceType: 'supplier_invoice',
+        sourceId: inv.id,
+        systemRaised: true,
+      });
+    }
 
 
     /* The message below promised a check. It now happens, here, rather than

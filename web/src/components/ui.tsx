@@ -539,6 +539,10 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         { to: '/finance', label: can('finance.expense.view') ? 'Finance Desk' : 'Money Requests',
           icon: 'coins',
           perms: ['finance.request.create', 'finance.request.verify', 'finance.payment.make', 'finance.receipt.record'] },
+        /* The desk is a queue; this is the record. Different question, so it is
+           a different item rather than a sixth tab on the desk. */
+        { to: '/money', label: 'Money In & Out', icon: 'chart',
+          perms: ['finance.expense.view'] },
         { to: '/invoices', label: 'Invoices & Match', icon: 'invoice', perms: ['finance.invoice.create', 'finance.invoice.match'] },
         { to: '/payments', label: 'Payment Status', icon: 'card', perms: ['finance.payment.view'] },
       ],
@@ -701,14 +705,63 @@ export type Col<T> = {
   render: (row: T) => React.ReactNode;
   num?: boolean;
   width?: number | string;
+  /**
+   * What this column sorts on. Give it and the heading becomes clickable.
+   *
+   * It has to be separate from `render`, which returns JSX — sorting on the
+   * rendered output would order "₹1,200" before "₹900" because that is how
+   * strings compare, which is the exact bug this exists to avoid.
+   */
+  sort?: (row: T) => string | number | null | undefined;
+  /** Sort descending on the first click — right for anything money or dated. */
+  desc?: boolean;
 };
 
-export function DataTable<T>({ rows, cols, onRowClick, rowTone, empty, loading }: {
+/**
+ * Sorting lives here rather than in each screen because a table that sorts
+ * differently on two pages is worse than one that does not sort at all. Give a
+ * column a `sort` and its heading becomes clickable; give it none and it stays
+ * exactly as it was.
+ *
+ * Nulls always sink, ascending or descending: a row with no date is not the
+ * oldest row, it is a row somebody has not filled in yet, and putting it at the
+ * top of "oldest first" hides the thing that was actually being looked for.
+ */
+export function DataTable<T>({ rows, cols, onRowClick, rowTone, empty, loading, defaultSort }: {
   rows: T[]; cols: Col<T>[];
   onRowClick?: (row: T) => void;
   rowTone?: (row: T) => 'warn' | 'crit' | undefined;
   empty?: React.ReactNode; loading?: boolean;
+  /** Column key to sort by before anybody clicks anything. */
+  defaultSort?: string;
 }) {
+  const [sortKey, setSortKey] = React.useState<string | null>(defaultSort ?? null);
+  const [dir, setDir] = React.useState<'asc' | 'desc'>(() =>
+    (cols.find((c) => c.key === defaultSort)?.desc ? 'desc' : 'asc'));
+
+  const sorted = React.useMemo(() => {
+    const col = cols.find((c) => c.key === sortKey);
+    if (!col?.sort) return rows;
+    const sign = dir === 'asc' ? 1 : -1;
+    return [...rows].sort((a, b) => {
+      const x = col.sort!(a);
+      const y = col.sort!(b);
+      const xEmpty = x == null || x === '';
+      const yEmpty = y == null || y === '';
+      if (xEmpty && yEmpty) return 0;
+      if (xEmpty) return 1;
+      if (yEmpty) return -1;
+      if (typeof x === 'number' && typeof y === 'number') return (x - y) * sign;
+      return String(x).localeCompare(String(y), undefined, { numeric: true }) * sign;
+    });
+  }, [rows, cols, sortKey, dir]);
+
+  const click = (c: Col<T>) => {
+    if (!c.sort) return;
+    if (sortKey === c.key) setDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortKey(c.key); setDir(c.desc ? 'desc' : 'asc'); }
+  };
+
   if (loading) return <Loading />;
   if (!rows.length) return <>{empty ?? <Empty title="Nothing here yet" />}</>;
   return (
@@ -716,13 +769,22 @@ export function DataTable<T>({ rows, cols, onRowClick, rowTone, empty, loading }
       <table className="data">
         <thead>
           <tr>{cols.map((c) => (
-            <th key={c.key} className={c.num ? 'num' : ''} style={c.width ? { width: c.width } : undefined}>
+            <th key={c.key}
+              className={`${c.num ? 'num' : ''} ${c.sort ? 'sortable' : ''} ${sortKey === c.key ? 'sorted' : ''}`}
+              style={c.width ? { width: c.width } : undefined}
+              onClick={() => click(c)}
+              title={c.sort ? `Sort by ${c.head.toLowerCase()}` : undefined}>
               {c.head}
+              {c.sort ? (
+                <span className="sort-arrow">
+                  {sortKey === c.key ? (dir === 'asc' ? '▲' : '▼') : '↕'}
+                </span>
+              ) : null}
             </th>
           ))}</tr>
         </thead>
         <tbody>
-          {rows.map((r, i) => {
+          {sorted.map((r, i) => {
             const tone = rowTone?.(r);
             return (
               <tr key={i}

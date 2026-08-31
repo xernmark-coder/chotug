@@ -1,13 +1,12 @@
 import React, { useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { api, useAuth, inr, num, date, idempotencyKey } from '../lib/api';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useAuth, inr, num, date } from '../lib/api';
 import {
-  Chip, DataTable, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast,
+  Chip, DataTable, Empty, ErrorBanner, Kpi, Layout, useApi, useToast,
   FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
 import { SellPacksModal } from './Packing';
-import { AddCustomerModal } from './Centres';
 import {
   CHART, ChartCard, compact, inrCompact, Meter, StackedStatus,
 } from '../components/charts';
@@ -29,12 +28,12 @@ const URGENCY_TONE: Record<string, 'danger' | 'warn' | 'primary' | 'neutral'> = 
 };
 
 export function SalesPage() {
+  const nav = useNavigate();
   const toast = useToast();
   const { warehouseId, can, me } = useAuth();
   const [searchParams] = useSearchParams();
   const centreUser = !!me?.roles.includes('CENTRE_EXEC');
   const [days, setDays] = useState(30);
-  const [selling, setSelling] = useState<any>(null);
   // Selling a ready-made pack is the common case: somebody already decided the
   // size and the price, so the sale is a tick and a name — not a weight and a
   // rate typed again at the counter.
@@ -52,6 +51,9 @@ export function SalesPage() {
   const risk = sugg.data?.atRisk ?? {};
   const showMoney = can('data.cost.view', 'reports.purchase.view');
   const canSell = can('inventory.stock.issue');
+  /* Grading a box is what makes it sellable, so the button that leads there is
+     gated on the grading right rather than the selling one. */
+  const canPack = can('inventory.pack.grade') || can('inventory.stock.issue');
 
   const profit = Number(t.profit ?? 0);
   const onHandValue = (summary.data?.byProduct ?? [])
@@ -197,8 +199,20 @@ export function SalesPage() {
       ) : null}
 
       {!centreUser ? <>
-      {/* ------------------------------------------------ what to sell --- */}
-      <div className="section-head"><h2>Sell these first</h2><span className="rule" /></div>
+      {/* ------------------------------------------------ what to pack --- */}
+      <div className="section-head"><h2>Pack these first</h2><span className="rule" /></div>
+
+      {/* Produce leaves this building in a labelled box and no other way. The
+          list below is loose stock, so nothing on it can be sold yet — the
+          action on every row is the bench. */}
+      <div className="banner info mb">
+        <span><Icon name="box" size={16} /></span>
+        <div className="small">
+          <b>Stock is sold as packed boxes.</b> Everything below is still loose:
+          grade and label it at the packing bench and it joins the boxes above,
+          with its own price, grade and barcode.
+        </div>
+      </div>
 
       {Number(risk.value) > 0 ? (
         <div className="banner warn mb">
@@ -266,9 +280,14 @@ export function SalesPage() {
                 ),
               }] : []),
               {
-                key: 'a', head: '', width: 90,
-                render: (s: any) => canSell
-                  ? <button className="btn sm primary" onClick={() => setSelling(s)}>Sell</button>
+                /* This used to sell the batch straight off the shelf. Produce
+                   is sold as packed boxes now, so the only honest action here
+                   is to send it to the bench — where it is graded, labelled and
+                   priced, and after which it can be sold. */
+                key: 'a', head: '', width: 100,
+                render: (s: any) => canPack
+                  ? <button className="btn sm primary"
+                      onClick={() => nav(`/pack-bench/${s.batch_id}`)}>Pack it</button>
                   : null,
               },
             ]}
@@ -402,195 +421,8 @@ export function SalesPage() {
           onDone={() => { setSellingPacks(null); setPickedPacks({}); reloadAll(); }} />
       ) : null}
 
-      {selling ? (
-        <SellModal row={selling} onClose={() => setSelling(null)}
-          onDone={() => { setSelling(null); reloadAll(); }} />
-      ) : null}
     </Layout>
   );
 }
 
 /* --------------------------------------------------------------- sell --- */
-
-function SellModal({ row, onClose, onDone }: { row: any; onClose: () => void; onDone: () => void }) {
-  const toast = useToast();
-  const { me } = useAuth();
-  const centreUser = !!me?.roles.includes('CENTRE_EXEC');
-  const [qty, setQty] = useState(String(row.available_qty ?? ''));
-  const [rate, setRate] = useState(row.suggestedRate != null ? String(row.suggestedRate) : '');
-  const [party, setParty] = useState('');
-  /* A name typed into a box is not a customer — it is a different spelling
-     every time, and "who buys from us" becomes unanswerable. So the buyer is
-     picked from the list, and adding one is a button beside it rather than a
-     trip to another screen while somebody waits at the counter. */
-  const [customerId, setCustomerId] = useState('');
-  const [addingCustomer, setAddingCustomer] = useState(false);
-  const customers = useApi<any[]>(
-    `/centres/customers/list?warehouseId=${row.warehouse_id ?? ''}`, [row.warehouse_id]);
-  const centres = useApi<any[]>('/centres');
-  const [ref, setRef] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [key] = useState(() => idempotencyKey('sale'));
-
-  const uom = row.base_uom;
-  const available = Number(row.available_qty ?? 0);
-  const n = Number(qty) || 0;
-  const r = Number(rate) || 0;
-  const cost = Number(row.landed_rate ?? 0);
-  const over = n > available + 0.001;
-
-  /* Three prices, not one. "Below cost" only counts what this crate was bought
-     for; the floor that actually keeps the business alive includes the wages,
-     the electricity and the cold store, and allows for what gets thrown away. */
-  const overhead = Number(row.overhead_per_kg ?? 0);
-  const trueCost = Number(row.true_cost ?? cost);
-  const minSell = Number(row.min_sell_price ?? 0);
-  const revenue = n * r;
-  const costOut = n * cost;
-  const margin = revenue - costOut;
-  const belowCost = r > 0 && r < cost;
-  const belowTrueCost = r > 0 && r >= cost && r < trueCost;
-  const belowMin = r > 0 && minSell > 0 && r >= trueCost && r < minSell;
-
-  const post = async () => {
-    setBusy(true);
-    try {
-      const res = await api.post<any>('/inventory/issues', {
-        idempotencyKey: key,
-        warehouseId: row.warehouse_id,
-        reason: 'SALE',
-        partyName: party || undefined,
-        customerId: customerId || undefined,
-        referenceNo: ref || undefined,
-        lines: [{ batchId: row.batch_id, qty: n, rate: r }],
-      });
-      toast(`${res.issue_no} — ${num(n, 0)} ${uom} sold`, 'ok');
-      onDone();
-    } catch (e: any) { toast(e.message, 'err'); } finally { setBusy(false); }
-  };
-
-  const customerModal = addingCustomer ? (
-    <AddCustomerModal
-      centres={centres.data ?? []}
-      defaultCentre={row.warehouse_id}
-      lockCentre={centreUser}
-      onClose={() => setAddingCustomer(false)}
-      onDone={(m, c) => {
-        setAddingCustomer(false);
-        customers.reload();
-        if (c?.id) { setCustomerId(c.id); setParty(c.name); }
-        toast(m, 'ok');
-      }} />
-  ) : null;
-
-  return (
-    <>
-    {customerModal}
-    <Modal
-      title={`Sell ${row.product_name}`}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn primary" disabled={busy || !n || over || !r} onClick={post}>
-            {busy ? 'Recording…' : `Record sale — ${inr(revenue, 0)}`}
-          </button>
-        </>
-      }
-    >
-      <dl className="kv mb">
-        <dt>Batch</dt><dd className="mono">{row.batch_no}</dd>
-        <dt>Available</dt><dd>{num(available, 2)} {uom}</dd>
-        <dt>Shelf life</dt>
-        <dd>{row.days_left == null ? 'not recorded'
-          : row.days_left <= 0 ? 'past its date' : `${row.days_left} day(s) left`}</dd>
-        <dt>It cost you</dt><dd>{inr(cost)} per {uom}</dd>
-      </dl>
-
-      <div className="grid c2">
-        <Field label={`How much (${uom})`}
-          error={over ? `Only ${num(available, 2)} ${uom} available` : undefined}>
-          <input type="number" step="0.01" value={qty} autoFocus
-            onChange={(e) => setQty(e.target.value)} />
-        </Field>
-        <Field label={`Selling rate (₹ per ${uom})`}
-          hint={row.suggestedRate != null ? `Suggested ${inr(row.suggestedRate)}` : undefined}>
-          <input type="number" step="0.01" value={rate}
-            onChange={(e) => setRate(e.target.value)} />
-        </Field>
-      </div>
-
-      <div className="grid c2">
-        <Field label="Sold to" hint="Pick the customer so their history builds up.">
-          <div className="row" style={{ gap: 6 }}>
-            <select style={{ flex: 1 }} value={customerId}
-              onChange={(e) => {
-                setCustomerId(e.target.value);
-                const c = (customers.data ?? []).find((x: any) => x.id === e.target.value);
-                setParty(c?.name ?? '');
-              }}>
-              <option value="">Walk-in — no name</option>
-              {(customers.data ?? []).map((c: any) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}{c.phone ? ` · ${c.phone}` : ''}
-                </option>))}
-            </select>
-            <button className="btn sm" onClick={() => setAddingCustomer(true)}>+ New</button>
-          </div>
-        </Field>
-        <Field label="Their reference" hint="Challan or order number, if any.">
-          <input value={ref} onChange={(e) => setRef(e.target.value)} />
-        </Field>
-      </div>
-
-      {/* The whole cost of a crate, spelled out, because "it cost 110" and
-          "we cannot sell it under 140" are different sentences and the person
-          at the till needs the second one. */}
-      {trueCost > 0 ? (
-        <div className="price-ladder mb">
-          <div><span>Bought for</span><b>{inr(cost)}</b></div>
-          <div><span>Running costs</span><b>+ {inr(overhead)}</b>
-            <em>wages, power, cold store — per {row.base_uom}</em></div>
-          <div className="tot"><span>Really cost</span><b>{inr(trueCost)}</b></div>
-          {minSell > 0 ? (
-            <div className="floor">
-              <span>Do not sell below</span><b>{inr(minSell)}</b>
-              <em>{num(row.wastage_pct, 1)}% goes to waste · {num(row.margin_pct, 0)}% margin</em>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {n > 0 && r > 0 ? (
-        <div className={`banner ${belowCost || belowTrueCost ? 'danger'
-          : belowMin ? 'warn' : margin > 0 ? 'ok' : 'warn'}`}>
-          <span>{belowCost ? '⚠' : margin > 0 ? '✓' : 'ℹ'}</span>
-          <div>
-            <b>
-              {belowCost
-                ? `Below what it cost — you lose ${inr(Math.abs(margin), 0)} on this sale`
-                : belowTrueCost
-                  ? `Covers the purchase but not the running costs — ${inr(minSell)} is the floor`
-                  : belowMin
-                    ? `Under the minimum of ${inr(minSell)} — thinner margin than intended`
-                    : margin > 0
-                      ? `You make ${inr(margin, 0)} on this sale`
-                      : 'You break even on this sale'}
-            </b>
-            <div className="small">
-              {inr(revenue, 0)} in, {inr(costOut, 0)} of cost out
-              {revenue > 0 ? ` · ${num((margin / revenue) * 100, 1)}% margin` : ''}
-            </div>
-            {belowCost ? (
-              <div className="small mt">
-                Sometimes right — recovering something beats throwing it away. It is recorded
-                either way, so the loss shows up in the numbers instead of vanishing.
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-    </Modal>
-    </>
-  );
-}

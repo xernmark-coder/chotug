@@ -57,10 +57,27 @@ VALUES
  ('01919000-0000-7000-8000-000000000044','01919000-0000-7000-8000-000000000001','01919000-0000-7000-8000-000000000033','R-P1')
 ON CONFLICT DO NOTHING;
 
+/* Four shelves on every rack.
+ *
+ * The NOT EXISTS is not belt-and-braces. 27_pack_and_grade added
+ * uq_bin_code_ci — a shelf label has to be unique across the whole company,
+ * because the point of it is that scanning it identifies one shelf and nothing
+ * else. But a rack code is only unique within its section, so two sections each
+ * holding a rack "A1" both want a shelf "A1-1", and the second one violates
+ * that index. ON CONFLICT (rack_id, code) cannot catch it: the row conflicts on
+ * a different index from the one named as the arbiter.
+ *
+ * The effect was that this file could not be re-run on any database that had
+ * already been seeded — which is every database — so `npm run migrate` died
+ * here and no migration after it ever ran. */
 INSERT INTO bins (company_id, rack_id, code, capacity_kg, capacity_crates, is_pickface)
 SELECT '01919000-0000-7000-8000-000000000001', r.id, r.code || '-' || b.n, 1500, 60, (b.n = 1)
 FROM racks r CROSS JOIN generate_series(1,4) AS b(n)
 WHERE r.company_id = '01919000-0000-7000-8000-000000000001'
+  AND NOT EXISTS (
+      SELECT 1 FROM bins x
+       WHERE x.company_id = r.company_id
+         AND lower(x.code) = lower(r.code || '-' || b.n))
 ON CONFLICT (rack_id, code) DO NOTHING;
 
 -- ---------------------------------------------------------------------------

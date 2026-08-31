@@ -10,6 +10,7 @@ import {
   assertTransition, money, quoteLandedRate, recommendedQty, round,
 } from '../domain/index.js';
 import { buySuggestion, forecastDemand, priceSignal } from '../ai/features.js';
+import { ensureOrderPayable } from './finance.js';
 
 export const planningRouter = Router();
 planningRouter.use(authenticate);
@@ -216,6 +217,15 @@ const RequirementLineIn = z.object({
   productId: z.string().uuid(),
   uom: z.string().min(1),
   finalQty: z.number().positive('Quantity must be more than zero'),
+  /* "if any center wants boxes of different kg they can make request
+   *  accordingly, like 20 5kg boxes of apples."
+   *
+   * The total is still finalQty — every report, every conversion to a purchase
+   * order and every stock check reads that and is unaffected. These two say
+   * what was actually asked for, so the packing bench can make that size
+   * rather than whatever it happened to be making. */
+  packSizeKg: z.number().positive().nullable().optional(),
+  packCount: z.number().int().positive().nullable().optional(),
   suggestedQty: z.number().nullable().optional(),
   suggestedBy: z.enum(['RULE', 'AI', 'NONE']).default('NONE'),
   suggestionReason: z.any().optional(),
@@ -289,15 +299,17 @@ planningRouter.post('/requirements', requires('purchase.requirement.create'), h(
             current_stock, available_stock, open_po_qty, avg_daily_sale, lead_time_days,
             min_stock, max_stock, suggested_qty, suggested_by, suggestion_reason,
             ai_run_id, ai_confidence, final_qty, edit_reason, duplicate_warning,
-            advance_order_qty, remarks, created_by, updated_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$23)`,
+            advance_order_qty, remarks, pack_size_kg, pack_count, created_by, updated_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
+                 $23,$24,$25,$25)`,
         [req.actor.companyId, requirement.id, idx + 1, l.productId, l.uom,
          l.currentStock ?? null, l.availableStock ?? null, l.openPoQty ?? null,
          l.avgDailySale ?? null, l.leadTimeDays ?? null, l.minStock ?? null, l.maxStock ?? null,
          l.suggestedQty ?? null, l.suggestedBy, JSON.stringify(l.suggestionReason ?? null),
          l.aiRunId ?? null, l.aiConfidence ?? null, l.finalQty, l.editReason ?? null,
          dup.length ? JSON.stringify({ openRequirements: dup }) : null,
-         l.advanceOrderQty ?? 0, l.remarks ?? null, req.actor.userId]);
+         l.advanceOrderQty ?? 0, l.remarks ?? null,
+         l.packSizeKg ?? null, l.packCount ?? null, req.actor.userId]);
 
       // Close the AI feedback loop (§14.6) — did the human take the advice?
       if (l.aiRunId) {
@@ -326,6 +338,15 @@ planningRouter.get('/requirements', h(async (req) =>
                FROM requirement_lines l JOIN products p ON p.id = l.product_id
               WHERE l.requirement_id = r.id) AS product_names,
             (SELECT COALESCE(SUM(l.final_qty),0) FROM requirement_lines l WHERE l.requirement_id = r.id) AS total_qty,
+            /* What was actually asked for, where it was asked for in boxes.
+             * "20 × 5 kg" is the request; "100 KG" is only its arithmetic, and
+             * a buyer reading the list needs the first one. */
+            (SELECT string_agg(
+                      l.pack_count || ' × ' || trim(trailing '.' from
+                        trim(trailing '0' from l.pack_size_kg::text)) || ' kg',
+                      ', ' ORDER BY l.line_no)
+               FROM requirement_lines l
+              WHERE l.requirement_id = r.id AND l.pack_size_kg IS NOT NULL) AS boxes_wanted,
             u.full_name AS created_by_name
        FROM requirements r
        LEFT JOIN warehouses cw ON cw.id = r.raised_for_warehouse_id
@@ -677,6 +698,11 @@ planningRouter.get('/purchase-orders', h(async (req) =>
               ORDER BY pk.created_at DESC LIMIT 1) AS pickup_status,
             pay.request_no AS payment_request_no, pay.status AS payment_status,
             pay.amount AS payment_amount, pay.paid_amount AS payment_paid,
+            /* Goods that came without the money going first. The buyer needs to
+             * see this on the list, not on the order — it changes who has to
+             * chase whom. */
+            pay.became_due_at AS payment_due_since,
+            o.sent_without_payment, o.sent_without_payment_at,
             pr.received_qty, pr.ordered_qty, pr.fill_pct,
             (SELECT count(*) FROM approvals a
               WHERE a.doc_id = o.id AND a.doc_type='PO' AND a.status='PENDING') AS pending_approvals
@@ -689,7 +715,8 @@ planningRouter.get('/purchase-orders', h(async (req) =>
         * would show "not asked for yet" on an order whose invoice is already
         * with Finance. */
        LEFT JOIN LATERAL (
-         SELECT x.request_no, x.status, x.amount, x.paid_amount, x.reject_reason
+         SELECT x.request_no, x.status, x.amount, x.paid_amount, x.reject_reason,
+                x.became_due_at
            FROM payment_requests x
           WHERE x.company_id = o.company_id AND x.status <> 'CANCELLED'
             AND ((x.source_type = 'purchase_order' AND x.source_id = o.id)
@@ -708,6 +735,7 @@ planningRouter.get('/purchase-orders/:id', h(async (req) => {
     `SELECT o.*,
             pay.request_no AS payment_request_no, pay.status AS payment_status,
             pay.amount AS payment_amount, pay.paid_amount AS payment_paid,
+            pay.became_due_at AS payment_due_since,
             s.trade_name AS supplier_name, s.legal_name AS supplier_legal_name,
             s.source_type AS supplier_source_type, s.phone AS supplier_phone,
             (SELECT pk.pickup_no FROM pickups pk
@@ -728,7 +756,8 @@ planningRouter.get('/purchase-orders/:id', h(async (req) => {
         * would show "not asked for yet" on an order whose invoice is already
         * with Finance. */
        LEFT JOIN LATERAL (
-         SELECT x.request_no, x.status, x.amount, x.paid_amount, x.reject_reason
+         SELECT x.request_no, x.status, x.amount, x.paid_amount, x.reject_reason,
+                x.became_due_at
            FROM payment_requests x
           WHERE x.company_id = o.company_id AND x.status <> 'CANCELLED'
             AND ((x.source_type = 'purchase_order' AND x.source_id = o.id)
@@ -1029,10 +1058,39 @@ planningRouter.post('/purchase-orders/:id/confirm', requires('purchase.po.approv
       requiredPermission: 'receiving.gate.create',
       payload: { expectedArrivalId: ea[0].id },
     });
+    /* The money side of the same moment.
+     *
+     *   "suppose we buy any product, it should immediately come in expense of
+     *    the finance panel"
+     *
+     * Confirming is when we commit to spend — the supplier has been told to
+     * load. Finance used to hear nothing until an invoice was keyed in, so the
+     * one desk that is supposed to see every rupee was the last to know about
+     * the largest ones. There is exactly one claim per order: when the invoice
+     * arrives this same claim moves onto it. */
+    const { rows: sup } = await tx.query(
+      `SELECT COALESCE(trade_name, legal_name) AS name, payment_terms_days
+         FROM suppliers WHERE id = $1`, [po.supplier_id]);
+
+    const payable = await ensureOrderPayable(tx, req.actor, {
+      poId: po.id, poNo: po.po_no, branchId: po.branch_id,
+      supplierId: po.supplier_id, supplierName: sup[0]?.name ?? 'Supplier',
+      amount: Number(po.grand_total), warehouseId,
+      dueDate: input.expectedDate ?? po.expected_date,
+      priority: po.is_urgent ? 'HIGH' : 'NORMAL',
+      note: `${po.po_no} — ordered from ${sup[0]?.name ?? 'supplier'}`,
+    });
+
     // The call has been made; the job now belongs to the gate.
     await resolveTask(tx, req.actor, 'PO_CONFIRM', 'PO', po.id);
     await emit(tx, req.actor, 'purchase_order', po.id, 'po.confirmed', { poNo: po.po_no });
-    return { ok: true, status: 'CONFIRMED', expectedArrivalId: ea[0].id };
+    return {
+      ok: true, status: 'CONFIRMED', expectedArrivalId: ea[0].id,
+      paymentRequestNo: payable?.request_no ?? null,
+      message: payable
+        ? `${po.po_no} confirmed. ${inrText(Number(po.grand_total))} is with Finance as ${payable.request_no}.`
+        : `${po.po_no} confirmed.`,
+    };
   });
 }));
 

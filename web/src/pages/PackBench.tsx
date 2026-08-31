@@ -448,6 +448,13 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
      left. Offered rather than imposed — an odd last box is normal. */
   const fits = per > 0 ? Math.floor((free + 0.001) / per) : 0;
 
+  /* The least this box can sell for and still make the margin, given what the
+     produce cost, what it costs to handle and what the trip to the shop costs.
+     Per box, not per kilo, because per box is what goes on the label. */
+  const floorPerKg = Number(bench.min_sell_price) || 0;
+  const floorPerBox = floorPerKg > 0 && per > 0 ? floorPerKg * per : 0;
+  const belowFloor = floorPerBox > 0 && Number(price) > 0 && Number(price) < floorPerBox;
+
   return (
     <Modal
       title={`Make boxes out of ${bench.product_name}`}
@@ -490,6 +497,27 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
         </p>
       )}
 
+      {/* What the shops have actually asked for. Packing 2 kg bags while three
+          centres wait for 5 kg boxes is work that has to be done twice, and
+          until this was here the bench had no way to know. */}
+      {(bench.wanted ?? []).length ? (
+        <div className="banner info mb" style={{ display: 'block' }}>
+          <b className="small">Shops are waiting for these sizes</b>
+          <div className="chip-row mt">
+            {(bench.wanted ?? []).map((wnt: any) => (
+              <button key={`${wnt.centre_name}-${wnt.pack_size_kg}`} type="button"
+                className={`chip ${Number(size) === Number(wnt.pack_size_kg) ? 'primary' : 'neutral'}`}
+                onClick={() => {
+                  setSize(String(Number(wnt.pack_size_kg)));
+                  setCount(String(wnt.boxes_wanted));
+                }}>
+                {wnt.centre_name ?? 'A shop'}: {wnt.boxes_wanted} × {num(wnt.pack_size_kg, 1)} kg
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid c2">
         <div>
           <label className="lbl">How much in each box ({bench.base_uom})</label>
@@ -522,6 +550,17 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
           <label className="lbl">Price on each label (₹)</label>
           <input type="number" step="0.01" min={0} value={price}
             onChange={(e) => setPrice(e.target.value)} placeholder="120" />
+          {/* Selling happens from the box now, so this IS the selling price and
+              this is where it is decided. The floor has to be in front of the
+              person typing it, or they are guessing against a cost nobody
+              showed them. */}
+          {floorPerBox > 0 ? (
+            <div className={`small mt ${belowFloor ? 'chip danger' : 'muted'}`}>
+              {belowFloor
+                ? `Under the ${inr(floorPerBox)} this box has to fetch`
+                : `Floor for a ${num(per, 1)} ${bench.base_uom} box: ${inr(floorPerBox)}`}
+            </div>
+          ) : null}
         </div>
       </div>
 

@@ -265,9 +265,18 @@ receivingRouter.get('/lookup/invoice', requires('receiving.gate.create'), h(asyn
 async function unloadState(actor: any, gateEntryId: string) {
   const [entry] = await query(actor,
     `SELECT g.id, g.gate_no, g.status, g.po_id, g.branch_id, g.warehouse_id,
-            g.supplier_id, o.po_no
+            g.supplier_id, o.po_no,
+            /* Where this load is standing while it is checked. The floor needs
+             * it on the same screen they are weighing on — asking them to open
+             * the warehouse map to find out where they put the last pallet is
+             * how loads end up unrecorded. */
+            g.qc_bin_id, g.qc_parked_at, g.qc_released_at,
+            b.code AS qc_bay_code, zq.name AS qc_section_name
        FROM gate_entries g
        LEFT JOIN purchase_orders o ON o.id = g.po_id
+       LEFT JOIN bins  b  ON b.id = g.qc_bin_id
+       LEFT JOIN racks rq ON rq.id = b.rack_id
+       LEFT JOIN zones zq ON zq.id = rq.zone_id
       WHERE g.id = $1 AND g.company_id = $2`,
     [gateEntryId, actor.companyId]);
   if (!entry) throw ApiError.notFound('That vehicle is not at our gate.');
@@ -456,9 +465,15 @@ receivingRouter.post('/boxes/:id/void', requires('receiving.box.void'), h(async 
 
 receivingRouter.get('/pipeline', h(async (req) =>
   query(req.actor,
-    `SELECT * FROM v_receiving_pipeline
-      WHERE company_id = $1 AND ($2::uuid IS NULL OR warehouse_id = $2)
-      ORDER BY critical_fail DESC, age_minutes DESC`,
+    /* Where the load is standing comes along with the rest of it. The yard
+     * screen is where somebody asks "where did we put gate 41" and answering it
+     * from a different page is how nobody bothers to record the bay at all. */
+    `SELECT p.*, g.qc_bin_id, g.qc_parked_at, b.code AS qc_bay_code
+       FROM v_receiving_pipeline p
+       JOIN gate_entries g ON g.id = p.gate_entry_id
+       LEFT JOIN bins b ON b.id = g.qc_bin_id AND g.qc_released_at IS NULL
+      WHERE p.company_id = $1 AND ($2::uuid IS NULL OR p.warehouse_id = $2)
+      ORDER BY p.critical_fail DESC, p.age_minutes DESC`,
     [req.actor.companyId, req.query.warehouseId ?? null])));
 
 receivingRouter.get('/gate-entries/:id', h(async (req) => {
@@ -1368,8 +1383,14 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
     }
 
     await tx.query(
+      /* The receipt is posted, so the goods have been accepted and are stock —
+       * they are no longer standing in the quality-check bay. Leaving the bay
+       * marked occupied is how the floor ends up with four bays and nowhere to
+       * put the next lorry. */
       `UPDATE gate_entries SET status='COMPLETED', unloading_end_at=now(),
-              gate_out_at=now(), updated_by=$2 WHERE id=$1`,
+              gate_out_at=now(),
+              qc_released_at = COALESCE(qc_released_at, now()),
+              updated_by=$2 WHERE id=$1`,
       [g.id, req.actor.userId]);
     await resolveTask(tx, req.actor, 'GRN_PENDING', 'GATE_ENTRY', g.id);
 

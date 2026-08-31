@@ -604,37 +604,19 @@ export function AdminDashboardPage() {
   const nav = useNavigate();
   const { branchId, warehouseId, me, can } = useAuth();
   const dashboard = useApi<any>(`/insights/dashboard?branchId=${branchId ?? ''}`, [branchId]);
-  const queue = useApi<any[]>('/insights/work-queue');
   const sales = useApi<any>('/inventory/sales-summary?days=1');
   const stockData = useApi<any[]>(`/insights/stock?warehouseId=${warehouseId ?? ''}`, [warehouseId]);
 
-  if (dashboard.loading || sales.loading || queue.loading || stockData.loading) return <Layout title="Dashboard"><Loading /></Layout>;
+  if (dashboard.loading || sales.loading || stockData.loading) return <Layout title="Dashboard"><Loading /></Layout>;
 
   const k = dashboard.data?.kpis ?? {};
   const stock = dashboard.data?.criticalStock ?? [];
   const inventoryValue = (stockData.data ?? []).reduce((sum, item) => sum + Number(item.qty ?? 0) * Number(item.landed_rate ?? 0), 0);
-  const tasks = queue.data ?? [];
   const operations = [
     { label: 'Incoming deliveries', total: Number(k.arrivals_today ?? 0), pending: Number(k.awaiting_weighment ?? 0) + Number(k.awaiting_qc ?? 0) + Number(k.awaiting_grn ?? 0), pendingLabel: 'in progress', to: '/arrivals' },
     { label: 'Purchase orders', total: Number(k.pending_pos ?? 0) + Number(k.pending_approvals ?? 0), pending: Number(k.pending_approvals ?? 0), pendingLabel: 'awaiting approval', to: '/purchase-orders' },
     { label: 'Sales', total: Number(sales.data?.totals?.sales ?? 0), pending: 0, pendingLabel: 'processing', to: '/sales' },
   ];
-  const attention = [
-    ...tasks.slice(0, 4).map((task: any) => ({
-      severity: task.severity ?? (task.sla_breached ? 'HIGH' : 'NORMAL'),
-      text: task.title,
-      detail: [task.subtitle, task.doc_no].filter(Boolean).join(' · '),
-      action: 'Review',
-      to: (QUEUE_ROUTE[task.queue_key] ?? (() => '/my-work'))(task),
-    })),
-    ...(stock.length ? [{
-      severity: stock.some((p: any) => Number(p.days_of_cover) < 1) ? 'CRITICAL' : 'HIGH',
-      text: `${stock.length} product${stock.length === 1 ? '' : 's'} critically low`,
-      detail: stock.slice(0, 2).map((p: any) => p.name).join(', '),
-      action: 'View inventory', to: '/buy-list',
-    }] : []),
-  ].slice(0, 5);
-
   return (
     <Layout title="Admin dashboard" subtitle="What is happening right now">
       <ErrorBanner error={dashboard.error ?? sales.error} />
@@ -645,17 +627,6 @@ export function AdminDashboardPage() {
       </div>
 
       <QuickActions can={can} nav={nav} />
-
-      <div className="section-head"><h2>Needs Attention</h2><span className="rule" /></div>
-      <div className="card mb"><div className="card-body tight">
-        {attention.length ? attention.map((item, index) => (
-          <div className="row" key={`${item.text}-${index}`} style={{ padding: '13px 0', borderBottom: index < attention.length - 1 ? '1px solid var(--line)' : undefined }}>
-            <Chip value={item.severity} />
-            <div style={{ flex: 1, minWidth: 0 }}><b>{item.text}</b><div className="small muted">{item.detail || 'Needs a decision today'}</div></div>
-            <button className="btn sm primary" onClick={() => nav(item.to)}>{item.action}</button>
-          </div>
-        )) : <Empty icon="✅" title="Everything looks good" hint="Nothing needs your attention right now." />}
-      </div></div>
 
       <div className="section-head"><h2>Today's Operations</h2><span className="rule" /></div>
       <div className="grid c3 mb">{operations.map((item) => <div className="card" key={item.label}>

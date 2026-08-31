@@ -604,8 +604,14 @@ function IssuedOutTable({ f }: { f: ReturnType<typeof useFilters<any>> }) {
   );
 }
 
+/* Selling is deliberately not on this list.
+ *
+ *   "they can sell in packed boxes only, so remove that issue directly."
+ *
+ * A sale off a batch skipped the packing bench, and with it the grade on the
+ * box, its label, its shelf and its price. The server refuses it now; offering
+ * it here would only produce an error message where a button used to be. */
 const ISSUE_REASONS = [
-  { v: 'SALE',         label: 'Sale — sold to a customer',                       needsNote: false },
   { v: 'TRANSFER_OUT', label: 'Transfer — sent to another branch or warehouse',  needsNote: true },
   { v: 'CONSUMPTION',  label: 'Consumed — used internally, staff, samples',      needsNote: true },
   { v: 'RETURN',       label: 'Returned to the supplier',                        needsNote: true },
@@ -622,9 +628,8 @@ function IssueStockModal({ row, onClose, onDone }: {
 }) {
   const toast = useToast();
   const { can } = useAuth();
-  const [reason, setReason] = useState('SALE');
+  const [reason, setReason] = useState('TRANSFER_OUT');
   const [qty, setQty] = useState('');
-  const [rate, setRate] = useState('');
   const [party, setParty] = useState('');
   const [ref, setRef] = useState('');
   const [note, setNote] = useState('');
@@ -639,9 +644,9 @@ function IssueStockModal({ row, onClose, onDone }: {
   const over = n > available + 0.001;
   const canWriteOff = can('inventory.stock.writeoff');
 
-  // A sale has a margin; everything else is simply value leaving.
-  const value = reason === 'SALE' ? n * (Number(rate) || 0) : n * cost;
-  const margin = reason === 'SALE' ? value - n * cost : null;
+  /* Nothing on this screen earns anything any more — every reason left on the
+     list is value leaving the building, valued at what it cost us. */
+  const value = n * cost;
 
   return (
     <Modal title={`Issue ${row.product_name} out of stock`} onClose={onClose}
@@ -660,7 +665,7 @@ function IssueStockModal({ row, onClose, onDone }: {
                 partyName: party || undefined,
                 referenceNo: ref || undefined,
                 note: note || undefined,
-                lines: [{ batchId: row.batch_id, qty: n, rate: rate ? Number(rate) : null }],
+                lines: [{ batchId: row.batch_id, qty: n }],
               });
               toast(`${r.issue_no} posted — ${num(r.totalQty, 1)} ${uom} out of stock`, 'ok');
               onDone();
@@ -691,25 +696,17 @@ function IssueStockModal({ row, onClose, onDone }: {
           <input type="number" step="0.01" value={qty} autoFocus
             onChange={(e) => setQty(e.target.value)} />
         </Field>
-        {reason === 'SALE' ? (
-          <Field label={`Selling rate (₹ per ${uom})`} hint={`It cost you ${inr(cost)}`}>
-            <input type="number" step="0.01" value={rate} onChange={(e) => setRate(e.target.value)} />
-          </Field>
-        ) : (
-          <Field label="Value leaving" hint="Valued at what it cost you">
-            <input readOnly value={inr(value)} />
-          </Field>
-        )}
+        <Field label="Value leaving" hint="Valued at what it cost you">
+          <input readOnly value={inr(value)} />
+        </Field>
       </div>
 
-      {reason === 'SALE' ? (
-        <div className="grid c2">
-          <Field label="Sold to"><input value={party} placeholder="Customer or shop"
-            onChange={(e) => setParty(e.target.value)} /></Field>
-          <Field label="Their reference"><input value={ref} placeholder="SO / challan no."
-            onChange={(e) => setRef(e.target.value)} /></Field>
-        </div>
-      ) : null}
+      <div className="grid c2">
+        <Field label="Who is it going to?"><input value={party} placeholder="Branch, shop or supplier"
+          onChange={(e) => setParty(e.target.value)} /></Field>
+        <Field label="Their reference"><input value={ref} placeholder="Challan or gate pass no."
+          onChange={(e) => setRef(e.target.value)} /></Field>
+      </div>
 
       <Field label={def.needsNote ? 'Reason (required)' : 'Note (optional)'}
         hint={def.needsNote
@@ -719,16 +716,11 @@ function IssueStockModal({ row, onClose, onDone }: {
       </Field>
 
       {n > 0 && !over ? (
-        <div className={`banner ${margin != null && margin < 0 ? 'warn' : 'info'}`}>
-          <span>{margin != null && margin < 0 ? '⚠' : 'ℹ'}</span>
+        <div className="banner info">
+          <span>ℹ</span>
           <div className="small">
             <b>{num(n, 2)} {uom}</b> leaves, {num(available - n, 2)} {uom} stays.
-            {margin != null ? (
-              margin < 0
-                ? <> Selling at {inr(Number(rate) || 0)} against a cost of {inr(cost)} —
-                    a loss of <b>{inr(Math.abs(margin), 0)}</b> on this issue.</>
-                : <> Revenue {inr(value, 0)}, cost {inr(n * cost, 0)}, margin <b>{inr(margin, 0)}</b>.</>
-            ) : <> Value written out of stock: <b>{inr(value, 0)}</b>.</>}
+            Value written out of stock: <b>{inr(value, 0)}</b>.
           </div>
         </div>
       ) : null}

@@ -8,6 +8,7 @@ import {
 import { Icon } from '../components/icons';
 import { SupplierModal } from './Finance';
 import { CompareModal } from './Purchase';
+import { ProductModal } from './Catalogue';
 
 /* ===========================================================================
  * GUIDED ORDER
@@ -46,6 +47,11 @@ const STEPS = ['What to buy', 'Confirm need', 'Supplier & rates', 'Raise orders'
 export function QuickOrderPage() {
   const nav = useNavigate();
   const toast = useToast();
+  /* Same button as the What-to-buy screen. A product nobody has set up yet is
+     a product nobody can order, and this is the other screen where you notice
+     it is missing — having to leave the flow to add it is how the flow gets
+     abandoned. */
+  const [addingProduct, setAddingProduct] = useState(false);
   const { branchId, me, can } = useAuth();
 
   /* This page raises, approves and confirms in one sweep, so opening it is the
@@ -379,6 +385,11 @@ export function QuickOrderPage() {
       <Steps steps={STEPS} current={step} />
       <ErrorBanner error={error} />
 
+      {addingProduct ? (
+        <ProductModal onClose={() => setAddingProduct(false)}
+          onDone={() => { setAddingProduct(false); buy.reload(); toast('Product added', 'ok'); }} />
+      ) : null}
+
       {/* ============================================ 0 — WHAT TO BUY ==== */}
       {step === 0 ? (
         <>
@@ -398,6 +409,12 @@ export function QuickOrderPage() {
                   onChange={(e) => setOnlyNeeded(e.target.checked)} />
                 Only what needs buying
               </label>
+              <span className="spacer" />
+              {can('master.product.manage') ? (
+                <button className="btn sm" onClick={() => setAddingProduct(true)}>
+                  + New product
+                </button>
+              ) : null}
             </div>
             <div className="card-body tight">
               {buy.loading ? <Loading /> : items.length === 0 ? (

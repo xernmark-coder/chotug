@@ -4,7 +4,7 @@ import { query, withTx, type Actor, type Tx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
 import { authenticate, staffOnly, requires } from '../platform/auth.js';
 import { emit, getSetting, nextDocNo, pushTask, raiseAlert, requestApprovals, resolveTask } from '../platform/services.js';
-import { createRequest } from './finance.js';
+import { createRequest, ensureOrderPayable } from './finance.js';
 import {
   computeLandingCost, money, round, threeWayMatch,
   type Charge, type CostLine, type MatchLine,
@@ -359,18 +359,37 @@ costingRouter.post('/invoices', requires('finance.invoice.create'), h(async (req
     const { rows: supRow } = await tx.query(
       `SELECT COALESCE(trade_name, legal_name) AS name FROM suppliers WHERE id=$1`,
       [input.supplierId]);
-    await createRequest(tx, req.actor, {
-      kind: 'SUPPLIER_INVOICE',
-      amount: Number(input.total),
-      payeeName: supRow[0]?.name ?? 'Supplier',
-      branchId: input.branchId,
-      supplierId: input.supplierId,
-      dueDate: input.dueDate ?? undefined,
-      note: `Invoice ${input.invoiceNo}`,
-      sourceType: 'supplier_invoice',
-      sourceId: inv.id,
-      systemRaised: true,
-    });
+
+    if (input.poId) {
+      /* The order already put a claim in this inbox when it was confirmed.
+       * This invoice is the document that claim is against, so it moves onto
+       * it and takes the billed figure with it. Raising a fresh one would show
+       * the same load owed for twice. */
+      const { rows: poRow } = await tx.query(
+        `SELECT po_no, warehouse_id FROM purchase_orders WHERE id=$1`, [input.poId]);
+      await ensureOrderPayable(tx, req.actor, {
+        poId: input.poId, poNo: poRow[0]?.po_no ?? 'the order',
+        branchId: input.branchId, supplierId: input.supplierId,
+        supplierName: supRow[0]?.name ?? 'Supplier',
+        amount: Number(input.total), warehouseId: poRow[0]?.warehouse_id ?? null,
+        dueDate: input.dueDate ?? null,
+        invoiceId: inv.id, invoiceNo: input.invoiceNo,
+        note: `Invoice ${input.invoiceNo}`,
+      });
+    } else {
+      await createRequest(tx, req.actor, {
+        kind: 'SUPPLIER_INVOICE',
+        amount: Number(input.total),
+        payeeName: supRow[0]?.name ?? 'Supplier',
+        branchId: input.branchId,
+        supplierId: input.supplierId,
+        dueDate: input.dueDate ?? undefined,
+        note: `Invoice ${input.invoiceNo}`,
+        sourceType: 'supplier_invoice',
+        sourceId: inv.id,
+        systemRaised: true,
+      });
+    }
 
     /* Compare it against the order and the receipt now, rather than waiting
      * for somebody to press a button labelled with a phrase they do not use.

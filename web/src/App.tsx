@@ -1,7 +1,7 @@
 import React from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
-import { useAuth } from './lib/api';
-import { Loading } from './components/ui';
+import { api, useAuth } from './lib/api';
+import { ErrorBanner, Field, Loading } from './components/ui';
 import { AdminDashboardPage, DashboardPage, LoginPage, WorkQueuePage } from './pages/Home';
 import { AnalyticsPage } from './pages/Analytics';
 import { BuyListPage, RequirementDetailPage, RequirementListPage } from './pages/Planning';
@@ -24,6 +24,7 @@ import {
 } from './pages/Finance';
 import { CataloguePage } from './pages/Catalogue';
 import { FinanceDeskPage } from './pages/FinanceDesk';
+import { MoneyFlowPage } from './pages/MoneyFlow';
 import { UnloadPage } from './pages/Unload';
 import { PackBenchPage } from './pages/PackBench';
 import { WarehouseMapPage } from './pages/WarehouseMap';
@@ -42,6 +43,11 @@ export default function App() {
   const { me, loading } = useAuth();
 
   if (loading) return <Loading label="Starting up…" />;
+  /* Somebody signed in with a password an admin typed for them. For those few
+     minutes two people know it, so the app asks for a replacement before
+     anything else — this is the only mitigation that actually works, and
+     leaving it to a banner they can ignore means it never happens. */
+  if (me?.mustChangePassword) return <ForcePasswordChange />;
   if (!me) {
     return (
       <Routes>
@@ -170,6 +176,7 @@ export default function App() {
       <Route path="/catalogue" element={<CataloguePage />} />
       <Route path="/master-data" element={<MasterDataPage />} />
       <Route path="/finance" element={<FinanceDeskPage />} />
+      <Route path="/money" element={<MoneyFlowPage />} />
       <Route path="/reports" element={<Navigate to="/analytics?tab=Purchases" replace />} />
       <Route path="/ai" element={<AiCentrePage />} />
       <Route path="/people" element={<PeoplePage />} />
@@ -191,4 +198,60 @@ function CentreHomeRoute() {
   return warehouseId
     ? <Navigate to="/dashboard" replace />
     : <Navigate to="/profile" replace />;
+}
+
+
+/**
+ * The one screen an account with an admin-set password sees until it has its
+ * own. Deliberately not dismissable: a "change it later" link is a password
+ * that never gets changed.
+ */
+function ForcePasswordChange() {
+  const { me, logout, refresh } = useAuth();
+  const [next, setNext] = React.useState('');
+  const [again, setAgain] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<any>(null);
+  const [current, setCurrent] = React.useState('');
+
+  const mismatch = again.length > 0 && next !== again;
+
+  return (
+    <div className="login-page">
+      <div className="card" style={{ maxWidth: 440, width: '100%', margin: 'auto' }}>
+        <div className="card-head"><h2>Choose your own password</h2></div>
+        <div className="card-body">
+          <p className="small muted mb">
+            Welcome, {me?.fullName?.split(' ')[0]}. The password you signed in with
+            was set for you by an administrator, so somebody else knows it.
+            Pick one only you know before you carry on.
+          </p>
+          <ErrorBanner error={error} />
+          <Field label="The password you just used">
+            <input type="password" autoFocus value={current}
+              onChange={(e) => setCurrent(e.target.value)} />
+          </Field>
+          <Field label="Your new password" hint="At least 8 characters.">
+            <input type="password" value={next} onChange={(e) => setNext(e.target.value)} />
+          </Field>
+          <Field label="Type it again" hint={mismatch ? 'These two do not match.' : undefined}>
+            <input type="password" value={again} onChange={(e) => setAgain(e.target.value)} />
+          </Field>
+          <div className="btn-row mt">
+            <button className="btn primary"
+              disabled={busy || !current || next.length < 8 || next !== again}
+              onClick={async () => {
+                setBusy(true); setError(null);
+                try {
+                  await api.post('/auth/change-password',
+                    { currentPassword: current, newPassword: next });
+                  await refresh();
+                } catch (e: any) { setError(e); } finally { setBusy(false); }
+              }}>Save it and carry on</button>
+            <button className="btn ghost" onClick={logout}>Sign out</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }

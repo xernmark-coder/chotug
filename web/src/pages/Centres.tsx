@@ -964,12 +964,28 @@ function AskForStockModal({ centre, onClose, onDone }: {
   const [productId, setProductId] = useState('');
   const [qty, setQty] = useState('');
   const [uom, setUom] = useState('KG');
+  /* "if any center wants boxes of different kg they can make request
+   *  accordingly to send stock to them like 20 5kg boxes of apples."
+   *
+   * A shop does not want 100 kg of apples — it wants twenty 5 kg boxes,
+   * because that is what fits the shelf and what its customers buy. Asking in
+   * boxes is the default for that reason; the total is worked out from it, so
+   * the buyer still sees a quantity and nothing downstream changes. */
+  const [askIn, setAskIn] = useState<'BOXES' | 'BULK'>('BOXES');
+  const [boxKg, setBoxKg] = useState('5');
+  const [boxes, setBoxes] = useState('');
   const [reasoning, setReasoning] = useState('');
   const [priority, setPriority] = useState('NORMAL');
   const [addingProduct, setAddingProduct] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
   const selectedProduct = (products ?? []).find((p: any) => p.id === productId);
+
+  const inBoxes = askIn === 'BOXES';
+  const totalQty = inBoxes ? (Number(boxes) || 0) * (Number(boxKg) || 0) : Number(qty) || 0;
+  const asked = inBoxes
+    ? `${boxes || 0} × ${boxKg || 0} kg boxes of ${selectedProduct?.name ?? 'stock'}`
+    : `${qty || 0} ${uom} of ${selectedProduct?.name ?? 'stock'}`;
 
   React.useEffect(() => {
     const productUom = selectedProduct?.purchase_uom ?? selectedProduct?.base_uom;
@@ -996,7 +1012,7 @@ function AskForStockModal({ centre, onClose, onDone }: {
       footer={<>
         <button className="btn" onClick={onClose}>Cancel</button>
         <button className="btn primary"
-          disabled={busy || !productId || !Number(qty) || reasoning.trim().length < 3}
+          disabled={busy || !productId || totalQty <= 0 || reasoning.trim().length < 3}
           onClick={async () => {
             setBusy(true); setError(null);
             try {
@@ -1008,9 +1024,17 @@ function AskForStockModal({ centre, onClose, onDone }: {
                 priority,
                 source: 'MANUAL',
                 reasoning: reasoning.trim(),
-                remarks: `${centre.name}: ${reasoning.trim()}`,
-                lines: [{ productId, uom,
-                  finalQty: Number(qty) }],
+                remarks: `${centre.name}: ${asked}`,
+                lines: [{
+                  productId,
+                  uom: inBoxes ? 'KG' : uom,
+                  finalQty: totalQty,
+                  /* The total is what every report reads; these two are what
+                     was actually asked for, and what the packing bench needs
+                     to know before it makes the wrong size. */
+                  packSizeKg: inBoxes ? Number(boxKg) : null,
+                  packCount: inBoxes ? Number(boxes) : null,
+                }],
               });
               onDone(r.message ?? `Sent to the purchase manager (${r.req_no ?? ''}).`);
             } catch (e: any) { setError(e); } finally { setBusy(false); }
@@ -1037,18 +1061,60 @@ function AskForStockModal({ centre, onClose, onDone }: {
             ) : null}
           </div>
         </Field>
+        <Field label="How do you want it?">
+          <select value={askIn} onChange={(e) => setAskIn(e.target.value as any)}>
+            <option value="BOXES">Packed boxes of a size I choose</option>
+            <option value="BULK">However you pack it</option>
+          </select>
+        </Field>
+      </div>
+
+      {inBoxes ? (
+        <div className="grid c2">
+          <Field label="How many boxes">
+            <input type="number" min={1} step="1" value={boxes}
+              onChange={(e) => setBoxes(e.target.value)} placeholder="20" />
+          </Field>
+          <Field label="Each box holds (kg)"
+            hint="The size your shelf takes — 2, 5 and 10 are the usual ones.">
+            <div className="row" style={{ gap: 6 }}>
+              <input type="number" min={0.1} step="0.5" value={boxKg}
+                onChange={(e) => setBoxKg(e.target.value)} />
+              <div className="chip-row">
+                {[2, 5, 10].map((k) => (
+                  <button key={k} type="button"
+                    className={`chip ${Number(boxKg) === k ? 'primary' : 'neutral'}`}
+                    onClick={() => setBoxKg(String(k))}>{k} kg</button>
+                ))}
+              </div>
+            </div>
+          </Field>
+        </div>
+      ) : (
         <Field label="How much">
           <div className="row" style={{ gap: 6 }}>
             <input type="number" step="0.001" value={qty}
               onChange={(e) => setQty(e.target.value)} />
-            <select value={uom} onChange={(e) => setUom(e.target.value)} style={{ width: 120 }}>
+            <select value={uom} onChange={(e) => setUom(e.target.value)} style={{ maxWidth: 120 }}>
               {['KG', 'BOX', 'CRATE', 'PCS', 'BAG', 'DOZ', 'QTL', 'TON'].map((unit) => (
                 <option key={unit} value={unit}>{unit}</option>
               ))}
             </select>
           </div>
         </Field>
-      </div>
+      )}
+
+      {/* The arithmetic, said out loud. Somebody asking for 20 boxes should see
+          that it comes to 100 kg before the buyer does. */}
+      {totalQty > 0 ? (
+        <div className="banner info mb">
+          <span><Icon name="box" size={16} /></span>
+          <div className="small">
+            You are asking for <b>{asked}</b>
+            {inBoxes ? <> — <b>{num(totalQty, totalQty % 1 ? 1 : 0)} kg</b> in total.</> : '.'}
+          </div>
+        </div>
+      ) : null}
       <Field label="Why" hint="The purchase manager reads this before deciding.">
         <input value={reasoning} onChange={(e) => setReasoning(e.target.value)}
           placeholder="Ganpati this weekend — we sold out of mango by noon" />

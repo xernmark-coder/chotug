@@ -567,6 +567,29 @@ function MarkSentModal({ order, onClose, onDone }: {
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
+  /* Sending before the money has come. The supplier says so deliberately, per
+     load — it is never a silent fallback, because the whole value of the
+     payment gate is that it holds when nobody meant to open it. */
+  const [onCredit, setOnCredit] = useState(false);
+
+  const stage = paymentStage(order);
+  const unpaid = stage !== 'paid';
+  const outstanding = Number(order.payment_amount ?? order.grand_total ?? 0)
+    - Number(order.payment_paid ?? 0);
+
+  const send = async (withoutPayment: boolean) => {
+    setBusy(true); setError(null);
+    try {
+      const r = await api.post<any>(`/supplier/orders/${order.id}/dispatch`, {
+        vehicleReg: vehicle.trim() || undefined,
+        expectedDate: when || undefined,
+        note: note.trim() || undefined,
+        withoutPayment,
+      });
+      toast(r.message, 'ok');
+      onDone();
+    } catch (e: any) { setError(e); } finally { setBusy(false); }
+  };
 
   return (
     <Modal
@@ -575,19 +598,9 @@ function MarkSentModal({ order, onClose, onDone }: {
       footer={
         <>
           <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn primary" disabled={busy} onClick={async () => {
-            setBusy(true); setError(null);
-            try {
-              const r = await api.post<any>(`/supplier/orders/${order.id}/dispatch`, {
-                vehicleReg: vehicle.trim() || undefined,
-                expectedDate: when || undefined,
-                note: note.trim() || undefined,
-              });
-              toast(r.message, 'ok');
-              onDone();
-            } catch (e: any) { setError(e); } finally { setBusy(false); }
-          }}>
-            {busy ? 'Telling them…' : 'It has left'}
+          <button className={`btn ${onCredit ? 'warn' : 'primary'}`} disabled={busy}
+            onClick={() => send(onCredit)}>
+            {busy ? 'Telling them…' : onCredit ? 'Send it — collect later' : 'It has left'}
           </button>
         </>
       }
@@ -597,6 +610,28 @@ function MarkSentModal({ order, onClose, onDone }: {
         This tells the gate to expect you. They see the vehicle number at the
         barrier, so the load is checked in against this rather than held up.
       </p>
+
+      {unpaid && stage !== 'refused' ? (
+        <div className={`banner ${onCredit ? 'warn' : 'info'} mb`} style={{ display: 'block' }}>
+          <label className="row" style={{ gap: 9, cursor: 'pointer', alignItems: 'flex-start' }}>
+            <input type="checkbox" style={{ width: 17, height: 17, marginTop: 2 }}
+              checked={onCredit} onChange={(e) => setOnCredit(e.target.checked)} />
+            <span>
+              <b>Send it now and collect the payment later</b>
+              <div className="small mt">
+                {outstanding > 0
+                  ? `${inr(outstanding, 0)} has not been paid yet. `
+                  : 'Nothing has been paid against this order yet. '}
+                Tick this and the load goes anyway — the amount becomes a due
+                with the buyer&rsquo;s finance desk and is settled from there.
+                {order.payment_terms_days
+                  ? ` Your terms are ${order.payment_terms_days} days from arrival.`
+                  : ''}
+              </div>
+            </span>
+          </label>
+        </div>
+      ) : null}
       <div className="grid c2">
         <Field label="Vehicle number" hint="As painted on the lorry.">
           <input value={vehicle} onChange={(e) => setVehicle(e.target.value.toUpperCase())}
@@ -633,12 +668,23 @@ function paymentStage(o: any) {
 
 function OrderState({ o }: { o: any }) {
   if (!o.placed) return <Chip tone="neutral">being placed</Chip>;
-  if (Number(o.receipts) > 0) return <Chip tone="ok">delivered</Chip>;
+  if (Number(o.receipts) > 0) {
+    /* Delivered is not the end of the story when the money never went first —
+     * this is the order the supplier is still waiting to be paid for, and it
+     * has to keep saying so. */
+    return o.payment_due_since && o.payment_status !== 'PAID'
+      ? <Chip tone="warn">delivered — payment due</Chip>
+      : <Chip tone="ok">delivered</Chip>;
+  }
   if (o.supplier_response === 'DECLINED') {
     return <Chip tone="danger">you declined{o.supplier_response_note ? ` — ${o.supplier_response_note}` : ''}</Chip>;
   }
   if (o.supplier_response !== 'ACCEPTED') return <Chip tone="danger">answer this</Chip>;
-  if (o.supplier_marked_sent_at) return <Chip tone="primary">on the way</Chip>;
+  if (o.supplier_marked_sent_at) {
+    return o.sent_without_payment && o.payment_status !== 'PAID'
+      ? <Chip tone="warn">on the way — payment due</Chip>
+      : <Chip tone="primary">on the way</Chip>;
+  }
 
   const stage = paymentStage(o);
   if (stage === 'refused') {
@@ -682,7 +728,15 @@ function OrderAction({ o, onRespond, onAsk, onSend }: {
   }
   if (stage === 'paid') return <button className="btn sm primary" onClick={onSend}>Mark as sent</button>;
   if (stage === 'refused') return <span className="small muted">speak to the buyer</span>;
-  return <span className="small muted">with Finance</span>;
+  /* Waiting on Finance used to be a dead end — the only thing to do was wait.
+     Sending anyway is now a choice the supplier can make, so it is a button
+     rather than a sentence. */
+  return (
+    <div className="btn-row">
+      <span className="small muted">with Finance</span>
+      <button className="btn sm" onClick={onSend}>Send anyway</button>
+    </div>
+  );
 }
 
 function RespondModal({ order, onClose, onDone }: {

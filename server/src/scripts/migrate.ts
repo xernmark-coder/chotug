@@ -99,6 +99,8 @@ async function main() {
     await run('38_packs_travel.sql');
     await run('39_arrival_document_defaults.sql');
     await run('40_payment_modes.sql');
+    await run('41_dues_costing_and_qc_area.sql');
+    await run('42_sell_packed_only.sql');
     // Last, so the FORCE that 04 and 06 re-apply is lifted again.
     await run('11_rls_managed_host.sql');
     console.log('\nSchema and master data are in place.');

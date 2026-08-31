@@ -426,11 +426,21 @@ export function RequirementListPage() {
             { key: 'b', head: 'Branch', render: (r: any) => r.branch_name },
             { key: 'p', head: 'Priority', render: (r: any) => <Chip value={r.priority} /> },
             { key: 'src', head: 'Source', render: (r: any) => <span className="small muted">{r.source.replace(/_/g, ' ')}</span> },
-            { key: 'l', head: 'Products', render: (r: any) => (
+            { key: 'l', head: 'Products', sort: (r: any) => r.product_names, render: (r: any) => (
               <div><b>{r.product_names ?? '—'}</b>
                 <div className="small muted">{r.line_count} product{Number(r.line_count) === 1 ? '' : 's'}</div>
               </div>) },
-            { key: 'q', head: 'Total qty', num: true, render: (r: any) => num(r.total_qty, 0) },
+            /* A shop asking for twenty 5 kg boxes is asking for a pack size,
+               not just a quantity — and the person who has to answer it needs
+               to see which. "100 KG" is only the arithmetic of the request. */
+            { key: 'q', head: 'How much', num: true, desc: true,
+              sort: (r: any) => Number(r.total_qty) || 0, render: (r: any) => (
+              <div>
+                {r.boxes_wanted
+                  ? <><b>{r.boxes_wanted}</b>
+                      <div className="small muted">{num(r.total_qty, 0)} kg in all</div></>
+                  : num(r.total_qty, 0)}
+              </div>) },
             { key: 's', head: 'Status', render: (r: any) => <Chip value={r.status} /> },
             { key: 'u', head: 'Raised by', render: (r: any) => (
               <div className="small">{r.created_by_name}
@@ -496,7 +506,17 @@ export function RequirementDetailPage() {
               ) },
               { key: 'st', head: 'Stock then', num: true, render: (l: any) => num(l.current_stock, 0) },
               { key: 'sug', head: 'Suggested', num: true, render: (l: any) => num(l.suggested_qty, 0) },
-              { key: 'f', head: 'Ordered', num: true, render: (l: any) => <b>{num(l.final_qty, 0)} {l.uom}</b> },
+              { key: 'f', head: 'Asked for', num: true, render: (l: any) => (
+                l.pack_size_kg
+                  /* What the shop actually asked for. The total underneath it
+                     because that is what gets bought, but the boxes are the
+                     request and the bench packs to them. */
+                  ? <div>
+                      <b>{num(l.pack_count, 0)} × {num(l.pack_size_kg, Number(l.pack_size_kg) % 1 ? 1 : 0)} kg boxes</b>
+                      <div className="small muted">{num(l.final_qty, 0)} {l.uom} in all</div>
+                    </div>
+                  : <b>{num(l.final_qty, 0)} {l.uom}</b>
+              ) },
               { key: 'e', head: 'Change reason', render: (l: any) =>
                 l.edit_reason ? <span className="small">{l.edit_reason}</span> : <span className="muted small">—</span> },
               { key: 'c', head: 'Converted', num: true, render: (l: any) => num(l.converted_qty, 0) },

@@ -38,7 +38,11 @@ mapRouter.get('/layout', h(async (req) => {
       [req.actor.companyId, wh]),
     query(req.actor,
       `SELECT z.*, w.name AS warehouse_name, f.name AS floor_name,
-              (SELECT count(*)::int FROM racks r WHERE r.zone_id = z.id) AS racks
+              (SELECT count(*)::int FROM racks r WHERE r.zone_id = z.id) AS racks,
+              /* A quality-check area is not storage, and a map that draws it
+               * as storage tells the floor to stack finished pallets in the
+               * bay where the lorry is emptied. */
+              (z.purpose = 'QC') AS is_qc
          FROM zones z
          JOIN warehouses w ON w.id = z.warehouse_id
          LEFT JOIN warehouse_floors f ON f.id = z.floor_id
@@ -75,6 +79,10 @@ const upsert = z.object({
   parentId: z.string().uuid().optional(),
   code: z.string().trim().min(1, 'Give it a short code').max(20),
   name: z.string().trim().max(80).optional(),
+  /* What the area is FOR. Most are storage; the one that matters is QC — the
+   * strip inside the shutter where a lorry is emptied and the load stands
+   * while it is inspected. See 41_dues_costing_and_qc_area.sql. */
+  purpose: z.enum(['STORAGE', 'QC', 'PACKING', 'DISPATCH', 'RETURNS']).default('STORAGE'),
   capacityKg: z.coerce.number().nonnegative().optional(),
   /* "Make me shelves 1 to 12 on this rack." Laying out a warehouse one row at
    * a time is how it never gets laid out at all. */
@@ -103,11 +111,11 @@ mapRouter.post('/sections', requires('master.location.manage'), h(async (req) =>
   return withTx(req.actor, async (tx) => {
     const { rows } = await tx.query(
       `INSERT INTO zones (company_id, warehouse_id, floor_id, code, name, storage_type,
-              qr_code, created_by, updated_by)
-       VALUES ($1,$2,$3,$4,$5,'AMBIENT',loc_code('SE'),$6,$6)
+              purpose, qr_code, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,'AMBIENT',$6,loc_code('SE'),$7,$7)
        RETURNING *`,
       [req.actor.companyId, i.warehouseId, i.parentId ?? null,
-       i.code.toUpperCase(), i.name ?? i.code, req.actor.userId]);
+       i.code.toUpperCase(), i.name ?? i.code, i.purpose, req.actor.userId]);
     return rows[0];
   });
 }));
@@ -145,6 +153,133 @@ mapRouter.post('/shelves', requires('master.location.manage'), h(async (req) => 
     return { made: made.length, shelves: made };
   });
 }));
+
+/* ===========================================================================
+ * THE QUALITY-CHECK AREA
+ *
+ *   "when the items come from the gate after weighting during quality check
+ *    they should be kept somewhere, so make a section in warehouse about the
+ *    quality check, the goods taken from the vehical will go to quality check."
+ *
+ * Between the lorry and the shelf there is a gap of several hours that the
+ * system had no word for. The boxes were weighed and then, as far as any screen
+ * was concerned, they were nowhere: not on the vehicle, not in stock, not on a
+ * shelf. In practice they were stacked on the floor by the shutter, and when QC
+ * asked "where is the Kesar off gate 41" the answer came from whoever happened
+ * to have carried it.
+ *
+ * So the QC area is a real section with real bays, and a vehicle's load is
+ * parked in one of them. It is not stock — nothing here has been accepted — it
+ * is a location, which is exactly what the auditor scanning the bay needs it to
+ * be.
+ * ======================================================================== */
+
+/** The bays available to park a load in, at one warehouse. */
+mapRouter.get('/qc-bays', h(async (req) => {
+  const wh = req.query.warehouseId ? String(req.query.warehouseId) : null;
+  return query(req.actor,
+    `SELECT b.id, b.code, b.qr_code, b.capacity_kg, z.name AS section_name,
+            z.id AS section_id, z.warehouse_id,
+            /* What is standing in it now. A bay is not "full" the way a shelf
+             * is — it holds one vehicle's load at a time in practice — so the
+             * count is what tells the floor where to put the next one. */
+            (SELECT count(*)::int FROM gate_entries g
+              WHERE g.qc_bin_id = b.id AND g.qc_released_at IS NULL) AS holding
+       FROM bins b
+       JOIN racks r ON r.id = b.rack_id
+       JOIN zones z ON z.id = r.zone_id
+      WHERE b.company_id = $1 AND z.purpose = 'QC' AND b.is_active
+        AND ($2::uuid IS NULL OR z.warehouse_id = $2)
+      ORDER BY z.warehouse_id, b.code`,
+    [req.actor.companyId, wh]);
+}));
+
+/** Everything standing in quality check right now, oldest first — because the
+ *  oldest is the one losing money. */
+mapRouter.get('/qc-holding', h(async (req) => {
+  const wh = req.query.warehouseId ? String(req.query.warehouseId) : null;
+  return query(req.actor,
+    `SELECT * FROM v_qc_holding
+      WHERE company_id = $1 AND ($2::uuid IS NULL OR warehouse_id = $2)
+      ORDER BY waiting_minutes DESC`,
+    [req.actor.companyId, wh]);
+}));
+
+/**
+ * Park a vehicle's load in a bay — or move it to another one, which happens
+ * whenever the first bay turns out to be too small.
+ *
+ * The bay is looked up by its id or by the code on its sticker, because the
+ * person doing this is holding a scanner, not a mouse.
+ */
+mapRouter.post('/qc-holding/:gateEntryId', requires('receiving.box.weigh'), h(async (req) => {
+  const i = body(z.object({
+    binId: z.string().uuid().optional(),
+    /** The QR or the printed code — whichever the scanner gave back. */
+    bayCode: z.string().trim().max(40).optional(),
+  }), req.body ?? {});
+  if (!i.binId && !i.bayCode) throw ApiError.badRequest('Which bay is it going in?');
+
+  return withTx(req.actor, async (tx) => {
+    const { rows: g } = await tx.query(
+      `SELECT id, gate_no, warehouse_id, status, qc_bin_id
+         FROM gate_entries WHERE id = $1 AND company_id = $2 FOR UPDATE`,
+      [req.params.gateEntryId, req.actor.companyId]);
+    const entry = g[0];
+    if (!entry) throw ApiError.notFound('That vehicle is not at our gate.');
+
+    const { rows: bay } = await tx.query(
+      `SELECT b.id, b.code, z.warehouse_id, z.purpose
+         FROM bins b
+         JOIN racks r ON r.id = b.rack_id
+         JOIN zones z ON z.id = r.zone_id
+        WHERE b.company_id = $1
+          AND ($2::uuid IS NULL OR b.id = $2::uuid)
+          AND ($3 = '' OR lower(b.code) = lower($3) OR lower(b.qr_code) = lower($3))
+        LIMIT 1`,
+      [req.actor.companyId, i.binId ?? null, i.bayCode ?? '']);
+    if (!bay[0]) throw ApiError.notFound('No bay with that code.');
+    if (bay[0].purpose !== 'QC') {
+      throw ApiError.rule(
+        `${bay[0].code} is a storage shelf, not a quality-check bay. `
+        + 'Goods off a vehicle have not been accepted yet — they cannot go on a shelf.');
+    }
+    if (bay[0].warehouse_id !== entry.warehouse_id) {
+      throw ApiError.rule('That bay is in a different warehouse from the vehicle.');
+    }
+
+    await tx.query(
+      `UPDATE gate_entries
+          SET qc_bin_id = $2, qc_parked_at = COALESCE(qc_parked_at, now()),
+              qc_released_at = NULL, updated_by = $3
+        WHERE id = $1`,
+      [entry.id, bay[0].id, req.actor.userId]);
+
+    await emit(tx, req.actor, 'gate_entry', entry.id, 'goods.parked_for_qc',
+      { gateNo: entry.gate_no, bay: bay[0].code, moved: !!entry.qc_bin_id });
+
+    return {
+      ok: true, bayCode: bay[0].code,
+      message: entry.qc_bin_id && entry.qc_bin_id !== bay[0].id
+        ? `${entry.gate_no} moved to ${bay[0].code}.`
+        : `${entry.gate_no} is in ${bay[0].code}, waiting for quality check.`,
+    };
+  });
+}));
+
+/** The load has left quality check — accepted onto a shelf, or turned away. */
+mapRouter.post('/qc-holding/:gateEntryId/release', requires('receiving.box.weigh'),
+  h(async (req) => withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE gate_entries SET qc_released_at = now(), updated_by = $2
+        WHERE id = $1 AND company_id = $3 AND qc_released_at IS NULL
+        RETURNING gate_no`,
+      [req.params.gateEntryId, req.actor.userId, req.actor.companyId]);
+    if (!rows[0]) throw ApiError.rule('That load has already left the quality-check area.');
+    await emit(tx, req.actor, 'gate_entry', req.params.gateEntryId, 'goods.left_qc',
+      { gateNo: rows[0].gate_no });
+    return { ok: true, message: `${rows[0].gate_no} released from quality check.` };
+  })));
 
 /* --------------------------------------------------------------- the scan -- */
 

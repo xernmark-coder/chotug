@@ -27,6 +27,11 @@ export function UnloadPage() {
   const toast = useToast();
   const { can } = useAuth();
   const { data, loading, error, reload } = useApi<any>(`/receiving/gate-entries/${id}/boxes`, [id]);
+  /* The bays in the quality-check area. Loaded once the warehouse is known, so
+     the picker offers this site's bays rather than every bay in the company. */
+  const warehouseId = data?.entry?.warehouse_id ?? '';
+  const bays = useApi<any[]>(
+    warehouseId ? `/warehouse/qc-bays?warehouseId=${warehouseId}` : null, [warehouseId]);
 
   const [productId, setProductId] = useState<string>('');
   const [weight, setWeight] = useState('');
@@ -34,6 +39,7 @@ export function UnloadPage() {
   const [busy, setBusy] = useState(false);
   const [voiding, setVoiding] = useState<any>(null);
   const [postError, setPostError] = useState<any>(null);
+  const [parking, setParking] = useState(false);
   const scanRef = useRef<HTMLInputElement>(null);
 
   const boxCount = Math.max(1, Math.min(200, Number(count) || 1));
@@ -92,11 +98,21 @@ export function UnloadPage() {
     >
       <ErrorBanner error={postError} />
 
-      <div className="grid c3 mb">
+      <div className="grid c4 mb">
         <Kpi label="Boxes off the lorry" value={num(data.totalBoxes, 0)} />
         <Kpi label="Weighed so far" value={`${num(data.totalKg, 1)} kg`} />
         <Kpi label="Products" value={lines.filter((l: any) => Number(l.boxes) > 0).length}
           foot={`${lines.length} on the order`} />
+        {/* Where the boxes are being stacked. Between the lorry and the shelf
+            they are in the quality-check area, and until this existed no screen
+            could say which bay — so "where is the Kesar off gate 41" was
+            answered by asking whoever carried it. */}
+        <Kpi label="Standing in" value={entry.qc_bay_code ?? 'not set'}
+          tone={entry.qc_bay_code ? undefined : 'warn'}
+          foot={entry.qc_bay_code
+            ? `${entry.qc_section_name ?? 'quality check'} · ${entry.qc_parked_at ? ago(entry.qc_parked_at) : 'just now'}`
+            : 'say which QC bay these boxes go in'}
+          onClick={canWeigh ? () => setParking(true) : undefined} />
       </div>
 
       <div className="grid sidebar-right">
@@ -274,7 +290,83 @@ export function UnloadPage() {
         <VoidBoxModal box={voiding} onClose={() => setVoiding(null)}
           onDone={(m) => { setVoiding(null); reload(); toast(m, 'ok'); }} />
       ) : null}
+
+      {parking ? (
+        <ParkForQcModal entry={entry} bays={bays.data ?? []} onClose={() => setParking(false)}
+          onDone={(m) => { setParking(false); reload(); toast(m, 'ok'); }} />
+      ) : null}
     </Layout>
+  );
+}
+
+/**
+ * Putting a load in a quality-check bay.
+ *
+ * Both ways in are offered because both happen: the bay's sticker is scanned
+ * where there is a scanner to hand, and picked off a list where there is not.
+ * The list shows what is already standing in each bay, since the only thing
+ * anybody needs to decide is which one is free.
+ */
+function ParkForQcModal({ entry, bays, onClose, onDone }: {
+  entry: any; bays: any[]; onClose: () => void; onDone: (m: string) => void;
+}) {
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  const park = async (payload: { binId?: string; bayCode?: string }) => {
+    setBusy(true); setError(null);
+    try {
+      const r = await api.post<any>(`/warehouse/qc-holding/${entry.id}`, payload);
+      onDone(r.message);
+    } catch (e: any) { setError(e); } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal title={`Where are these boxes standing? — ${entry.gate_no}`} onClose={onClose}
+      footer={<button className="btn" onClick={onClose}>Close</button>}>
+      <ErrorBanner error={error} />
+      <p className="small muted mb">
+        These boxes are not stock yet — nothing here has been accepted. This is
+        the bay in the quality-check area they are stacked in, so anybody can be
+        sent straight to them.
+      </p>
+
+      <div className="row mb" style={{ gap: 8 }}>
+        <input autoFocus value={code} style={{ flex: 1 }}
+          placeholder="Scan or type the bay label"
+          onChange={(e) => setCode(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' || !code.trim()) return;
+            e.preventDefault();
+            park({ bayCode: code.trim() });
+          }} />
+        <button className="btn primary" disabled={busy || !code.trim()}
+          onClick={() => park({ bayCode: code.trim() })}>Put it here</button>
+      </div>
+
+      {bays.length ? (
+        <div className="stack">
+          {bays.map((b: any) => (
+            <button key={b.id} className="btn" disabled={busy}
+              style={{ justifyContent: 'space-between', width: '100%' }}
+              onClick={() => park({ binId: b.id })}>
+              <span><b className="mono">{b.code}</b>{' '}
+                <span className="small muted">{b.section_name}</span></span>
+              <Chip tone={Number(b.holding) > 0 ? 'warn' : 'ok'}>
+                {Number(b.holding) > 0
+                  ? `${b.holding} load${Number(b.holding) === 1 ? '' : 's'} in it`
+                  : 'free'}
+              </Chip>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <Empty icon="🧪" title="No quality-check bays here yet"
+          hint="An admin can add them on the warehouse map — a section marked
+                Quality check, with a rack and a few bays under it." />
+      )}
+    </Modal>
   );
 }
 

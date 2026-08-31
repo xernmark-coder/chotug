@@ -54,6 +54,9 @@ export function idempotencyKey(prefix: string) {
 export type Me = {
   id: string; fullName: string; email: string; employeeCode: string | null;
   locale: string; companyName: string; defaultBranchId: string | null;
+  /* True when an admin handed them this password. The app asks them to replace
+     it before it lets them get on with anything. */
+  mustChangePassword?: boolean;
   branches: { id: string; code: string; name: string; type: string }[];
   warehouses: { id: string; code: string; name: string; branchId: string }[];
   roles: string[]; permissions: string[];
@@ -75,6 +78,8 @@ type AuthCtx = {
   setWarehouseId: (id: string) => void;
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
+  /** Re-read the profile — after changing a password, or a role. */
+  refresh: () => Promise<void>;
   can: (...codes: string[]) => boolean;
 };
 
@@ -111,6 +116,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo<AuthCtx>(() => ({
     me, loading, branchId, warehouseId,
+    refresh: load,
     setBranchId: (id) => { setBranchIdState(id); localStorage.setItem('chotug_branch', id); },
     setWarehouseId: (id) => { setWarehouseIdState(id); localStorage.setItem('chotug_wh', id); },
     login: async (email, password) => {

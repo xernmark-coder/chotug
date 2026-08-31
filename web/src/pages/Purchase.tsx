@@ -85,6 +85,11 @@ export function PoListPage() {
                 ? <Chip tone="danger">declined{o.supplier_response_note ? ` — ${o.supplier_response_note}` : ''}</Chip>
               : o.supplier_response === 'PENDING'
                 ? <Chip tone="warn">no answer yet</Chip>
+              /* Goods on their way that we have not paid for is a different
+                 fact from a supplier waiting to be paid before they load — the
+                 first is a debt, the second is a decision — so it says so. */
+              : o.sent_without_payment && o.payment_status !== 'PAID'
+                ? <Chip tone="danger">sent on credit · owe {inr(Number(o.payment_amount) - Number(o.payment_paid), 0)}</Chip>
               : o.payment_status && o.payment_status !== 'PAID'
                 ? <Chip tone="warn">accepted · wants {inr(Number(o.payment_amount) - Number(o.payment_paid), 0)}</Chip>
               : <Chip tone="ok">accepted</Chip>
@@ -654,7 +659,23 @@ export function PoDetailPage() {
         </div>
       ) : null}
 
-      {data.supplier_response === 'ACCEPTED' ? (
+      {data.sent_without_payment && data.payment_status !== 'PAID' ? (
+        <div className="banner danger mb">
+          <span><Icon name="truck" size={16} /></span>
+          <div>
+            <b>Sent before it was paid for.</b>{' '}
+            {data.supplier_name ?? 'The supplier'} despatched this load on{' '}
+            {date(data.sent_without_payment_at)} and will collect later.{' '}
+            {data.payment_request_no
+              ? <>The balance is a due with Finance — <b>{data.payment_request_no}</b>.</>
+              : 'Finance has been told.'}
+            {data.sent_without_payment_note
+              ? <div className="small">"{data.sent_without_payment_note}"</div> : null}
+          </div>
+        </div>
+      ) : null}
+
+      {data.supplier_response === 'ACCEPTED' && !data.sent_without_payment ? (
         <div className={`banner ${data.payment_status === 'PAID' ? 'ok' : 'warn'} mb`}>
           <span><Icon name={data.payment_status === 'PAID' ? 'check' : 'coins'} size={16} /></span>
           <div>
