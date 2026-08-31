@@ -758,6 +758,11 @@ function RespondModal({ order, onClose, onDone }: {
   const [transporter, setTransporter] = useState('');
   const [lrNo, setLrNo] = useState('');
   const [mandiPattiNo, setMandiPattiNo] = useState('');
+  /* Whose lorry is carrying it. The form used to assume the supplier's own and
+     refuse to accept without a number, so anyone without one had to make one
+     up and ask for transport on a second screen. */
+  const [needVehicle, setNeedVehicle] = useState(order.transport_by === 'BUYER');
+  const [vehicleNote, setVehicleNote] = useState('');
 
   const send = async (decision: 'ACCEPT' | 'DECLINE') => {
     setBusy(true); setError(null);
@@ -769,14 +774,33 @@ function RespondModal({ order, onClose, onDone }: {
           invoiceNo: invoiceNo.trim() || undefined,
           invoiceDate: invoiceNo.trim() ? invoiceDate : undefined,
           invoiceTotal: invoiceNo.trim() ? Number(invoiceTotal) : undefined,
-          vehicleReg: vehicleReg.trim() || undefined,
-          driverName: driverName.trim() || undefined,
-          driverPhone: driverPhone.trim() || undefined,
-          transporter: transporter.trim() || undefined,
-          lrNo: lrNo.trim() || undefined,
+          needVehicle,
+          vehicleReg: needVehicle ? undefined : (vehicleReg.trim() || undefined),
+          driverName: needVehicle ? undefined : (driverName.trim() || undefined),
+          driverPhone: needVehicle ? undefined : (driverPhone.trim() || undefined),
+          transporter: needVehicle ? undefined : (transporter.trim() || undefined),
+          lrNo: needVehicle ? undefined : (lrNo.trim() || undefined),
           mandiPattiNo: mandiPattiNo.trim() || undefined,
         } : {}),
       });
+
+      /* Accepting and asking for the lorry are one action to the supplier, so
+         they are one button here — but two records, because the buyer's
+         transport queue is a different queue from the order. */
+      if (decision === 'ACCEPT' && needVehicle) {
+        try {
+          await api.post(`/supplier/orders/${order.id}/request-vehicle`, {
+            note: vehicleNote.trim() || undefined,
+          });
+        } catch (e: any) {
+          /* The order IS accepted at this point. Failing the whole thing over
+             the transport request would leave the supplier thinking neither
+             happened. */
+          toast(`Accepted, but the vehicle request did not go through — ${e.message}`, 'err');
+          onDone();
+          return;
+        }
+      }
       toast(r.message, decision === 'ACCEPT' ? 'ok' : 'info');
       onDone();
     } catch (e: any) { setError(e); } finally { setBusy(false); }
@@ -790,8 +814,11 @@ function RespondModal({ order, onClose, onDone }: {
         <button className="btn" onClick={onClose}>Not now</button>
         <button className="btn danger" disabled={busy || !note.trim()}
           onClick={() => send('DECLINE')}>Cannot supply</button>
-        <button className="btn primary" disabled={busy || !invoiceNo.trim() || !vehicleReg.trim()}
-          onClick={() => send('ACCEPT')}>Yes, I accept</button>
+        <button className="btn primary"
+          disabled={busy || !invoiceNo.trim() || (!needVehicle && !vehicleReg.trim())}
+          onClick={() => send('ACCEPT')}>
+          {needVehicle ? 'Accept & ask for a vehicle' : 'Yes, I accept'}
+        </button>
       </>}
     >
       <ErrorBanner error={error} />
@@ -818,27 +845,60 @@ function RespondModal({ order, onClose, onDone }: {
       </div>
 
       <div className="section-head sm"><h3>The vehicle</h3><span className="rule" /></div>
-      <p className="small muted mb">
-        Give these and the gate will find the lorry by your invoice number — the
-        driver will not be kept waiting while somebody types them in again.
-      </p>
-      <div className="grid c2">
-        <Field label="Vehicle number (required)"><input value={vehicleReg}
-          onChange={(e) => setVehicleReg(e.target.value.toUpperCase())}
-          placeholder="MH14CD5678" /></Field>
-        <Field label="Transporter"><input value={transporter}
-          onChange={(e) => setTransporter(e.target.value)} placeholder="Pawar Roadlines" /></Field>
-      </div>
-      <div className="grid c3">
-        <Field label="Driver"><input value={driverName}
-          onChange={(e) => setDriverName(e.target.value)} placeholder="Balu Pawar" /></Field>
-        <Field label="Driver's phone"><input value={driverPhone}
-          onChange={(e) => setDriverPhone(e.target.value)} placeholder="98220 11223" /></Field>
-        <Field label="LR number"><input value={lrNo}
-          onChange={(e) => setLrNo(e.target.value)} placeholder="LR-8891" /></Field>
-        <Field label="Mandi patti number"><input value={mandiPattiNo}
-          onChange={(e) => setMandiPattiNo(e.target.value)} placeholder="Optional" /></Field>
-      </div>
+
+      {/* The one question that decides the rest of this section. Asked as a
+          choice rather than left implied by an empty box, because "I have not
+          got a lorry" used to have no way of being said here at all. */}
+      <Field label="Who is carrying it?">
+        <select value={needVehicle ? 'BUYER' : 'MINE'}
+          onChange={(e) => setNeedVehicle(e.target.value === 'BUYER')}>
+          <option value="MINE">I am sending it on my own vehicle</option>
+          <option value="BUYER">I need a vehicle — please send one</option>
+        </select>
+      </Field>
+
+      {needVehicle ? (
+        <>
+          <div className="banner info mb">
+            <span><Icon name="truck" size={16} /></span>
+            <div className="small">
+              Accepting will also put a vehicle request in the buyer&rsquo;s
+              transport queue. They may say no if nothing is free — you will see
+              the answer on this order.
+            </div>
+          </div>
+          <Field label="Anything they should know? (optional)"
+            hint="When the load will be ready, how much space it needs, where to come.">
+            <input value={vehicleNote} onChange={(e) => setVehicleNote(e.target.value)}
+              placeholder="Ready from Thursday morning, about 40 crates" />
+          </Field>
+          <Field label="Mandi patti number"><input value={mandiPattiNo}
+            onChange={(e) => setMandiPattiNo(e.target.value)} placeholder="Optional" /></Field>
+        </>
+      ) : (
+        <>
+          <p className="small muted mb">
+            Give these and the gate will find the lorry by your invoice number.
+          </p>
+          <div className="grid c2">
+            <Field label="Vehicle number (required)"><input value={vehicleReg}
+              onChange={(e) => setVehicleReg(e.target.value.toUpperCase())}
+              placeholder="MH14CD5678" /></Field>
+            <Field label="Transporter"><input value={transporter}
+              onChange={(e) => setTransporter(e.target.value)} placeholder="Pawar Roadlines" /></Field>
+          </div>
+          <div className="grid c3">
+            <Field label="Driver"><input value={driverName}
+              onChange={(e) => setDriverName(e.target.value)} placeholder="Balu Pawar" /></Field>
+            <Field label="Driver's phone"><input value={driverPhone}
+              onChange={(e) => setDriverPhone(e.target.value)} placeholder="98220 11223" /></Field>
+            <Field label="LR number"><input value={lrNo}
+              onChange={(e) => setLrNo(e.target.value)} placeholder="LR-8891" /></Field>
+            <Field label="Mandi patti number"><input value={mandiPattiNo}
+              onChange={(e) => setMandiPattiNo(e.target.value)} placeholder="Optional" /></Field>
+          </div>
+        </>
+      )}
 
       <div className="section-head sm"><h3>Message to the buyer</h3><span className="rule" /></div>
       <Field label="" hint="Required if you cannot supply it. Say why, and when you could.">

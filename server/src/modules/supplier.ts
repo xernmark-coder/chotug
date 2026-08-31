@@ -201,6 +201,13 @@ supplierRouter.post('/orders/:id/respond', requires('supplier.order.accept'), h(
     lrNo: z.string().trim().max(40).optional(),
     ewayBillNo: z.string().trim().max(40).optional(),
     mandiPattiNo: z.string().trim().max(60).optional(),
+    /* "they should be able to choose the ask for vehicle on the form also."
+     *
+     * A supplier with no lorry of their own could not get past this screen: it
+     * demanded a vehicle number to accept, so the only way through was to
+     * invent one and then ask for transport separately. Saying "I have not got
+     * one, please send" is now an answer the form takes. */
+    needVehicle: z.boolean().default(false),
   }), req.body ?? {});
 
   const supplierId = await mySupplier(req.actor);
@@ -236,8 +243,9 @@ supplierRouter.post('/orders/:id/respond', requires('supplier.order.accept'), h(
     if (input.decision === 'ACCEPT' && !input.invoiceNo) {
       throw ApiError.rule('Enter your invoice number before accepting this order.');
     }
-    if (input.decision === 'ACCEPT' && !input.vehicleReg) {
-      throw ApiError.rule('Enter the vehicle number before accepting this order.');
+    if (input.decision === 'ACCEPT' && !input.vehicleReg && !input.needVehicle) {
+      throw ApiError.rule(
+        'Enter the vehicle number, or tick "I need a vehicle" and we will send one.');
     }
 
     await tx.query(
