@@ -303,6 +303,20 @@ function PriceModal({ row, onClose, onDone }: {
   );
 }
 
+/* The units this trade actually uses. Same list the centre's stock request
+   offers, so a product added here can be asked for in the unit it was created
+   in rather than in whatever that screen happened to default to. */
+const UOMS = [
+  { v: 'KG', label: 'Kilograms (kg)' },
+  { v: 'BOX', label: 'Boxes' },
+  { v: 'CRATE', label: 'Crates' },
+  { v: 'BAG', label: 'Bags' },
+  { v: 'PCS', label: 'Pieces' },
+  { v: 'DOZ', label: 'Dozens' },
+  { v: 'QTL', label: 'Quintals' },
+  { v: 'TON', label: 'Tonnes' },
+];
+
 const ICON_CHOICES = [
   'mango', 'apple', 'banana', 'grapes', 'tomato', 'onion', 'potato',
   'leafy', 'cauliflower', 'cucumber', 'capsicum', 'produce', 'basket', 'sprout',
@@ -595,6 +609,11 @@ export function ProductModal({ category, onClose, onDone }: {
   const [shelf, setShelf] = useState('');
   const [reorder, setReorder] = useState('');
   const [storage, setStorage] = useState('AMBIENT');
+  /* What the product is counted in. Everything downstream reads this — the
+     reorder point, the order quantity, the pack size, the price per unit — so
+     leaving it to default to kilos silently turned every crate-traded product
+     into a kilo-traded one. */
+  const [uom, setUom] = useState('KG');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
 
@@ -623,6 +642,7 @@ export function ProductModal({ category, onClose, onDone }: {
               categoryId, name: name.trim(),
               nameHi: nameHi.trim() || undefined,
               variety: name.trim(), icon,
+              baseUom: uom, purchaseUom: uom,
               storageType: storage,
               shelfLifeDays: shelf ? Number(shelf) : undefined,
               reorderPoint: reorder ? Number(reorder) : undefined,
@@ -652,11 +672,20 @@ export function ProductModal({ category, onClose, onDone }: {
         <Field label="Name in Hindi / Marathi"><input value={nameHi}
           onChange={(e) => setNameHi(e.target.value)} placeholder="हापूस" /></Field>
       </div>
-      <div className="grid c3">
+      <div className="grid c4">
+        <Field label="Measured in"
+          hint="How this is bought, counted and sold.">
+          <select value={uom} onChange={(e) => setUom(e.target.value)}>
+            {UOMS.map((u) => <option key={u.v} value={u.v}>{u.label}</option>)}
+          </select>
+        </Field>
         <Field label="Keeps for (days)"><input type="number" value={shelf}
           onChange={(e) => setShelf(e.target.value)} placeholder="10" /></Field>
-        <Field label="Buy again below"><input type="number" value={reorder}
-          onChange={(e) => setReorder(e.target.value)} placeholder="150" /></Field>
+        {/* The reorder point is a bare number, and "buy again below 150" says
+            nothing until you know whether that is 150 kilos or 150 crates. */}
+        <Field label={`Buy again below (${uom.toLowerCase()})`}>
+          <input type="number" value={reorder}
+            onChange={(e) => setReorder(e.target.value)} placeholder="150" /></Field>
         <Field label="Stored as">
           <select value={storage} onChange={(e) => setStorage(e.target.value)}>
             {['AMBIENT','CHILLED','COLD','FROZEN','RIPENING'].map((x) =>
