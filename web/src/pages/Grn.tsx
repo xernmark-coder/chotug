@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, useAuth, idempotencyKey, inr, num, date, dateTime, pctText } from '../lib/api';
 import {
@@ -265,6 +265,24 @@ function CostingModal({ grn, chargeTypes, onClose, onDone }: {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<any>(null);
 
+  /* The freight is already on the record by the time anybody opens this — the
+     supplier named it when they accepted, or Dispatch agreed a fare with a
+     driver. Making somebody retype a number from another screen is how it ended
+     up blank, and a landed cost with no freight in it understates what the
+     produce cost. Filled in, and still editable. */
+  const known = useApi<any>(`/costing/landing-cost/${grn.id}/known-charges`, [grn.id]);
+  const suggested = known.data?.charges ?? [];
+  const [prefilled, setPrefilled] = useState(false);
+  useEffect(() => {
+    if (prefilled || !suggested.length) return;
+    setCharges((s) => {
+      const blank = s.filter((c) => c.chargeTypeId || c.amount > 0);
+      return [...suggested.map((c: any) => ({ chargeTypeId: c.chargeTypeId, amount: Number(c.amount) })),
+              ...blank, { chargeTypeId: '', amount: 0 }];
+    });
+    setPrefilled(true);
+  }, [suggested, prefilled]);
+
   const run = async () => {
     setBusy(true);
     try {
@@ -292,6 +310,21 @@ function CostingModal({ grn, chargeTypes, onClose, onDone }: {
         included. Transport is spread by weight, commission by value — so a heavy cheap crate does
         not subsidise a light expensive one.
       </p>
+      {/* Say where the filled-in number came from. A figure that appears on its
+          own is a figure nobody trusts enough to leave alone. */}
+      {suggested.length ? (
+        <div className="banner info mb">
+          <span><Icon name="truck" size={16} /></span>
+          <div className="small">
+            <b>Transport is already filled in</b> from what this order has on record
+            {known.data?.poNo ? <> for {known.data.poNo}</> : null}:
+            {suggested.flatMap((c: any) => c.sources).map((sc: any, i: number) => (
+              <div key={i}>{inr(sc.amount, 0)} — {sc.source} ({sc.docNo})</div>
+            ))}
+            Change it if the real freight was different.
+          </div>
+        </div>
+      ) : null}
       {charges.map((c, i) => (
         <div className="row mb" key={i}>
           <select style={{ flex: 2 }} value={c.chargeTypeId}

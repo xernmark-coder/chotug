@@ -718,6 +718,36 @@ grep -q "REFUSED_LABEL" web/src/pages/SupplierPortal.tsx \
 chk "proven: something has actually gone back" \
   "$(Q "SELECT count(*) FROM qc_inspections WHERE return_outcome='SENT_BACK' AND returned_qty > 0")"
 
+echo "── 54 · the freight is already known, so do not ask for it again"
+grep -q "known-charges" server/src/modules/costing.ts \
+  && ok "landed cost can see the freight on record" || no "known charges" "no endpoint"
+grep -q "known-charges" web/src/pages/Grn.tsx \
+  && ok "…and the screen fills it in" || no "landed cost" "still typed from memory"
+grep -q "Transport is already filled in" web/src/pages/Grn.tsx \
+  && ok "…saying where the number came from" || no "landed cost" "number appears unexplained"
+grep -q "setPrefilled" web/src/pages/Grn.tsx \
+  && ok "…once, so it never overwrites what was typed" || no "prefill" "can clobber an edit"
+# Both ways the journey gets paid for must be found.
+grep -q "we sent a vehicle for it" server/src/modules/costing.ts \
+  && grep -q "the supplier charged it on their invoice" server/src/modules/costing.ts \
+  && ok "…from either payer" || no "known charges" "only one source"
+grep -q "NOT IN ('CANCELLED', 'REJECTED')" server/src/modules/costing.ts \
+  && ok "…and a claim Finance refused buys no freight" || no "known charges" "counts rejected claims"
+# Proven: a receipt whose order carried freight has it in the landed rate.
+chk "proven: freight reached the landed rate" \
+  "$(Q "SELECT count(*) FROM batches b JOIN grn_lines gl ON gl.id=b.grn_line_id
+         WHERE b.landed_rate > gl.rate + 0.01")"
+
+echo "── 55 · the margin, set at the bench"
+grep -q "Margin on these (%)" web/src/pages/PackBench.tsx \
+  && ok "the bench can price at its own margin" || no "bench margin" "catalogue only"
+grep -q "function perUnitAt" web/src/pages/PackBench.tsx \
+  && ok "…by the same sum the database uses" || no "bench margin" "second formula"
+grep -q "back to it" web/src/pages/PackBench.tsx \
+  && ok "…with a way back to the catalogue's" || no "bench margin" "no way back"
+grep -q "floorPerUnit = Number(bench.min_sell_price)" web/src/pages/PackBench.tsx \
+  && ok "…and the floor still measures against policy" || no "floor" "moves with the typed margin"
+
 echo "── 43 · filters with totals"
 # This check used to name three pages and pass when those three had filters —
 # which is checking the work that was done, not the requirement that was asked.

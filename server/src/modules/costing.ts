@@ -23,6 +23,61 @@ costingRouter.use(staffOnly);
  * actually costs you on the rack. Everything downstream — pricing, margin,
  * supplier comparison — is wrong if this is wrong.
  * ======================================================================== */
+/* The freight for this load, which we already know.
+ *
+ * By the time anybody opens the landed-cost screen the lorry has been paid for
+ * twice over in the record: the supplier named their charge when they accepted
+ * (payment_requests.transport_amount) or Dispatch agreed a fare with a driver
+ * (pickups.transport_cost). Asking somebody to type it in again is asking them
+ * to remember a number from another screen — so most of the time it was left
+ * blank and the landed cost quietly understated what the produce cost.
+ *
+ * Suggested, not imposed: the screen fills it in and the person can change it.
+ * Only freight against THIS order counts, and only claims Finance has not
+ * turned down.
+ */
+costingRouter.get('/landing-cost/:grnId/known-charges', h(async (req) => {
+  const [g] = await query(req.actor,
+    `SELECT g.id, g.po_id, o.po_no FROM grns g
+       LEFT JOIN purchase_orders o ON o.id = g.po_id
+      WHERE g.id = $1 AND g.company_id = $2`,
+    [req.params.grnId, req.actor.companyId]);
+  if (!g) throw ApiError.notFound('Goods receipt not found');
+
+  const [ct] = await query(req.actor,
+    `SELECT id, name FROM charge_types
+      WHERE company_id = $1 AND code = 'TRANSPORT' LIMIT 1`, [req.actor.companyId]);
+  if (!ct || !g.po_id) return { charges: [] };
+
+  /* Both ways the journey gets paid for, each named so the person looking at
+   * the screen knows which one they are being shown. */
+  const rows = await query(req.actor,
+    `SELECT 'the supplier charged it on their invoice' AS source,
+            pr.transport_amount AS amount, pr.request_no AS doc_no
+       FROM payment_requests pr
+       LEFT JOIN supplier_invoices si ON si.id = pr.source_id
+      WHERE pr.company_id = $1
+        AND pr.transport_amount > 0
+        AND pr.status NOT IN ('CANCELLED', 'REJECTED')
+        AND (pr.source_id = $2 OR si.po_id = $2)
+      UNION ALL
+     SELECT 'we sent a vehicle for it' AS source,
+            pk.transport_cost AS amount, pk.pickup_no AS doc_no
+       FROM pickups pk
+      WHERE pk.company_id = $1 AND pk.po_id = $2
+        AND pk.transport_cost > 0 AND pk.status <> 'CANCELLED'`,
+    [req.actor.companyId, g.po_id]);
+
+  const total = rows.reduce((a: number, r: any) => a + Number(r.amount), 0);
+  return {
+    poNo: g.po_no,
+    charges: total > 0
+      ? [{ chargeTypeId: ct.id, chargeTypeName: ct.name, amount: round(total, 2),
+           sources: rows.map((r: any) => ({ source: r.source, docNo: r.doc_no, amount: Number(r.amount) })) }]
+      : [],
+  };
+}));
+
 costingRouter.post('/landing-cost/:grnId/compute', requires('costing.landing.recompute'), h(async (req) => {
   const input = body(z.object({
     costStatus: z.enum(['ESTIMATED', 'ACTUAL']).default('ACTUAL'),

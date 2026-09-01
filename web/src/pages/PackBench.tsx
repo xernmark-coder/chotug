@@ -35,11 +35,27 @@ import { LabelSheet, RemovePackModal } from './Packing';
  * screen and nowhere else. Rounded UP to the rupee — a suggestion that lands a
  * few paise under the floor it was computed from would be its own bug report.
  */
-function suggestPrice(minSellPerUnit: number, qtyPerPack: number): string {
-  const floor = Number(minSellPerUnit) || 0;
+function suggestPrice(bench: any, qtyPerPack: number, marginPct?: number | string): string {
   const per = Number(qtyPerPack) || 0;
-  if (floor <= 0 || per <= 0) return '';
-  return String(Math.ceil(floor * per));
+  if (per <= 0) return '';
+
+  const cost = Number(bench?.true_cost) || 0;
+  const wastage = Number(bench?.wastage_pct) || 0;
+  const m = marginPct === '' || marginPct == null ? null : Number(marginPct);
+
+  /* No margin typed, or one that is not a number: the floor the database
+     already worked out at the margin set in the catalogue. */
+  if (m == null || Number.isNaN(m) || cost <= 0) {
+    const floor = Number(bench?.min_sell_price) || 0;
+    return floor > 0 ? String(Math.ceil(floor * per)) : '';
+  }
+  return String(Math.ceil(perUnitAt(cost, wastage, m) * per));
+}
+
+/** The price of one unit at a given margin, wastage carried the same way the
+ *  database carries it. Kept next to suggestPrice so the two cannot drift. */
+function perUnitAt(cost: number, wastagePct: number, marginPct: number): number {
+  return (cost / Math.max(1 - wastagePct / 100, 0.05)) * (1 + marginPct / 100);
 }
 
 const GRADES = [
@@ -73,11 +89,17 @@ export function PackBenchPage() {
      worked-out one — they had the fruit in front of them. */
   const [priceByGrade, setPriceByGrade] = useState<Record<string, string>>({});
   const [pricedByHand, setPricedByHand] = useState(false);
+  /* The margin to price this run at. Starts at whatever the catalogue says for
+     this product, because that is the policy — but a bench making 5 kg gift
+     boxes out of the same batch as loose seconds needs to say so here, and
+     going to Settings to change a company-wide number and back again is not a
+     thing anybody does mid-shift. */
+  const [margin, setMargin] = useState('');
 
   /* The label price, worked out from what this batch cost and the margin set
      on the product. It follows the weight as it is keyed in, because a box
      price without a box size is not a number anybody can check. */
-  const suggested = suggestPrice(Number(data?.min_sell_price) || 0, Number(qty) || 0);
+  const suggested = suggestPrice(data, Number(qty) || 0, margin);
   useEffect(() => {
     const own = priceByGrade[grade];
     if (own != null) { setPrice(own); setPricedByHand(true); return; }
@@ -86,6 +108,9 @@ export function PackBenchPage() {
   useEffect(() => {
     if (!pricedByHand) setPrice(suggested);
   }, [suggested, pricedByHand]);
+  useEffect(() => {
+    if (margin === '' && data?.margin_pct != null) setMargin(String(Number(data.margin_pct)));
+  }, [data?.margin_pct]); // eslint-disable-line
 
   const addBox = async () => {
     if (!Number(qty)) return;
@@ -206,13 +231,31 @@ export function PackBenchPage() {
                   }}>{k}</button>
                 ))}
               </div>
-              <div className="grid c2 mt">
+              <div className="grid c3 mt">
+                {/* The margin, on the bench, where the boxes are.
+                    The catalogue sets the policy and this box starts there —
+                    but one batch can become gift boxes and loose seconds in the
+                    same hour, and walking to Settings to change a company-wide
+                    number and back is not a thing anybody does mid-shift. */}
+                <div>
+                  <label className="lbl">Margin on these (%)</label>
+                  <input type="number" step="0.5" min={0} value={margin}
+                    onChange={(e) => { setMargin(e.target.value); setPricedByHand(false); }} />
+                  <div className="small muted mt">
+                    {data.margin_pct != null && Number(margin) !== Number(data.margin_pct) ? (
+                      <>catalogue says {num(data.margin_pct, 0)}% ·{' '}
+                        <button className="btn sm ghost" type="button"
+                          onClick={() => { setMargin(String(Number(data.margin_pct))); setPricedByHand(false); }}>
+                          back to it</button></>
+                    ) : <>the margin set on {data.product_name}</>}
+                  </div>
+                </div>
                 <div>
                   <label className="lbl">Price on the label (₹)</label>
                   <input type="number" value={price}
                     onChange={(e) => { setPrice(e.target.value); setPricedByHand(true); }} />
                   {/* Worked out rather than remembered: cost, overheads, both
-                      freight legs and the margin on this product. Editable,
+                      freight legs and the margin in the box beside it. Editable,
                       because the person holding the box can see it. */}
                   {suggested ? (
                     <div className="small muted mt">
@@ -224,7 +267,7 @@ export function PackBenchPage() {
                               setPriceByGrade((s2) => { const n2 = { ...s2 }; delete n2[grade]; return n2; });
                             }}>use it</button></>
                       ) : (
-                        <>cost + {num(data.margin_pct, 0)}% margin on {qty || 0} {data.base_uom}</>
+                        <>cost + {num(Number(margin) || 0, 0)}% margin on {qty || 0} {data.base_uom}</>
                       )}
                     </div>
                   ) : null}
@@ -490,6 +533,9 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
      stays overruled — a field that keeps rewriting what you typed is worse
      than one that starts empty. */
   const [pricedByHand, setPricedByHand] = useState(false);
+  /* The margin for this run of boxes, starting at the product's own. */
+  const [margin, setMargin] = useState(
+    bench.margin_pct != null ? String(Number(bench.margin_pct)) : '');
   const [binCode, setBinCode] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
@@ -510,10 +556,14 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
   /* The least this box can sell for and still make the margin, given what the
      produce cost, what it costs to handle and what the trip to the shop costs.
      Per box, not per kilo, because per box is what goes on the label. */
+  /* The floor is the CATALOGUE's margin — the least this may sell for under
+     the policy — and it does not move when the bench types a different margin.
+     That is the point: the margin box is a decision, and the floor is what it
+     is being measured against. */
   const floorPerUnit = Number(bench.min_sell_price) || 0;
   const floorPerBox = floorPerUnit > 0 && per > 0 ? floorPerUnit * per : 0;
   const belowFloor = floorPerBox > 0 && Number(price) > 0 && Number(price) < floorPerBox;
-  const suggested = suggestPrice(floorPerUnit, per);
+  const suggested = suggestPrice(bench, per, margin);
 
   /* Fill it in as soon as the size is known. Somebody at a bench should not be
      doing this arithmetic in their head against a floor printed underneath the
@@ -604,7 +654,7 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
         </div>
       </div>
 
-      <div className="grid c2 mt">
+      <div className="grid c3 mt">
         <div>
           <label className="lbl">Quality of these boxes</label>
           <div className="row" style={{ gap: 5 }}>
@@ -612,6 +662,22 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
               <button key={g.key} className={`btn sm ${grade === g.key ? 'primary' : ''}`}
                 onClick={() => setGrade(g.key)}>{g.label}</button>
             ))}
+          </div>
+        </div>
+        <div>
+          {/* Set here, not in Settings. One batch can become gift boxes and
+              loose seconds in the same hour. */}
+          <label className="lbl">Margin on these (%)</label>
+          <input type="number" step="0.5" min={0} value={margin}
+            onChange={(e) => { setMargin(e.target.value); setPricedByHand(false); }}
+            placeholder={bench.margin_pct != null ? String(Number(bench.margin_pct)) : '15'} />
+          <div className="small muted mt">
+            {bench.margin_pct != null && Number(margin) !== Number(bench.margin_pct) ? (
+              <>catalogue says {num(bench.margin_pct, 0)}% ·{' '}
+                <button className="btn sm ghost" type="button"
+                  onClick={() => { setMargin(String(Number(bench.margin_pct))); setPricedByHand(false); }}>
+                  back to it</button></>
+            ) : <>the margin set on {bench.product_name}</>}
           </div>
         </div>
         <div>
@@ -635,7 +701,7 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
                         onClick={() => { setPrice(suggested); setPricedByHand(false); }}>
                         use it
                       </button></>
-                  : `Worked out from cost + ${num(bench.margin_pct, 0)}% margin, `
+                  : `Worked out from cost + ${num(Number(margin) || 0, 0)}% margin, `
                     + `for a ${num(per, 1)} ${bench.base_uom} box. Change it if you need to.`}
             </div>
           ) : null}
