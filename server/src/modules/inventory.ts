@@ -176,12 +176,16 @@ export async function postIssue(tx: Tx, actor: Actor, input: IssueInput) {
   if (!warehouse) throw ApiError.notFound('Warehouse not found');
 
   if (input.customerId) {
+    /* Only that they are ours. Which shop they are filed under, and whether
+     * somebody archived them, used to refuse the sale outright — so a regular
+     * standing at the counter with money could not be served because his
+     * record lived on another shop's list. Filing is a management concern; a
+     * sale is the business. The customer_id is still recorded, so the shop the
+     * money actually came through is on the issue either way. */
     const { rows: customers } = await tx.query(
-      `SELECT id FROM customers
-        WHERE id = $1 AND company_id = $2
-          AND (warehouse_id = $3 OR warehouse_id IS NULL) AND is_active`,
-      [input.customerId, actor.companyId, warehouse.id]);
-    if (!customers[0]) throw ApiError.rule('That customer belongs to another centre or is inactive.');
+      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
+      [input.customerId, actor.companyId]);
+    if (!customers[0]) throw ApiError.rule('No customer with that id.');
   }
 
   const issueNo = await nextDocNo(tx, actor, warehouse.branch_id, 'ISS');
@@ -826,11 +830,13 @@ inventoryRouter.get('/pack-bench/:batchId', h(async (req) => {
         WHERE pk.batch_id = $1 AND pk.status = 'IN_STOCK'
         ORDER BY pk.created_at DESC LIMIT 40`, [b.batch_id]),
     query(req.actor,
-      `SELECT bn.id, bn.code, r.code AS rack_code, bn.capacity_kg, bn.current_fill_kg,
+      `SELECT bn.id, bn.code, r.code AS rack_code, bn.capacity_kg,
+              f.fill_kg AS current_fill_kg, f.filled_pct, f.free_kg,
               (SELECT count(*)::int FROM packs pk
                 WHERE pk.bin_id = bn.id AND pk.status='IN_STOCK') AS packs
          FROM bins bn JOIN racks r ON r.id = bn.rack_id
          JOIN zones z ON z.id = r.zone_id
+         JOIN v_bin_fill f ON f.bin_id = bn.id
         WHERE bn.company_id = $1 AND bn.is_active AND z.warehouse_id = $2
         ORDER BY r.code, bn.code`, [req.actor.companyId, b.warehouse_id]),
     /* Which shops asked for which size of this product. Packing 2 kg bags
@@ -934,7 +940,8 @@ inventoryRouter.post('/pack-bench/:batchId/box',
          RETURNING *`,
         [req.actor.companyId, run.id, req.params.batchId, sb.product_id, input.warehouseId,
          packCode(), seq[0].n, input.label ?? null, input.qty, sb.base_uom,
-         money(input.price), input.grade.toUpperCase(), input.weightKg ?? null,
+         money(input.price), input.grade.toUpperCase(),
+         input.weightKg ?? (sb.base_uom === 'KG' ? input.qty : null),
          req.actor.userId, input.note ?? null, binId]);
       const pack = rows[0];
 
@@ -1055,7 +1062,11 @@ inventoryRouter.post('/pack-bench/:batchId/run',
              input.warehouseId, packCode(), packNo,
              g.label ?? `${g.count} × ${roundQty(g.qtyPerPack)} ${sb.base_uom}`,
              g.qtyPerPack, sb.base_uom, money(g.price), g.grade.toUpperCase(),
-             g.weightKgPerPack ?? null, req.actor.userId, input.note ?? null, binId]);
+             /* A box counted in kilos weighs its quantity. Leaving this null
+              * made every shelf read "0 kg filled" and the put-away suggestion
+              * think the warehouse was empty. */
+             g.weightKgPerPack ?? (sb.base_uom === 'KG' ? g.qtyPerPack : null),
+             req.actor.userId, input.note ?? null, binId]);
           made.push({ ...rows[0], product_name: sb.product_name });
         }
       }
@@ -1272,6 +1283,53 @@ inventoryRouter.post('/packs/:id/void', requires('inventory.pack.grade'), h(asyn
  * The idempotency key is derived from the packs themselves, so a double-tap on
  * a warehouse tablet replays the first sale instead of selling twice.
  */
+/**
+ * BOXES, GROUPED.
+ *
+ * Three hundred 5 kg boxes of mango are three hundred rows on the till and
+ * three hundred rows on the send screen, and nobody wants to tick three
+ * hundred boxes: they want to say "sixty of those". A box is still its own
+ * physical thing with its own label — the ids come back with each group so the
+ * caller takes as many as it needs — but the list a person reads is one row
+ * per thing you can actually ask for.
+ *
+ * The same grouping serves selling and sending, because they ask the same
+ * question of the same shelf.
+ */
+inventoryRouter.get('/pack-groups', h(async (req) =>
+  query(req.actor,
+    `SELECT k.product_id, p.name AS product_name, p.sku, p.icon, p.base_uom,
+            k.batch_id, b.batch_no, k.grade, k.qty, k.uom, k.price,
+            k.warehouse_id, w.name AS warehouse_name,
+            count(*)::int                        AS boxes,
+            SUM(k.qty)                           AS total_qty,
+            SUM(k.price)                         AS worth,
+            count(*) FILTER (WHERE k.bin_id IS NOT NULL)::int AS on_a_shelf,
+            /* Where they are, so "fetch me sixty" is a place and not a hunt.
+             * More than one shelf is normal for a big group. */
+            string_agg(DISTINCT bn.code, ', ' ORDER BY bn.code) AS shelves,
+            COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date,
+            (COALESCE(b.predicted_expiry_date, b.expiry_date) - CURRENT_DATE) AS days_to_expiry,
+            pr.true_cost, pr.min_sell_price, pr.margin_pct,
+            /* The ids, oldest first. The caller slices off what it asked for,
+             * so the oldest boxes go out first without anybody choosing. */
+            array_agg(k.id ORDER BY k.created_at, k.pack_no) AS pack_ids
+       FROM packs k
+       JOIN products p   ON p.id = k.product_id
+       JOIN batches  b   ON b.id = k.batch_id
+       JOIN warehouses w ON w.id = k.warehouse_id
+       LEFT JOIN bins bn ON bn.id = k.bin_id
+       LEFT JOIN v_batch_pricing pr ON pr.batch_id = k.batch_id
+      WHERE k.company_id = $1 AND k.status = 'IN_STOCK'
+        AND ($2::uuid IS NULL OR k.warehouse_id = $2)
+        AND ($3::uuid IS NULL OR k.product_id = $3)
+      GROUP BY k.product_id, p.name, p.sku, p.icon, p.base_uom, k.batch_id, b.batch_no,
+               k.grade, k.qty, k.uom, k.price, k.warehouse_id, w.name,
+               b.predicted_expiry_date, b.expiry_date,
+               pr.true_cost, pr.min_sell_price, pr.margin_pct
+      ORDER BY COALESCE(b.predicted_expiry_date, b.expiry_date) NULLS LAST, p.name, k.qty`,
+    [req.actor.companyId, req.query.warehouseId ?? null, req.query.productId ?? null])));
+
 inventoryRouter.post('/packs/sell', requires('inventory.stock.issue'), h(async (req) => {
   const input = body(z.object({
     packIds: z.array(z.string().uuid()).min(1, 'Choose at least one pack'),

@@ -919,9 +919,16 @@ function QcTab({ gate, onDone }: { gate: any; onDone: () => void }) {
                 { key: 'r', head: 'Result', render: (i: any) => <Chip value={i.overall_result} /> },
                 { key: 's', head: 'Score', num: true, render: (i: any) => num(i.quality_score, 0) },
                 { key: 'g', head: 'Grade', render: (i: any) => <Chip tone="neutral">{i.assigned_grade ?? '—'}</Chip> },
-                { key: 'a', head: 'Accepted', num: true, render: (i: any) => num(i.accepted_qty, 0) },
+                /* With the unit. "40" against a supplier's name is the start of
+                   an argument; "40 CRATE" is a fact. */
+                { key: 'a', head: 'Accepted', num: true, render: (i: any) => (
+                  <span>{num(i.accepted_qty, 0)} <span className="small muted">{i.uom}</span></span>
+                ) },
                 { key: 'rj', head: 'Rejected', num: true, render: (i: any) =>
-                  Number(i.rejected_qty) > 0 ? <b style={{ color: 'var(--danger)' }}>{num(i.rejected_qty, 0)}</b> : '—' },
+                  Number(i.rejected_qty) > 0 ? (
+                    <span><b style={{ color: 'var(--danger)' }}>{num(i.rejected_qty, 0)}</b>{' '}
+                      <span className="small muted">{i.uom}</span></span>
+                  ) : '—' },
                 { key: 'i', head: 'Inspector', render: (i: any) => <span className="small">{i.inspector_name}</span> },
               ]}
             />
@@ -986,7 +993,7 @@ function QcModal({ gate, line, onClose, onDone }: {
     })));
     try {
       const r = await api.post<any>('/receiving/qc/photo-assist', {
-        branchId, productId: line.product_id, templateId: plan.template.id, images,
+        branchId, productId: line.product_id, templateId: plan.template?.id ?? null, images,
       });
       setAiRun(r);
       const next = { ...answers };
@@ -1023,7 +1030,7 @@ function QcModal({ gate, line, onClose, onDone }: {
       await api.post(`/receiving/gate-entries/${gate.id}/inspections`, {
         productId: line.product_id,
         poLineId: line.id ?? null,
-        templateId: plan.template.id,
+        templateId: plan.template?.id ?? null,
         receivedQty: received,
         lotSize: plan.lotQty || received,
         sampleSize: plan.sampleSize,
@@ -1169,13 +1176,22 @@ function QcModal({ gate, line, onClose, onDone }: {
         <button className="btn primary" disabled={busy || loading || !groupsBalance || (criticalFailed.length > 0 && accepted > 0 && !overrideReason)}
           onClick={save}>{busy ? 'Saving…' : 'Save inspection'}</button>
       </>}>
-      {loading ? <Loading /> : !plan ? <Empty title="No QC template for this product" /> : (
+      {/* The decision is shown whether or not there is a checklist. Hiding the
+          whole form behind a template left "Save inspection" enabled over an
+          empty dialog, and pressing it reached for plan.template. */}
+      {loading ? <Loading /> : !plan ? (
+        <Empty icon="📋" title="Could not load the quality check"
+          hint="Try again, or check that the vehicle is still at the gate." />
+      ) : (
         <div className="stack">
-          <div className="banner info">
-            <span><Icon name="scale" size={16} /></span>
+          <div className={`banner ${plan.template ? 'info' : 'warn'}`}>
+            <span><Icon name={plan.template ? 'scale' : 'info'} size={16} /></span>
             <div>{plan.samplingNote}</div>
           </div>
 
+          {/* The camera and the checklist only mean something when there are
+              questions to pre-fill. With none, the dialog is the decision. */}
+          {plan.template ? (
           <div>
             <label className="btn" style={{ cursor: 'pointer' }}>
               📷 Take photos and let AI pre-fill
@@ -1191,7 +1207,9 @@ function QcModal({ gate, line, onClose, onDone }: {
               </div>
             ) : null}
           </div>
+          ) : null}
 
+          {plan.template ? (
           <div className="card"><div className="card-body">
             {(plan.parameters ?? []).map((p: any) => (
               <div className="field" key={p.code}>
@@ -1210,10 +1228,22 @@ function QcModal({ gate, line, onClose, onDone }: {
                   </div>
                 ) : p.param_type === 'SELECT' ? (
                   <div className="btn-row">
-                    {(p.options ?? []).map((o: any) => (
-                      <button key={o.value} className={`btn ${answers[p.code] === o.value ? 'primary' : ''}`}
-                        onClick={() => setAnswers((s) => ({ ...s, [p.code]: o.value }))}>{o.label}</button>
-                    ))}
+                    {/* An option is {value,label,score}. One template briefly
+                        held bare strings, and this rendered o.label of a
+                        string — three blank buttons with no way to tell what
+                        they were. Tolerate both shapes: a blank button is
+                        never the right thing to put in front of somebody. */}
+                    {(p.options ?? []).map((o: any, oi: number) => {
+                      const value = typeof o === 'string' ? o : o?.value ?? String(o);
+                      const label = typeof o === 'string' ? o : o?.label ?? value;
+                      return (
+                        <button key={value || oi}
+                          className={`btn ${answers[p.code] === value ? 'primary' : ''}`}
+                          onClick={() => setAnswers((s) => ({ ...s, [p.code]: value }))}>
+                          {label}
+                        </button>
+                      );
+                    })}
                   </div>
                 ) : (
                   <input type="number" value={answers[p.code] ?? ''}
@@ -1225,6 +1255,7 @@ function QcModal({ gate, line, onClose, onDone }: {
               </div>
             ))}
           </div></div>
+          ) : null}
 
           {criticalFailed.length ? (
             <div className="banner danger">

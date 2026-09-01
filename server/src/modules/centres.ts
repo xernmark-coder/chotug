@@ -541,9 +541,23 @@ centreRouter.post('/transfers/:id/receive', requires('centre.stock.receive'), h(
 
 /* ------------------------------------------------------------ customers -- */
 
-centreRouter.get('/customers/list', h(async (req) =>
-  query(req.actor,
+/**
+ * The customer list.
+ *
+ * `forSale=1` drops the two filters that belong on a management screen and
+ * nowhere near a till: whether the customer is marked active, and whether they
+ * are on this shop's list. A man standing at the counter with money is a sale;
+ * refusing him because he is filed under the Kothrud shop, or because somebody
+ * archived him in March, is the software getting in the way of the one thing
+ * the business exists to do. Both facts are still returned, so the seller can
+ * see what they are looking at — they just do not hide anybody.
+ */
+centreRouter.get('/customers/list', h(async (req) => {
+  const forSale = req.query.forSale === '1' || req.query.forSale === 'true';
+  return query(req.actor,
     `SELECT c.*, w.name AS centre_name,
+            (c.warehouse_id IS NOT DISTINCT FROM $2::uuid
+             OR c.warehouse_id IS NULL)          AS is_ours,
             COALESCE(s.orders,0) AS orders, COALESCE(s.spent,0) AS spent, s.last_bought
        FROM customers c
        LEFT JOIN warehouses w ON w.id = c.warehouse_id
@@ -552,11 +566,19 @@ centreRouter.get('/customers/list', h(async (req) =>
                     FROM stock_issues WHERE customer_id IS NOT NULL
                      AND status IN ('POSTED','RECEIVED')
                    GROUP BY customer_id) s ON s.customer_id = c.id
-      WHERE c.company_id = $1 AND c.is_active
-        AND ($2::uuid IS NULL OR c.warehouse_id = $2 OR c.warehouse_id IS NULL)
+      WHERE c.company_id = $1
+        AND ($4::boolean OR c.is_active)
+        AND ($4::boolean OR $2::uuid IS NULL
+             OR c.warehouse_id = $2 OR c.warehouse_id IS NULL)
         AND ($3 = '' OR c.name ILIKE '%' || $3 || '%' OR c.phone ILIKE '%' || $3 || '%')
-      ORDER BY COALESCE(s.spent,0) DESC, c.name LIMIT 200`,
-    [req.actor.companyId, req.query.warehouseId || null, String(req.query.q ?? '')])));
+      /* This shop's own regulars first — the common sale stays one tap — then
+       * everybody else by what they have spent. */
+      ORDER BY (c.warehouse_id IS NOT DISTINCT FROM $2::uuid OR c.warehouse_id IS NULL) DESC,
+               c.is_active DESC, COALESCE(s.spent,0) DESC, c.name
+      LIMIT 400`,
+    [req.actor.companyId, req.query.warehouseId || null,
+     String(req.query.q ?? ''), forSale]);
+}));
 
 /** Added from the dropdown at the till, because that is when you meet them. */
 centreRouter.post('/customers', requires('master.customer.manage'), h(async (req) => {

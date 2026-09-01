@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { api, useAuth, inr, num } from '../lib/api';
+import { api, useAuth, inr, num, ago } from '../lib/api';
 import { Icon } from './icons';
 
 /* ------------------------------------------------------------- toasts ---- */
@@ -508,6 +508,10 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         { to: '/arrivals', label: 'Deliveries & Receiving', icon: 'truckIn', perms: ['receiving.gate.create'] },
         // The warehouse's own first step: weigh it, count the crates, pass it on.
         { to: '/intake', label: 'Warehouse Intake', icon: 'scale', perms: ['receiving.weighment.create'] },
+        /* Refusing a load and telling the supplier are two different acts, and
+           the second was nobody's job. It sits next to receiving because that
+           is where the crates are still standing. */
+        { to: '/rejections', label: 'Turned Away', icon: 'alert', perms: ['quality.inspection.view'] },
         { to: '/grns', label: 'Goods Receipts', icon: 'inbox', perms: ['receiving.grn.create', 'receiving.grn.submit'] },
         // Selling is where stock stops being cost and becomes revenue, so it
         // sits with the money, not with the warehouse shelves.
@@ -727,20 +731,68 @@ export type Col<T> = {
  * oldest row, it is a row somebody has not filled in yet, and putting it at the
  * top of "oldest first" hides the thing that was actually being looked for.
  */
-export function DataTable<T>({ rows, cols, onRowClick, rowTone, empty, loading, defaultSort }: {
+/* The fields a row might carry its own age in, best first. Every list on every
+ * screen wants "oldest first / newest first" and none of them should have to
+ * add the column by hand — a table that can be sorted by time on one page and
+ * not the next is the same inconsistency `sort` exists to prevent. */
+const TIME_FIELDS = [
+  'created_at', 'requested_at', 'issued_at', 'received_at', 'ordered_at',
+  'recorded_at', 'posted_at', 'entered_at', 'inspected_at', 'updated_at',
+];
+
+function timeOf(row: any): string | null {
+  if (!row || typeof row !== 'object') return null;
+  for (const f of TIME_FIELDS) if (row[f]) return String(row[f]);
+  return null;
+}
+
+export function DataTable<T>({
+  rows, cols, onRowClick, rowTone, empty, loading, defaultSort, noAddedColumn,
+}: {
   rows: T[]; cols: Col<T>[];
   onRowClick?: (row: T) => void;
   rowTone?: (row: T) => 'warn' | 'crit' | undefined;
   empty?: React.ReactNode; loading?: boolean;
   /** Column key to sort by before anybody clicks anything. */
   defaultSort?: string;
+  /** Opt out where the row's own age is genuinely not information. */
+  noAddedColumn?: boolean;
 }) {
+  /* "Added" is appended rather than asked for, so it is on every table that has
+     a time to show without eighty screens each remembering to add it. Rows that
+     carry no timestamp — anything grouped or aggregated — get no column, which
+     is the right answer rather than an empty one. */
+  const cols2 = React.useMemo(() => {
+    if (noAddedColumn) return cols;
+    if (!rows.length || !rows.some((r) => timeOf(r))) return cols;
+    if (cols.some((c) => c.key === '_added')) return cols;
+    /* Some screens already show the row's age under their own heading. Match on
+       the VALUE rather than the label, so "When", "Added" and "Raised" are all
+       recognised and none of them ends up next to a second identical column. */
+    const probe = rows.find((r) => timeOf(r));
+    if (probe && cols.some((c) => c.sort && String(c.sort(probe) ?? '') === timeOf(probe))) {
+      return cols;
+    }
+    return [...cols, {
+      key: '_added',
+      head: 'Added',
+      desc: true,
+      sort: (r: T) => timeOf(r) ?? null,
+      render: (r: T) => {
+        const t = timeOf(r);
+        return t
+          ? <span className="small muted" title={new Date(t).toLocaleString()}>{ago(t)}</span>
+          : <span className="small muted">—</span>;
+      },
+    } as Col<T>];
+  }, [cols, rows, noAddedColumn]);
+
   const [sortKey, setSortKey] = React.useState<string | null>(defaultSort ?? null);
   const [dir, setDir] = React.useState<'asc' | 'desc'>(() =>
     (cols.find((c) => c.key === defaultSort)?.desc ? 'desc' : 'asc'));
 
   const sorted = React.useMemo(() => {
-    const col = cols.find((c) => c.key === sortKey);
+    const col = cols2.find((c) => c.key === sortKey);
     if (!col?.sort) return rows;
     const sign = dir === 'asc' ? 1 : -1;
     return [...rows].sort((a, b) => {
@@ -754,7 +806,7 @@ export function DataTable<T>({ rows, cols, onRowClick, rowTone, empty, loading, 
       if (typeof x === 'number' && typeof y === 'number') return (x - y) * sign;
       return String(x).localeCompare(String(y), undefined, { numeric: true }) * sign;
     });
-  }, [rows, cols, sortKey, dir]);
+  }, [rows, cols2, sortKey, dir]);
 
   const click = (c: Col<T>) => {
     if (!c.sort) return;
@@ -768,7 +820,7 @@ export function DataTable<T>({ rows, cols, onRowClick, rowTone, empty, loading, 
     <div className="table-wrap">
       <table className="data">
         <thead>
-          <tr>{cols.map((c) => (
+          <tr>{cols2.map((c) => (
             <th key={c.key}
               className={`${c.num ? 'num' : ''} ${c.sort ? 'sortable' : ''} ${sortKey === c.key ? 'sorted' : ''}`}
               style={c.width ? { width: c.width } : undefined}
@@ -790,7 +842,7 @@ export function DataTable<T>({ rows, cols, onRowClick, rowTone, empty, loading, 
               <tr key={i}
                 className={`${onRowClick ? 'clickable' : ''} ${tone === 'crit' ? 'row-crit' : tone === 'warn' ? 'row-warn' : ''}`}
                 onClick={() => onRowClick?.(r)}>
-                {cols.map((c) => (
+                {cols2.map((c) => (
                   <td key={c.key} className={c.num ? 'num mono' : ''}>{c.render(r)}</td>
                 ))}
               </tr>
@@ -1008,6 +1060,9 @@ const PLURAL: Record<string, string> = {
   person: 'people', delivery: 'deliveries', batch: 'batches', box: 'boxes',
   entry: 'entries', company: 'companies', category: 'categories', body: 'bodies',
   match: 'matches', dispatch: 'dispatches', loss: 'losses', class: 'classes',
+  /* The plural belongs on the head noun, not the tail: twenty KINDS of box,
+     not twenty kind of boxes. */
+  'kind of box': 'kinds of box',
 };
 
 function plural(noun: string) {

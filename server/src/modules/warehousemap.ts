@@ -294,7 +294,10 @@ mapRouter.post('/qc-holding/:gateEntryId/release', requires('receiving.box.weigh
 mapRouter.get('/scan/:qr', h(async (req) => {
   const code = String(req.params.qr).trim().toUpperCase();
   const [loc] = await query(req.actor,
-    `SELECT * FROM v_locations WHERE company_id = $1 AND upper(qr_code) = $2`,
+    `SELECT l.*, f.fill_kg, f.capacity_kg AS shelf_capacity_kg, f.filled_pct, f.free_kg
+       FROM v_locations l
+       LEFT JOIN v_bin_fill f ON f.bin_id = l.id AND l.level = 'SHELF'
+      WHERE l.company_id = $1 AND upper(l.qr_code) = $2`,
     [req.actor.companyId, code]);
 
   if (!loc) {
@@ -323,15 +326,48 @@ mapRouter.get('/scan/:qr', h(async (req) => {
         `SELECT p.id AS product_id, p.name AS product_name, p.sku, p.icon,
                 b.id AS batch_id, b.batch_no, pk.grade,
                 count(*)::int AS packs, SUM(pk.qty) AS qty, pk.uom,
-                SUM(COALESCE(pk.weight_kg,0)) AS weight_kg,
+                /* Only 8 of 97 boxes carry a measured weight; the rest are
+                 * counted in kilos, where the quantity IS the weight. Summing
+                 * weight_kg alone reported 0 kg on a shelf holding 10. */
+                SUM(COALESCE(pk.weight_kg,
+                             CASE WHEN pk.uom = 'KG' THEN pk.qty END, 0)) AS weight_kg,
                 MIN(pk.stored_at) AS oldest,
-                COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date
+                COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date,
+                /* How long it has left, said as a number rather than a date —
+                 * "3 days" is actionable where "12 Oct" needs arithmetic while
+                 * standing in front of a rack. */
+                (COALESCE(b.predicted_expiry_date, b.expiry_date) - CURRENT_DATE)
+                                                          AS days_to_expiry,
+                MIN(pk.stored_at)::date                   AS stored_on,
+                (CURRENT_DATE - MIN(pk.stored_at)::date)  AS days_on_the_shelf,
+                /* What it cost and what it is worth, from the one place that
+                 * computes it — so a shelf, a report and the till cannot
+                 * disagree about the same crate. */
+                b.landed_rate, b.landed_rate_per_kg,
+                pr.true_cost, pr.min_sell_price, pr.overhead_per_kg,
+                SUM(pk.price)                             AS asking,
+                /* The cheapest and dearest box in the group, not just the
+                 * total. Seventeen boxes averaging ₹293 hid one priced at zero
+                 * — an average is exactly the wrong statistic for finding the
+                 * box somebody mis-labelled. */
+                MIN(pk.price)                             AS lowest_price,
+                MAX(pk.price)                             AS highest_price,
+                SUM(pk.qty) * COALESCE(b.landed_rate, 0)  AS cost_here,
+                s.trade_name                              AS supplier_name,
+                g.grn_no, g.posting_date                  AS received_on
            FROM packs pk
            JOIN products p ON p.id = pk.product_id
            JOIN batches  b ON b.id = pk.batch_id
+           LEFT JOIN v_batch_pricing pr ON pr.batch_id = b.id
+           LEFT JOIN grn_lines gl ON gl.id = b.grn_line_id
+           LEFT JOIN grns g       ON g.id = gl.grn_id
+           LEFT JOIN suppliers s ON s.id = b.supplier_id
           WHERE pk.bin_id = $1 AND pk.status = 'IN_STOCK'
           GROUP BY p.id, p.name, p.sku, p.icon, b.id, b.batch_no, pk.grade, pk.uom,
-                   COALESCE(b.predicted_expiry_date, b.expiry_date)
+                   COALESCE(b.predicted_expiry_date, b.expiry_date),
+                   b.landed_rate, b.landed_rate_per_kg,
+                   pr.true_cost, pr.min_sell_price, pr.overhead_per_kg,
+                   s.trade_name, g.grn_no, g.posting_date
           ORDER BY p.name, pk.grade`, [loc.id])
       : Promise.resolve([]),
     query(req.actor,

@@ -53,6 +53,7 @@ function PricingPanel() {
 
   const canPrice = can('master.pricing.manage');
   const o = basis.data?.overhead ?? {};
+  const ib = basis.data?.inbound ?? {};
   const ob = basis.data?.outbound ?? {};
   const co = basis.data?.company ?? {};
 
@@ -80,10 +81,10 @@ function PricingPanel() {
     <>
       <ErrorBanner error={rows.error} />
 
-      {/* The two derived numbers, said out loud with what they were derived
-          from. A per-kilo overhead nobody can trace is a per-kilo overhead
-          nobody believes. */}
-      <div className="grid c3 mb">
+      {/* The derived numbers, said out loud with what they were derived from.
+          A per-kilo overhead nobody can trace is a per-kilo overhead nobody
+          believes. */}
+      <div className="grid c4 mb">
         <div className="card"><div className="card-body">
           <div className="small muted">Running the place, per kg</div>
           <div className="value" style={{ fontSize: 26, fontWeight: 700 }}>
@@ -92,6 +93,17 @@ function PricingPanel() {
           <div className="small muted">
             {inr(o.operating_spend, 0)} paid over {num(o.kg_handled, 0)} kg received
             in {o.window_days ?? 30} days
+          </div>
+        </div></div>
+        <div className="card"><div className="card-body">
+          <div className="small muted">Getting it here, per kg</div>
+          <div className="value" style={{ fontSize: 26, fontWeight: 700 }}>
+            {inr(ib.inbound_per_kg, 2)}
+          </div>
+          <div className="small muted">
+            {inr(ib.supplier_carried, 0)} charged by suppliers +{' '}
+            {inr(ib.we_collected, 0)} on our own vehicles, over{' '}
+            {num(ib.kg_received, 0)} kg received
           </div>
         </div></div>
         <div className="card"><div className="card-body">
@@ -110,8 +122,8 @@ function PricingPanel() {
             {num(co.default_margin_pct, 0)}%
           </div>
           <div className="small muted">
-            the company default, on the whole cost including both trips.
-            Change it in Settings, or per product below.
+            the company default, on the whole cost — what we paid, handling,
+            and both journeys. Change it in Settings, or per product below.
           </div>
         </div></div>
       </div>
@@ -140,6 +152,12 @@ function PricingPanel() {
             { key: 'o', head: 'Handling', num: true, desc: true,
               sort: (r: any) => Number(r.overhead_cost) || 0,
               render: (r: any) => inr(r.overhead_cost, 2) },
+            /* Both legs, separately. A single "transport" figure would hide
+               which end of the journey is expensive, and they are two
+               different problems with two different people to talk to. */
+            { key: 'fi', head: 'Freight in', num: true, desc: true,
+              sort: (r: any) => Number(r.freight_in) || 0,
+              render: (r: any) => inr(r.freight_in, 2) },
             { key: 'f', head: 'To the shop', num: true, desc: true,
               sort: (r: any) => Number(r.cost_to_centre) || 0,
               render: (r: any) => inr(r.cost_to_centre, 2) },
@@ -251,6 +269,9 @@ function PriceModal({ row, onClose, onDone }: {
               <td className="num mono">{inr(row.cost_to_warehouse, 2)}</td></tr>
             <tr><td>Handling — wages, power, cold store, rent</td>
               <td className="num mono">{inr(row.overhead_cost, 2)}</td></tr>
+            <tr><td>Getting it here — what suppliers charged to bring it,
+              and what we paid to fetch it</td>
+              <td className="num mono">{inr(row.freight_in, 2)}</td></tr>
             <tr><td>Carrying it out to the shops</td>
               <td className="num mono">{inr(row.cost_to_centre, 2)}</td></tr>
             <tr><td><b>Total cost per {row.base_uom?.toLowerCase() ?? 'kg'}</b></td>
@@ -329,7 +350,7 @@ export function CataloguePage() {
   const prods = useApi<any[]>('/masters/products');
   const links = useApi<any[]>('/masters/supplier-products');
 
-  const [tab, setTab] = useState<'tree' | 'codes' | 'price'>('tree');
+  const [tab, setTab] = useState<'tree' | 'codes' | 'price' | 'qc'>('tree');
   const [addCat, setAddCat] = useState<any>(null);      // parent, or {} for top level
   const [addProd, setAddProd] = useState<any>(null);    // the category it goes in
   const [addLink, setAddLink] = useState(false);
@@ -437,7 +458,17 @@ export function CataloguePage() {
         <button className={`tab ${tab === 'price' ? 'active' : ''}`} onClick={() => setTab('price')}>
           Cost &amp; price
         </button>
+        {/* The checklist the floor works to. It lived only in the seed and
+            could only be changed in SQL, so a product added today was
+            inspected against whatever its category happened to default to. */}
+        {can('quality.template.manage') ? (
+          <button className={`tab ${tab === 'qc' ? 'active' : ''}`} onClick={() => setTab('qc')}>
+            Quality checklists
+          </button>
+        ) : null}
       </div>
+
+      {tab === 'qc' ? <QcTemplatesPanel /> : null}
 
       {tab === 'price' ? <PricingPanel /> : null}
 
@@ -761,6 +792,388 @@ function SupplierCodeModal({ products, onClose, onDone }: {
             placeholder="Hapus Petti" />
         </Field>
       </div>
+    </Modal>
+  );
+}
+
+/* ===========================================================================
+ * THE QUALITY CHECKLIST
+ *
+ * What the inspection screen asks about each product. It arrived with the seed
+ * and had no editor, so a checklist could only be changed in SQL and a newly
+ * added product was inspected against whatever its category happened to
+ * default to — or, if the category had no default, nothing at all.
+ *
+ * Editing one that has been used makes a new version rather than changing it:
+ * a past inspection scored "8 out of 10" against particular questions, and
+ * those questions have to keep existing for that score to mean anything.
+ * ======================================================================== */
+
+const PARAM_TYPES = [
+  { v: 'BOOLEAN', label: 'Yes / no',        hint: 'Is there mould?' },
+  { v: 'PERCENT', label: 'A percentage',    hint: 'How much bruising?' },
+  { v: 'NUMERIC', label: 'A number',        hint: 'Sweetness in brix' },
+  { v: 'COUNT',   label: 'A count',         hint: 'Damaged pieces per crate' },
+  { v: 'SELECT',  label: 'One of a list',   hint: 'Size: A, B or C' },
+  { v: 'PHOTO',   label: 'A photo',         hint: 'Picture of the load' },
+  { v: 'TEXT',    label: 'A note',          hint: 'Anything else' },
+];
+const NUMERIC_TYPES = ['NUMERIC', 'PERCENT', 'COUNT'];
+
+/* A choice carries a score: "Fresh" is 100, "Wilted" is 30, and the
+ * inspection's result is computed from those numbers. Editing had to keep
+ * them, so they are written the way somebody would say them. */
+function optionsToText(options: any): string {
+  return (options ?? []).map((o: any) =>
+    (typeof o === 'string' ? o : `${o.label} ${o.score}`)).join(', ');
+}
+
+function textToOptions(text: string) {
+  return text.split(',').map((chunk) => {
+    const t = chunk.trim();
+    if (!t) return null;
+    const m = t.match(/^(.*?)\s+(\d{1,3})$/);
+    const label = (m ? m[1] : t).trim();
+    const score = m ? Math.min(100, Number(m[2])) : 100;
+    return {
+      value: label.toUpperCase().replace(/[^A-Z0-9]/g, '_').slice(0, 40),
+      label, score,
+    };
+  }).filter(Boolean) as { value: string; label: string; score: number }[];
+}
+
+function QcTemplatesPanel() {
+  const toast = useToast();
+  const { can } = useAuth();
+  const templates = useApi<any[]>('/masters/qc-templates');
+  const products = useApi<any[]>('/masters/products');
+  const [editing, setEditing] = useState<any>(null);
+  const mayEdit = can('quality.template.manage');
+
+  /* A product with no checklist gets inspected against nothing, which looks
+     like a pass. Named at the top rather than left to be noticed. */
+  const unchecked = (products.data ?? []).filter((p: any) => !p.qc_template_id);
+
+  const f = useFilters<any>(templates.data, {
+    search: (t: any) => [t.code, t.name, t.note,
+      ...(t.parameters ?? []).map((p: any) => p.label)].filter(Boolean).join(' '),
+    facets: [
+      { key: 'used', label: 'use', all: 'Used or not', of: (t: any) =>
+        (Number(t.products) > 0 ? 'in use' : 'not used by any product') },
+    ],
+    totals: [{ label: 'Checks', of: (t: any) => (t.parameters ?? []).length }],
+  });
+
+  return (
+    <>
+      {unchecked.length ? (
+        <div className="banner warn mb">
+          <span><Icon name="alert" size={16} /></span>
+          <div>
+            <b>{unchecked.length} product(s) have no checklist:</b>{' '}
+            {unchecked.slice(0, 6).map((p: any) => p.name).join(', ')}
+            {unchecked.length > 6 ? ` and ${unchecked.length - 6} more` : ''}.
+            <div className="small">
+              Quality checks on these ask nothing, which reads as a pass. Give them one
+              below, or set a default on their category.
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <FilterBar f={f} placeholder="Search a checklist or a check">
+        {mayEdit ? (
+          <button className="btn primary" onClick={() => setEditing({ parameters: [] })}>
+            New checklist
+          </button>
+        ) : null}
+      </FilterBar>
+      <FilterTotals f={f} noun="checklist" />
+
+      <div className="stack">
+        {f.rows.map((t: any) => (
+          <div className="card" key={t.id}>
+            <div className="card-head">
+              <h2>{t.name}</h2>
+              <span className="mono small muted">{t.code} · v{t.version}</span>
+              {Number(t.products) > 0
+                ? <Chip tone="primary">{t.products} product(s)</Chip>
+                : <Chip tone="neutral">not in use</Chip>}
+              {Number(t.inspections) > 0
+                ? <Chip tone="ok">{t.inspections} inspection(s)</Chip> : null}
+              <span className="spacer" />
+              {mayEdit ? (
+                <button className="btn sm" onClick={() => setEditing(t)}>Edit</button>
+              ) : null}
+            </div>
+            <div className="card-body tight">
+              {t.note ? <p className="small muted" style={{ padding: '6px 12px 0' }}>{t.note}</p> : null}
+              <table className="mini">
+                <tbody>
+                  {(t.parameters ?? []).map((p: any) => (
+                    <tr key={p.id}>
+                      <td>
+                        <b>{p.label}</b>
+                        {p.isCritical ? <Chip tone="danger">critical</Chip> : null}
+                        {!p.isMandatory ? <Chip tone="neutral">optional</Chip> : null}
+                        <div className="small muted mono">{p.code}</div>
+                      </td>
+                      <td className="small">
+                        {PARAM_TYPES.find((x) => x.v === p.paramType)?.label ?? p.paramType}
+                        {NUMERIC_TYPES.includes(p.paramType) ? (
+                          <div className="muted">
+                            {p.minOk != null ? `at least ${p.minOk}` : ''}
+                            {p.minOk != null && p.maxOk != null ? ' · ' : ''}
+                            {p.maxOk != null ? `at most ${p.maxOk}` : ''}
+                            {p.unit ? ` ${p.unit}` : ''}
+                          </div>
+                        ) : null}
+                        {p.paramType === 'SELECT' && p.options?.length ? (
+                          <div className="muted">
+                            {p.options.map((o: any) =>
+                              typeof o === 'string' ? o : `${o.label} ${o.score}`).join(' · ')}
+                          </div>
+                        ) : null}
+                      </td>
+                      <td className="num small muted">weight {p.weight}</td>
+                    </tr>
+                  ))}
+                  {!(t.parameters ?? []).length ? (
+                    <tr><td className="muted small">No checks on this one.</td></tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ))}
+        {!f.rows.length ? (
+          <Empty icon="📋"
+            title={f.active > 0 ? 'No checklist matches those filters' : 'No checklists yet'}
+            hint={f.active > 0 ? 'Clear a filter to widen the search.'
+              : 'A checklist is what the quality screen asks about a product.'} />
+        ) : null}
+      </div>
+
+      {/* Which product is checked against what. This is the half the client
+          asked for first — a product added today needs a checklist, and
+          inheriting the category default silently is how one ends up with
+          none. */}
+      <div className="card mt">
+        <div className="card-head"><h2>What each product is checked against</h2></div>
+        <div className="card-body tight">
+          <DataTable
+            loading={products.loading}
+            rows={products.data ?? []}
+            rowTone={(p: any) => (!p.qc_template_id ? 'crit' : undefined)}
+            cols={[
+              { key: 'p', head: 'Product', render: (p: any) => (
+                <div className="row" style={{ gap: 8 }}>
+                  <Icon name={p.icon ?? 'produce'} size={17} />
+                  <div><b>{p.name}</b><div className="small muted">{p.sku}</div></div>
+                </div>) },
+              { key: 't', head: 'Checked against', render: (p: any) => (
+                mayEdit ? (
+                  <select value={p.qc_template_id ?? ''}
+                    onChange={async (e) => {
+                      try {
+                        const r = await api.put<any>(`/masters/products/${p.id}/qc-template`,
+                          { templateId: e.target.value || null });
+                        toast(r.message, e.target.value ? 'ok' : 'err');
+                        products.reload(); templates.reload();
+                      } catch (err: any) { toast(err.message, 'err'); }
+                    }}>
+                    <option value="">Nothing — the check asks nothing</option>
+                    {(templates.data ?? []).map((t: any) => (
+                      <option key={t.id} value={t.id}>{t.name} · v{t.version}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <span>{(templates.data ?? []).find((t: any) => t.id === p.qc_template_id)?.name
+                    ?? <span className="chip danger">none</span>}</span>
+                )) },
+            ]}
+            empty={<Empty icon="📦" title="No products yet" />}
+          />
+        </div>
+      </div>
+
+      {editing ? (
+        <QcTemplateModal template={editing} onClose={() => setEditing(null)}
+          onDone={(m) => {
+            setEditing(null); templates.reload(); products.reload(); toast(m, 'ok');
+          }} />
+      ) : null}
+    </>
+  );
+}
+
+function QcTemplateModal({ template, onClose, onDone }: {
+  template: any; onClose: () => void; onDone: (m: string) => void;
+}) {
+  const isNew = !template.id;
+  const [code, setCode] = useState(template.code ?? '');
+  const [name, setName] = useState(template.name ?? '');
+  const [note, setNote] = useState(template.note ?? '');
+  const [rows, setRows] = useState<any[]>(
+    (template.parameters ?? []).length
+      ? template.parameters.map((p: any) => ({ ...p }))
+      : [{ code: '', label: '', paramType: 'BOOLEAN', isCritical: false, isMandatory: true, weight: 1 }]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  const patch = (i: number, p: any) =>
+    setRows((s) => s.map((r, j) => (j === i ? { ...r, ...p } : r)));
+
+  return (
+    <Modal
+      title={isNew ? 'A new quality checklist' : `${template.name} · v${template.version}`}
+      wide
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy || !code.trim() || !name.trim() || !rows.length}
+          onClick={async () => {
+            setBusy(true); setError(null);
+            try {
+              const payload = {
+                code: code.trim(), name: name.trim(), note: note.trim() || undefined,
+                parameters: rows.map((r) => ({
+                  code: (r.code || '').trim(),
+                  label: (r.label || '').trim(),
+                  paramType: r.paramType,
+                  unit: r.unit || undefined,
+                  minOk: r.minOk === '' || r.minOk == null ? undefined : Number(r.minOk),
+                  maxOk: r.maxOk === '' || r.maxOk == null ? undefined : Number(r.maxOk),
+                  options: r.paramType === 'SELECT'
+                    ? textToOptions(String(r.optionsText ?? optionsToText(r.options)))
+                    : undefined,
+                  isCritical: !!r.isCritical,
+                  isMandatory: r.isMandatory !== false,
+                  weight: Number(r.weight) || 1,
+                  helpText: r.helpText || undefined,
+                })),
+              };
+              const res: any = isNew
+                ? await api.post('/masters/qc-templates', payload)
+                : await api.put(`/masters/qc-templates/${template.id}`, payload);
+              onDone(res.message);
+            } catch (e: any) { setError(e); } finally { setBusy(false); }
+          }}>
+          {isNew ? 'Create it' : 'Save'}
+        </button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+
+      {/* Said before they press Save, not after. Changing a checklist that has
+          been used does not alter what was already inspected — it cannot, or
+          past scores would stop meaning anything. */}
+      {!isNew && Number(template.inspections) > 0 ? (
+        <div className="banner info mb">
+          <span><Icon name="info" size={16} /></span>
+          <div className="small">
+            This has been used on <b>{template.inspections} inspection(s)</b>. Saving makes{' '}
+            <b>v{Number(template.version) + 1}</b> and keeps v{template.version} exactly as it
+            is, so those inspections still say what they said. The{' '}
+            {template.products} product(s) using it move to the new version.
+          </div>
+        </div>
+      ) : null}
+
+      <div className="grid c2">
+        <Field label="Code" hint="Short, stable. It does not change between versions.">
+          <input value={code} disabled={!isNew}
+            onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="QC-BERRY" />
+        </Field>
+        <Field label="Name">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Berries" />
+        </Field>
+      </div>
+      <Field label="Why this changed" hint="Optional, and the first thing anybody reads later.">
+        <input value={note} onChange={(e) => setNote(e.target.value)}
+          placeholder="Added a stem rot check after the August losses" />
+      </Field>
+
+      <label className="lbl mt">What the inspector is asked</label>
+      <div className="table-wrap">
+        <table className="data">
+          <thead><tr>
+            <th style={{ width: 130 }}>Code</th><th>The question</th>
+            <th style={{ width: 150 }}>Answer</th><th style={{ width: 170 }}>Acceptable</th>
+            <th style={{ width: 100 }}>Weight</th><th style={{ width: 120 }}>Flags</th><th />
+          </tr></thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i}>
+                <td><input className="inline mono" value={r.code ?? ''}
+                  onChange={(e) => patch(i, { code: e.target.value.toUpperCase() })}
+                  placeholder="MOULD" /></td>
+                <td><input className="inline" value={r.label ?? ''}
+                  onChange={(e) => patch(i, { label: e.target.value })}
+                  placeholder="Any mould in the crate?" /></td>
+                <td>
+                  <select value={r.paramType}
+                    onChange={(e) => patch(i, { paramType: e.target.value })}>
+                    {PARAM_TYPES.map((t) => <option key={t.v} value={t.v}>{t.label}</option>)}
+                  </select>
+                </td>
+                <td>
+                  {NUMERIC_TYPES.includes(r.paramType) ? (
+                    <div className="row" style={{ gap: 3 }}>
+                      <input className="inline num" style={{ width: 56 }} type="number"
+                        value={r.minOk ?? ''} placeholder="min"
+                        onChange={(e) => patch(i, { minOk: e.target.value })} />
+                      <input className="inline num" style={{ width: 56 }} type="number"
+                        value={r.maxOk ?? ''} placeholder="max"
+                        onChange={(e) => patch(i, { maxOk: e.target.value })} />
+                      <input className="inline" style={{ width: 44 }} value={r.unit ?? ''}
+                        placeholder="unit" onChange={(e) => patch(i, { unit: e.target.value })} />
+                    </div>
+                  ) : r.paramType === 'SELECT' ? (
+                    /* "Fresh 100, Acceptable 75, Wilted 30". The number after
+                       each is what that answer scores — the inspection's total
+                       comes from it, so dropping it would quietly turn a graded
+                       choice into three unscored words. */
+                    <input className="inline" placeholder="Fresh 100, Wilted 30"
+                      value={r.optionsText ?? optionsToText(r.options)}
+                      onChange={(e) => patch(i, { optionsText: e.target.value })} />
+                  ) : <span className="muted small">—</span>}
+                </td>
+                <td className="num">
+                  <input className="inline num" style={{ width: 60 }} type="number" step="0.5"
+                    value={r.weight ?? 1} onChange={(e) => patch(i, { weight: e.target.value })} />
+                </td>
+                <td>
+                  <label className="check small">
+                    <input type="checkbox" checked={!!r.isCritical}
+                      onChange={(e) => patch(i, { isCritical: e.target.checked })} />
+                    <span>critical</span>
+                  </label>
+                  <label className="check small">
+                    <input type="checkbox" checked={r.isMandatory !== false}
+                      onChange={(e) => patch(i, { isMandatory: e.target.checked })} />
+                    <span>must answer</span>
+                  </label>
+                </td>
+                <td>
+                  <button className="btn sm ghost" title="Remove this check"
+                    disabled={rows.length === 1}
+                    onClick={() => setRows((s) => s.filter((_, j) => j !== i))}>✕</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <button className="btn sm mt" onClick={() => setRows((s) => [...s, {
+        code: '', label: '', paramType: 'BOOLEAN', isCritical: false, isMandatory: true, weight: 1,
+      }])}>Add another check</button>
+
+      <p className="small muted mt">
+        <b>Critical</b> means failing it fails the whole load, whatever the score.{' '}
+        <b>Weight</b> is how much the check counts towards the score — a 3 matters three
+        times as much as a 1.
+      </p>
     </Modal>
   );
 }

@@ -17,6 +17,7 @@ import { ScanLandingPage, ScanResultPage } from './pages/Scan';
 import { SupplierPortalPage } from './pages/SupplierPortal';
 import { WarehouseIntakePage } from './pages/Warehouse';
 import { LogisticsDispatchPage } from './pages/Dispatch';
+import { RejectionsPage } from './pages/Rejections';
 import { DriverAppPage } from './pages/DriverApp';
 import {
   AiCentrePage, AlertsPage, InvoiceCreatePage, InvoiceDetailPage, InvoiceListPage,
@@ -143,6 +144,7 @@ export default function App() {
       <Route path="/gate/:id" element={<GateDetailPage />} />
       <Route path="/fleet" element={<FleetPage />} />
 
+      <Route path="/rejections" element={<RejectionsPage />} />
       <Route path="/grns" element={<GrnListPage />} />
       <Route path="/grns/:id" element={<GrnDetailPage />} />
       {/* Put-away is gone: grading, labelling and shelving happen together at

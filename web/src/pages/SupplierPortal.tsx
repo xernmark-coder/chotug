@@ -19,10 +19,19 @@ import { Icon } from '../components/icons';
  * difference automatically when the bill lands.
  * ======================================================================== */
 
+/* Said in the supplier's terms, not ours: the database calls it SENT_BACK,
+   they need to read "we sent it back to you". */
+const REFUSED_LABEL: Record<string, string> = {
+  SENT_BACK: 'sent back to you',
+  PART_SENT_BACK: 'part sent back to you',
+  DESTROYED: 'thrown away',
+  KEPT_AT_A_DISCOUNT: 'kept at a discount',
+};
+
 export function SupplierPortalPage() {
   const { me } = useAuth();
   const toast = useToast();
-  const [tab, setTab] = useState<'orders' | 'rates' | 'bill' | 'invoices'>('orders');
+  const [tab, setTab] = useState<'orders' | 'rates' | 'bill' | 'invoices' | 'refused'>('orders');
   const [billing, setBilling] = useState<any>(null);
   const [pricing, setPricing] = useState<any>(null);
   const [askingVehicle, setAskingVehicle] = useState<any>(null);
@@ -37,6 +46,11 @@ export function SupplierPortalPage() {
   const invoices = useApi<any[]>('/supplier/invoices');
   const rates = useApi<any[]>('/supplier/rates');
   const catalogue = useApi<any[]>('/supplier/catalogue');
+  /* What was turned away from their loads, and what became of it. Same view the
+     warehouse writes against — one number, not two, in the unit it was measured
+     in. A supplier who learns this at invoice time has an argument; one who
+     learns it today has a lorry to send. */
+  const refused = useApi<any[]>('/supplier/rejections');
 
   /* Declared above the loading guard: a hook cannot sit behind an early
    * return. A supplier with two hundred orders needs these as much as the
@@ -55,6 +69,21 @@ export function SupplierPortalPage() {
     totals: [
       { label: 'Items', of: (o: any) => Number(o.line_count) || 0 },
       { label: 'Value', of: (o: any) => Number(o.grand_total) || 0, money: true },
+    ],
+  });
+  const fRefused = useFilters<any>(refused.data, {
+    date: (r: any) => r.inspected_at,
+    search: (r: any) => [r.inspection_no, r.po_no, r.product_name, r.warehouse_name]
+      .filter(Boolean).join(' '),
+    facets: [
+      { key: 'p', label: 'product', of: (r: any) => r.product_name },
+      { key: 'o', label: 'outcome', all: 'Any outcome', of: (r: any) =>
+        (r.awaiting_decision ? 'still being decided'
+          : REFUSED_LABEL[r.return_outcome] ?? 'decided') },
+    ],
+    totals: [
+      { label: 'Refusals', of: () => 1 },
+      { label: 'Value refused', of: (r: any) => Number(r.rejected_value) || 0, money: true },
     ],
   });
   const fReceipts = useFilters<any>(receipts.data, {
@@ -148,7 +177,8 @@ export function SupplierPortalPage() {
         {([['orders', `Orders (${open.length})`],
            ['rates', `My rates (${(rates.data ?? []).filter((r: any) => r.quoted_rate != null).length}/${(rates.data ?? []).length})`],
            ['bill', `To bill (${unbilled.length})`],
-           ['invoices', `My invoices (${(invoices.data ?? []).length})`]] as const).map(([k, l]) => (
+           ['invoices', `My invoices (${(invoices.data ?? []).length})`],
+           ['refused', `Turned away (${(refused.data ?? []).length})`]] as const).map(([k, l]) => (
           <button key={k} className={`tab ${tab === k ? 'active' : ''}`} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>
@@ -375,6 +405,80 @@ export function SupplierPortalPage() {
             empty={<Empty icon="🧾" title={fInvoices.active > 0
               ? 'No invoice matches those filters'
               : 'You have not filed any invoices yet'} />}
+          />
+        </div></div>
+        </>
+      ) : null}
+
+      {tab === 'refused' ? (
+        <>
+        {/* Said plainly and once. A supplier reading this needs to know three
+            things: what was refused, in what unit, and whether there is a lorry
+            to collect. Everything else is detail. */}
+        <div className="banner info mb">
+          <span><Icon name="info" size={16} /></span>
+          <div className="small">
+            Quality checks every load on arrival. Anything refused shows here the
+            same day, with what became of it — sent back to you, thrown away, or
+            kept at a price we agreed. Refused goods are not on your invoice.
+          </div>
+        </div>
+        <FilterBar f={fRefused} placeholder="Search a product or order number" />
+        <FilterTotals f={fRefused} noun="refusal" />
+        <div className="card"><div className="card-body tight">
+          <DataTable
+            loading={refused.loading}
+            rows={fRefused.rows}
+            rowTone={(r: any) => (r.awaiting_decision ? 'warn' : undefined)}
+            cols={[
+              { key: 'p', head: 'Product', sort: (r: any) => r.product_name, render: (r: any) => (
+                <div className="row" style={{ gap: 8 }}>
+                  <Icon name={r.product_icon ?? 'produce'} size={17} />
+                  <div><b>{r.product_name}</b>
+                    <div className="small muted">{r.po_no ?? '—'} · {date(r.inspected_at)}</div></div>
+                </div>
+              ) },
+              /* Always with the unit. This is the number that ends up in an
+                 argument about an invoice, so it is never printed bare. */
+              { key: 'q', head: 'Refused', num: true, desc: true,
+                sort: (r: any) => Number(r.rejected_qty) || 0, render: (r: any) => (
+                <span><b style={{ color: 'var(--danger)' }}>{num(r.rejected_qty, 2)}</b>{' '}
+                  <span className="small muted">{r.uom}</span>
+                  <div className="small muted">
+                    of {num(r.received_qty, 2)} {r.uom} · {num(r.accepted_qty, 2)} taken
+                  </div></span>
+              ) },
+              { key: 'why', head: 'Why', render: (r: any) => (
+                <div className="small">
+                  {(r.rejection_reason_codes ?? []).join(', ') || <span className="muted">—</span>}
+                  {r.remarks ? <div className="muted">{r.remarks}</div> : null}
+                </div>
+              ) },
+              { key: 'o', head: 'What happened to it', render: (r: any) => r.awaiting_decision ? (
+                <Chip tone="warn">still being decided</Chip>
+              ) : (
+                <div>
+                  <Chip tone={r.return_outcome === 'DESTROYED' ? 'danger'
+                    : r.return_outcome === 'KEPT_AT_A_DISCOUNT' ? 'ok' : 'warn'}>
+                    {REFUSED_LABEL[r.return_outcome] ?? r.return_outcome}
+                  </Chip>
+                  <div className="small muted">
+                    {Number(r.returned_qty) > 0
+                      ? `${num(r.returned_qty, 2)} ${r.uom} on its way back to you`
+                      : 'nothing is coming back'}
+                    {r.return_vehicle_reg ? ` · vehicle ${r.return_vehicle_reg}` : ''}
+                  </div>
+                  {r.return_note ? <div className="small muted">{r.return_note}</div> : null}
+                </div>
+              ) },
+              { key: 'w', head: 'From', render: (r: any) => (
+                <span className="small muted">{r.warehouse_name}</span>) },
+            ]}
+            empty={<Empty icon="👍" title={fRefused.active > 0
+              ? 'Nothing matches those filters'
+              : 'Nothing of yours has been turned away'}
+              hint={fRefused.active > 0 ? 'Clear a filter to widen the search.'
+                : 'Every load you have sent passed the quality check.'} />}
           />
         </div></div>
         </>
@@ -763,6 +867,10 @@ function RespondModal({ order, onClose, onDone }: {
      up and ask for transport on a second screen. */
   const [needVehicle, setNeedVehicle] = useState(order.transport_by === 'BUYER');
   const [vehicleNote, setVehicleNote] = useState('');
+  /* What they are charging to bring it. Asked here because this is where they
+     are already naming the lorry, so they know the fare — and because the one
+     claim for this order is created from this form. */
+  const [freight, setFreight] = useState('');
 
   const send = async (decision: 'ACCEPT' | 'DECLINE') => {
     setBusy(true); setError(null);
@@ -781,6 +889,7 @@ function RespondModal({ order, onClose, onDone }: {
           transporter: needVehicle ? undefined : (transporter.trim() || undefined),
           lrNo: needVehicle ? undefined : (lrNo.trim() || undefined),
           mandiPattiNo: mandiPattiNo.trim() || undefined,
+          transportCost: !needVehicle && Number(freight) > 0 ? Number(freight) : undefined,
         } : {}),
       });
 
@@ -897,6 +1006,22 @@ function RespondModal({ order, onClose, onDone }: {
             <Field label="Mandi patti number"><input value={mandiPattiNo}
               onChange={(e) => setMandiPattiNo(e.target.value)} placeholder="Optional" /></Field>
           </div>
+
+          <Field
+            label="What are you charging for the transport? (₹)"
+            hint="Leave it blank if the rate you quoted already covers bringing it. This is added to your invoice and shown separately, so the buyer pays it as freight and not as a higher rate."
+          >
+            <input type="number" step="0.01" min="0" value={freight}
+              onChange={(e) => setFreight(e.target.value)} placeholder="0.00" />
+          </Field>
+          {Number(freight) > 0 ? (
+            <dl className="kv mb">
+              <dt>Goods</dt><dd>{inr(Number(invoiceTotal || 0))}</dd>
+              <dt>Transport</dt><dd>{inr(Number(freight))}</dd>
+              <dt>Your invoice comes to</dt>
+              <dd><b>{inr(Number(invoiceTotal || 0) + Number(freight))}</b></dd>
+            </dl>
+          ) : null}
         </>
       )}
 

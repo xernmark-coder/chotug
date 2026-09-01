@@ -558,8 +558,25 @@ function requestCols() {
           {(r.goods ?? []).length > 3 ? (
             <span className="small muted">and {r.goods.length - 3} more</span>
           ) : null}
+          {/* Part of this figure is the lorry, not the produce. Finance is
+              approving one number either way, but a fare buried in a goods
+              total is the sort of thing nobody queries until year end. */}
+          {r.transport_amount != null ? (
+            <span className="small muted">
+              of which {inr(r.transport_amount, 0)} is transport
+            </span>
+          ) : null}
         </div>
-      ) : <span className="muted small">{r.note ?? '—'}</span>
+      ) : (
+        <div className="stack" style={{ gap: 1 }}>
+          <span className="muted small">{r.note ?? '—'}</span>
+          {r.transport_amount != null ? (
+            <span className="small muted">
+              of which {inr(r.transport_amount, 0)} is transport
+            </span>
+          ) : null}
+        </div>
+      )
     ) },
     { key: 'n', head: 'Request', render: (r: any) => (
       <div><span className="mono small">{r.request_no}</span>

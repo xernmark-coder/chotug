@@ -34,6 +34,7 @@ export function LogisticsDispatchPage() {
   const pickups = useApi<any[]>('/receiving/pickups');
   const candidates = useApi<any[]>('/receiving/pickups/candidates');
   const [arranging, setArranging] = useState<any>(null);
+  const [costing, setCosting] = useState<any>(null);
 
   const rows = (pickups.data ?? []).filter((p: any) => p.status !== 'CANCELLED');
   const looking = rows.filter((p: any) => p.status === 'OFFERED');
@@ -46,6 +47,8 @@ export function LogisticsDispatchPage() {
       { key: 'sup', label: 'supplier', of: (c: any) => c.supplier_name },
       { key: 'ask', label: 'request', all: 'Asked or not', of: (c: any) =>
         (c.transport_requested_at ? 'they asked for one' : 'nobody asked') },
+      { key: 'frt', label: 'their freight', all: 'Charging or not', of: (c: any) =>
+        (c.supplier_freight ? 'supplier is charging to bring it' : 'not charging') },
       { key: 'st', label: 'order', of: (c: any) => c.status },
     ],
     totals: [
@@ -60,10 +63,13 @@ export function LogisticsDispatchPage() {
       { key: 'sup', label: 'supplier', of: (p2: any) => p2.supplier_name },
       { key: 'drv', label: 'driver', of: (p2: any) => p2.driver_name ?? 'nobody yet' },
       { key: 'st', label: 'stage', of: (p2: any) => STAGE_LABEL[p2.status] ?? p2.status },
+      { key: 'fare', label: 'fare', all: 'Priced or not', of: (p2: any) =>
+        (p2.transport_cost == null ? 'no fare recorded' : 'fare recorded') },
     ],
     totals: [
       { label: 'Pickups', of: () => 1 },
       { label: 'Crates reported', of: (p2: any) => Number(p2.reported_crates) || 0 },
+      { label: 'Transport', of: (p2: any) => Number(p2.transport_cost) || 0, money: true },
     ],
   });
   const canManage = can('logistics.pickup.manage');
@@ -123,11 +129,22 @@ export function LogisticsDispatchPage() {
                       wanted {date(c.expected_date)} · {String(c.status).toLowerCase().replace('_', ' ')}
                     </div></div>
                 ) },
-                { key: 'ask', head: '', render: (c: any) => c.transport_requested_at ? (
-                  <div><Chip tone="warn">they asked</Chip>
-                    {c.transport_request_note
-                      ? <div className="small muted">{c.transport_request_note}</div> : null}</div>
-                ) : null },
+                { key: 'ask', head: '', render: (c: any) => (
+                  <div>
+                    {c.transport_requested_at ? (
+                      <><Chip tone="warn">they asked</Chip>
+                        {c.transport_request_note
+                          ? <div className="small muted">{c.transport_request_note}</div> : null}</>
+                    ) : null}
+                    {/* One journey, two bills. Worth saying out loud before
+                        somebody books a lorry for it. */}
+                    {c.supplier_freight ? (
+                      <div className="small muted">
+                        supplier is already charging {inr(c.supplier_freight, 0)} to bring it
+                      </div>
+                    ) : null}
+                  </div>
+                ) },
                 { key: 's', head: 'Collect from', render: (c: any) => (
                   <div>{c.supplier_name}
                     <div className="small muted">{c.pickup_address ?? '—'}</div></div>
@@ -170,10 +187,26 @@ export function LogisticsDispatchPage() {
                 ) : null}
               </div>
             ) },
-            { key: 'a', head: '', width: 100, render: (p: any) =>
-              canManage && !['DELIVERED', 'CANCELLED'].includes(p.status) ? (
-                <button className="btn sm ghost" onClick={() => cancel(p)}>Cancel</button>
-              ) : null },
+            { key: 'f', head: 'Transport', num: true, render: (p: any) => p.transport_cost != null ? (
+              <div><b>{inr(p.transport_cost, 0)}</b>
+                <div className="small muted">
+                  {p.fare_request_no
+                    ? `${p.fare_request_no} · ${String(p.fare_status ?? '').toLowerCase().replace('_', ' ')}`
+                    : 'nothing to pay'}
+                </div></div>
+            ) : <span className="muted small">not priced</span> },
+            { key: 'a', head: '', width: 190, render: (p: any) => canManage ? (
+              <div className="row">
+                {p.status !== 'CANCELLED' ? (
+                  <button className="btn sm" onClick={() => setCosting(p)}>
+                    {p.transport_cost != null ? 'Fare' : 'Record fare'}
+                  </button>
+                ) : null}
+                {!['DELIVERED', 'CANCELLED'].includes(p.status) ? (
+                  <button className="btn sm ghost" onClick={() => cancel(p)}>Cancel</button>
+                ) : null}
+              </div>
+            ) : null },
           ]}
           empty={<Empty icon="🚚"
             title={fPickups.active > 0 ? 'No pickup matches those filters' : 'No pickups arranged yet'}
@@ -185,6 +218,10 @@ export function LogisticsDispatchPage() {
       {arranging ? (
         <ArrangeModal candidate={arranging} onClose={() => setArranging(null)}
           onDone={() => { setArranging(null); pickups.reload(); candidates.reload(); }} />
+      ) : null}
+      {costing ? (
+        <FareModal pickup={costing} onClose={() => setCosting(null)}
+          onDone={() => { setCosting(null); pickups.reload(); }} />
       ) : null}
     </Layout>
   );
@@ -201,6 +238,7 @@ function ArrangeModal({ candidate, onClose, onDone }: {
   const [driverId, setDriverId] = useState('');
   const [address, setAddress] = useState(candidate.pickup_address ?? '');
   const [notes, setNotes] = useState('');
+  const [fare, setFare] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
 
@@ -215,6 +253,7 @@ function ArrangeModal({ candidate, onClose, onDone }: {
         pickupAddress: address || undefined,
         notes: notes || undefined,
         driverId: driverId || null,
+        transportCost: Number(fare) > 0 ? Number(fare) : undefined,
       });
       toast(driverId
         ? `${r.pickup_no} assigned`
@@ -277,6 +316,109 @@ function ArrangeModal({ candidate, onClose, onDone }: {
       <Field label="Anything the driver should know?">
         <input value={notes} onChange={(e) => setNotes(e.target.value)} />
       </Field>
+
+      <Field
+        label="Agreed fare (₹)"
+        hint="Leave it blank if the price is not settled yet — you can record it from the pickup afterwards."
+      >
+        <input type="number" step="0.01" min="0" value={fare} placeholder="0.00"
+          onChange={(e) => setFare(e.target.value)} />
+      </Field>
+      {Number(fare) > 0 ? (
+        <div className="banner info">
+          <span><Icon name="info" size={16} /></span>
+          <div className="small">
+            {inr(Number(fare), 0)} goes to Finance as a transport claim, and lands on the
+            cost of everything this vehicle brings in.
+          </div>
+        </div>
+      ) : null}
+    </Modal>
+  );
+}
+
+/* We sent a vehicle, so the fare is ours to pay.
+ *
+ * The point of recording it here is not bookkeeping. Freight in is part of what
+ * the produce cost us, and until somebody types this number the goods look
+ * cheaper than they were and get sold too cheap.
+ */
+function FareModal({ pickup, onClose, onDone }: {
+  pickup: any; onClose: () => void; onDone: () => void;
+}) {
+  const toast = useToast();
+  const [amount, setAmount] = useState(
+    pickup.transport_cost != null ? String(pickup.transport_cost) : '');
+  const [note, setNote] = useState(pickup.cost_note ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+  const locked = !!pickup.fare_request_no;
+
+  return (
+    <Modal
+      title={`Transport for ${pickup.pickup_no}`}
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Close</button>
+        {!locked ? (
+          <button className="btn primary" disabled={busy || amount === ''}
+            onClick={async () => {
+              setBusy(true); setError(null);
+              try {
+                const r = await api.post<any>(`/receiving/pickups/${pickup.id}/cost`,
+                  { transportCost: Number(amount), costNote: note.trim() || undefined });
+                toast(r.message, 'ok');
+                onDone();
+              } catch (e: any) { setError(e); } finally { setBusy(false); }
+            }}>
+            {busy ? 'Saving…' : 'Record it'}
+          </button>
+        ) : null}
+      </>}
+    >
+      <ErrorBanner error={error} />
+      <dl className="kv mb">
+        <dt>Collecting</dt><dd>{pickup.po_no} from {pickup.supplier_name}</dd>
+        <dt>Driver</dt>
+        <dd>{pickup.driver_name ?? <span className="muted">nobody yet</span>}</dd>
+      </dl>
+
+      {locked ? (
+        <>
+          <dl className="kv mb">
+            <dt>Fare</dt><dd><b>{inr(pickup.transport_cost, 0)}</b></dd>
+            <dt>With Finance as</dt>
+            <dd><b className="mono">{pickup.fare_request_no}</b> ·{' '}
+              {String(pickup.fare_status ?? '').toLowerCase().replace('_', ' ')}</dd>
+          </dl>
+          {pickup.cost_note ? <p className="small muted">{pickup.cost_note}</p> : null}
+          <p className="small muted">
+            Finance is already holding this claim. If the fare has changed, cancel the
+            request on the Payments desk first and then record the new figure.
+          </p>
+        </>
+      ) : (
+        <>
+          <Field label="What the trip cost (₹)"
+            hint="What we are paying the driver or transporter. Zero if it cost us nothing.">
+            <input type="number" step="0.01" min="0" value={amount} autoFocus
+              onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
+          </Field>
+          <Field label="Anything to note">
+            <input value={note} onChange={(e) => setNote(e.target.value)}
+              placeholder="Return trip empty — agreed round figure" />
+          </Field>
+          {Number(amount) > 0 ? (
+            <div className="banner info">
+              <span><Icon name="info" size={16} /></span>
+              <div className="small">
+                This goes to Finance as a transport claim, and is spread over the kilos
+                coming in — so it shows up in what the produce costs and in its price.
+              </div>
+            </div>
+          ) : null}
+        </>
+      )}
     </Modal>
   );
 }

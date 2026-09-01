@@ -443,8 +443,12 @@ export function SellPacksModal({ packs, onClose, onDone }: {
   const revenue = packs.reduce((a, p) => a + Number(p.price), 0);
   const qty = packs.reduce((a, p) => a + Number(p.qty), 0);
   const warehouseId = packs[0]?.warehouse_id ?? '';
+  /* forSale=1 — everybody, including customers filed under another shop and
+     ones somebody archived. A man at the counter with money is a sale; the
+     till is the wrong place to enforce a filing decision. Whose they are and
+     whether they are archived is shown, not used to hide them. */
   const customers = useApi<any[]>(
-    `/centres/customers/list?warehouseId=${warehouseId}`, [warehouseId]);
+    `/centres/customers/list?forSale=1&warehouseId=${warehouseId}`, [warehouseId]);
 
   const submit = async () => {
     setBusy(true); setError(null);
@@ -520,6 +524,8 @@ export function SellPacksModal({ packs, onClose, onDone }: {
               {(customers.data ?? []).map((customer: any) => (
                 <option key={customer.id} value={customer.id}>
                   {customer.name}{customer.phone ? ` · ${customer.phone}` : ''}
+                  {customer.is_ours ? '' : ` — ${customer.centre_name ?? 'another shop'}`}
+                  {customer.is_active ? '' : ' — archived'}
                 </option>
               ))}
             </select>

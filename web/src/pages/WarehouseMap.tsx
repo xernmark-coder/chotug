@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { api, useAuth, num } from '../lib/api';
+import { api, useAuth, inr, num, date, ago } from '../lib/api';
 import { Chip, Empty, ErrorBanner, Field, Kpi, Layout, Loading, Modal, useApi, useToast } from '../components/ui';
 import { Icon } from '../components/icons';
 import { QrCode } from '../components/qr';
@@ -25,6 +25,7 @@ export function WarehouseMapPage() {
 
   const [adding, setAdding] = useState<any>(null);
   const [printing, setPrinting] = useState<any[] | null>(null);
+  const [looking, setLooking] = useState<any>(null);
   const [openFloor, setOpenFloor] = useState<Record<string, boolean>>({});
   /* A map is a tree, not a list, so the filter prunes rather than narrowing a
    * table: a branch survives if it matches, or if anything under it does.
@@ -219,9 +220,13 @@ export function WarehouseMapPage() {
                         </div>
                         <div className="shelf-row">
                           {r.shelves.map((b: any) => (
+                            /* Clicking a shelf used to print its label, which
+                               is the rarer of the two things anybody wants
+                               from a shelf on a map. It now opens what is on
+                               it; printing is an action inside. */
                             <button key={b.id} className={`shelf ${Number(b.packs) ? 'full' : ''}`}
-                              onClick={() => setPrinting([b])}
-                              title={`${b.qr_code} — click to print this label`}>
+                              onClick={() => setLooking(b)}
+                              title={`${b.qr_code} — what is on this shelf`}>
                               <b>{b.code}</b>
                               <span className="small">
                                 {Number(b.packs)
@@ -247,6 +252,11 @@ export function WarehouseMapPage() {
           onClose={() => setAdding(null)}
           onDone={(m) => { setAdding(null); layout.reload(); toast(m, 'ok'); }} />
       ) : null}
+      {looking ? (
+        <ShelfModal shelf={looking} onClose={() => setLooking(null)}
+          onPrint={(b: any) => { setLooking(null); setPrinting([b]); }} />
+      ) : null}
+
       {printing ? (
         <LocationLabels shelves={printing} onClose={() => setPrinting(null)} />
       ) : null}
@@ -489,6 +499,216 @@ function LocationLabels({ shelves, onClose }: { shelves: any[]; onClose: () => v
           </div>
         ))}
       </div>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * WHAT IS ON THIS SHELF
+ *
+ * The map showed a shelf as a number of boxes and a weight. Standing in front
+ * of a rack the questions are the other ones: what is it, whose was it, how
+ * long has it been here, how long has it got, what did it cost and what are we
+ * asking. All of that already came back from the scan the audit team uses —
+ * it just had nowhere to be read outside an audit.
+ * ------------------------------------------------------------------------ */
+function ShelfModal({ shelf, onClose, onPrint }: {
+  shelf: any; onClose: () => void; onPrint: (b: any) => void;
+}) {
+  const { data, loading, error } = useApi<any>(
+    `/warehouse/scan/${encodeURIComponent(shelf.qr_code)}`, [shelf.qr_code]);
+
+  const contents = data?.contents ?? [];
+  const boxes = contents.reduce((a: number, c: any) => a + Number(c.packs || 0), 0);
+  const worth = contents.reduce((a: number, c: any) => a + Number(c.asking || 0), 0);
+  const cost = contents.reduce((a: number, c: any) => a + Number(c.cost_here || 0), 0);
+  const onIt = contents.reduce((a: number, c: any) => a + Number(c.weight_kg || 0), 0);
+  /* Two different faults, told apart because the fix differs. A box priced
+     under what it cost all-in loses money on every sale; a box with no price
+     on its label cannot be sold at all. Lumping them together as "check the
+     price" tells nobody which of the two they are looking at. */
+  const each = (c: any) => Number(c.asking) / Math.max(1, Number(c.packs));
+  /* Judged on the CHEAPEST box in the group, never the average: seventeen
+     boxes averaging ₹293 hid one priced at zero, and the average is exactly
+     the wrong statistic for finding a box somebody mis-labelled. */
+  const low = (c: any) => Number(c.lowest_price ?? c.asking);
+  const unpriced = contents.filter((c: any) => !(low(c) > 0));
+  const underwater = contents.filter((c: any) =>
+    c.min_sell_price != null && low(c) > 0 && low(c) < Number(c.min_sell_price));
+
+  return (
+    <Modal
+      title={shelf.code}
+      wide
+      onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Close</button>
+        <button className="btn" onClick={() => onPrint(shelf)}>Print the label</button>
+      </>}
+    >
+      <ErrorBanner error={error} />
+      {loading ? <Loading /> : (
+        <>
+          <div className="row mb" style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div className="small muted">{data?.location?.path}</div>
+              {/* ft-num only stacks inside a .filter-total; used loose the
+                  label and the number ran together as "Boxes5". */}
+              <div className="shelf-stats mt">
+                <span><em>Boxes</em><b>{boxes}</b></span>
+                <span><em>Cost</em><b>{inr(cost, 0)}</b></span>
+                <span><em>Asking</em><b>{inr(worth, 0)}</b></span>
+                {shelf.capacity_kg ? (
+                  /* From v_bin_fill, which derives it from the boxes actually
+                     on the shelf. bins.current_fill_kg is maintained by
+                     nothing and read 0 with five boxes sitting there. */
+                  <span><em>Filled</em>
+                    <b>{num(data?.location?.fill_kg ?? onIt, 1)}/{num(shelf.capacity_kg, 0)} kg</b>
+                    {data?.location?.filled_pct != null ? (
+                      <em>{num(data.location.filled_pct, 0)}% full</em>
+                    ) : null}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+            <span className="mono small muted">{shelf.qr_code}</span>
+          </div>
+
+          {underwater.length ? (
+            <div className="banner danger mb">
+              <span><Icon name="alert" size={16} /></span>
+              <div className="small">
+                <b>{underwater.length} of these has a box priced below what it cost
+                all-in.</b>{' '}
+                Selling that box loses money. The prices differ within a group, so the
+                cheapest is what counts — re-price it before it goes out.
+              </div>
+            </div>
+          ) : null}
+          {unpriced.length ? (
+            <div className="banner warn mb">
+              <span><Icon name="alert" size={16} /></span>
+              <div className="small">
+                <b>{unpriced.length} of these has a box with no price on its label.</b>{' '}
+                It cannot be sold until somebody sets one — the least it can go for is
+                in the table below.
+              </div>
+            </div>
+          ) : null}
+
+          {contents.length ? (
+            <div className="table-wrap">
+              <table className="data">
+                <thead><tr>
+                  <th>What</th><th className="num">Boxes</th><th className="num">Cost each</th>
+                  <th className="num">Least it can go for</th><th className="num">Asking</th>
+                  <th>Shelf life</th><th>Where it came from</th>
+                </tr></thead>
+                <tbody>
+                  {contents.map((c: any, i: number) => {
+                    const per = each(c);
+                    const cheapest = low(c);
+                    const below = c.min_sell_price != null && cheapest > 0
+                      && cheapest < Number(c.min_sell_price);
+                    const none = !(cheapest > 0);
+                    const mixed = Number(c.highest_price) !== Number(c.lowest_price);
+                    return (
+                      <tr key={i} className={below ? 'row-crit' : none ? 'row-warn'
+                        : c.days_to_expiry != null && c.days_to_expiry <= 2 ? 'row-warn' : ''}>
+                        <td>
+                          <div className="row" style={{ gap: 8 }}>
+                            <Icon name={c.icon ?? 'produce'} size={17} />
+                            <div>
+                              <b>{c.product_name}</b>{' '}
+                              {c.grade ? <Chip tone={c.grade === 'A' ? 'ok'
+                                : c.grade === 'B' ? 'primary' : 'warn'}>{c.grade}</Chip> : null}
+                              <div className="small muted mono">{c.batch_no}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="num">
+                          <b>{c.packs}</b>
+                          <div className="small muted">{num(c.qty, 1)} {c.uom}</div>
+                        </td>
+                        <td className="num">
+                          {inr(c.landed_rate)}
+                          {c.true_cost != null ? (
+                            <div className="small muted">{inr(c.true_cost)} all-in</div>
+                          ) : null}
+                        </td>
+                        <td className="num">
+                          {c.min_sell_price != null ? inr(c.min_sell_price)
+                            : <span className="muted">—</span>}
+                        </td>
+                        <td className="num">
+                          {none
+                            ? <span className="chip warn">no price</span>
+                            : <b className={below ? 'text-danger' : ''}>{inr(per)}</b>}
+                          {mixed ? (
+                            <div className="small muted">
+                              {inr(c.lowest_price)}–{inr(c.highest_price)}
+                            </div>
+                          ) : null}
+                          {below ? (
+                            <div className="small text-danger">
+                              cheapest is under the floor
+                            </div>
+                          ) : null}
+                        </td>
+                        <td>
+                          {c.days_to_expiry == null ? <span className="muted small">—</span>
+                            : <Chip tone={c.days_to_expiry <= 0 ? 'danger'
+                                : c.days_to_expiry <= 2 ? 'danger'
+                                : c.days_to_expiry <= 5 ? 'warn' : 'neutral'}>
+                                {c.days_to_expiry <= 0 ? 'past its date' : `${c.days_to_expiry}d left`}
+                              </Chip>}
+                          <div className="small muted">
+                            here {c.days_on_the_shelf ?? 0}d
+                          </div>
+                        </td>
+                        <td className="small">
+                          {c.supplier_name ?? <span className="muted">own farm</span>}
+                          {c.grn_no ? <div className="muted mono">{c.grn_no}</div> : null}
+                          {c.received_on ? <div className="muted">{date(c.received_on)}</div> : null}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <Empty icon="🗺️" title="This shelf is empty"
+              hint="Boxes appear here as they are scanned onto it at the packing bench." />
+          )}
+
+          {(data?.lastAudits ?? []).length ? (
+            <>
+              <label className="lbl mt">Last counted</label>
+              <table className="mini">
+                <tbody>
+                  {data.lastAudits.slice(0, 5).map((a: any, i: number) => (
+                    <tr key={i}>
+                      <td className="small">{a.product_name}
+                        <div className="muted">{a.counted_by_name} · {ago(a.counted_at)}</div></td>
+                      <td className="num small">
+                        counted <b>{num(a.counted_qty, 1)}</b>
+                        <div className="muted">books said {num(a.expected_qty, 1)}</div>
+                      </td>
+                      <td className="num">
+                        {Math.abs(Number(a.variance_qty)) < 0.001
+                          ? <Chip tone="ok">matched</Chip>
+                          : <Chip tone="danger">{num(a.variance_qty, 1)}</Chip>}
+                      </td>
+                      <td className="small muted">{a.note ?? ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          ) : null}
+        </>
+      )}
     </Modal>
   );
 }

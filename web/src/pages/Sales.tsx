@@ -44,7 +44,11 @@ export function SalesPage() {
   const summary = useApi<any>(`/inventory/sales-summary?days=${days}&warehouseId=${wh}`, [days, wh]);
   const sugg = useApi<any>(`/inventory/sell-suggestions?warehouseId=${wh}`, [wh]);
   const recent = useApi<any[]>(`/inventory/issues?warehouseId=${wh}&reason=SALE`, [wh]);
-  const packs = useApi<any[]>(`/inventory/packs?status=IN_STOCK&warehouseId=${wh}`, [wh]);
+  /* Grouped, not one row per box. Three hundred 5 kg boxes of mango were three
+     hundred rows and three hundred checkboxes; nobody wants to tick three
+     hundred, they want to say "sixty of those". Each group carries its box ids
+     so the oldest go out first. */
+  const packs = useApi<any[]>(`/inventory/pack-groups?warehouseId=${wh}`, [wh]);
 
   const t = summary.data?.totals ?? {};
   const w = summary.data?.writeOffs ?? {};
@@ -63,14 +67,15 @@ export function SalesPage() {
   const inStockPacks = packs.data ?? [];
 
   const fPacks = useFilters<any>(inStockPacks, {
-    search: (p: any) => [p.code, p.product_name, p.batch_no, p.group_label].filter(Boolean).join(' '),
+    search: (g: any) => [g.product_name, g.sku, g.batch_no, g.shelves].filter(Boolean).join(' '),
     facets: [
-      { key: 'prod', label: 'product', of: (p: any) => p.product_name },
-      { key: 'grade', label: 'grade', of: (p: any) => p.grade },
-      { key: 'batch', label: 'batch', of: (p: any) => p.batch_no },
+      { key: 'prod', label: 'product', of: (g: any) => g.product_name },
+      { key: 'grade', label: 'grade', of: (g: any) => g.grade },
+      { key: 'size', label: 'box size', of: (g: any) => `${g.qty} ${g.uom}` },
     ],
     totals: [
-      { label: 'Worth', of: (p: any) => Number(p.price) || 0, money: true },
+      { label: 'Boxes', of: (g: any) => Number(g.boxes) || 0 },
+      { label: 'Worth', of: (g: any) => Number(g.worth) || 0, money: true },
     ],
   });
   const fSugg = useFilters<any>(sugg.data?.suggestions, {
@@ -104,7 +109,17 @@ export function SalesPage() {
       { label: 'Value', of: (x: any) => Number(x.total_value) || 0, money: true },
     ],
   });
-  const chosenPacks = inStockPacks.filter((p: any) => pickedPacks[p.id]);
+  /* pickedPacks holds a COUNT per group now, not a boolean per box. The ids
+     come back oldest-first, so taking the first n sends the oldest boxes and
+     nobody has to choose between identical things. */
+  const groupKey = (g: any) => `${g.batch_id}|${g.grade}|${g.qty}|${g.price}`;
+  const chosenPacks = inStockPacks.flatMap((g: any) => {
+    const n = Math.min(Number(pickedPacks[groupKey(g)]) || 0, g.boxes);
+    return n > 0 ? (g.pack_ids ?? []).slice(0, n).map((id: string) => ({
+      id, code: id, product_name: g.product_name, batch_no: g.batch_no,
+      qty: g.qty, uom: g.uom, price: g.price, grade: g.grade,
+    })) : [];
+  });
 
   return (
     <Layout
@@ -150,48 +165,78 @@ export function SalesPage() {
           <div className="section-head"><h2>Sell ready-made packs</h2><span className="rule" /></div>
           <div className="card mb">
             <div className="card-head">
-              <h2>{inStockPacks.length} pack(s) on the shelf</h2>
+              <h2>
+                {inStockPacks.reduce((a: number, g: any) => a + g.boxes, 0)} box(es) on the shelf
+              </h2>
               {chosenPacks.length ? (
                 <>
                   <Chip tone="primary">
-                    {chosenPacks.length} selected ·{' '}
+                    {chosenPacks.length} box(es) ·{' '}
                     {inr(chosenPacks.reduce((a: number, p: any) => a + Number(p.price), 0), 0)}
                   </Chip>
                   <button className="btn sm" onClick={() => setPickedPacks({})}>Clear</button>
                   <button className="btn sm primary" onClick={() => setSellingPacks(chosenPacks)}>
-                    Sell {chosenPacks.length} pack(s)
+                    Sell {chosenPacks.length} box(es)
                   </button>
                 </>
               ) : null}
             </div>
             <div className="card-body tight">
-              <FilterBar f={fPacks} placeholder="Search barcode, product, batch" />
-              <FilterTotals f={fPacks} noun="pack" />
+              <FilterBar f={fPacks} placeholder="Search a product or batch" />
+              <FilterTotals f={fPacks} noun="kind of box" />
               <DataTable
                 loading={packs.loading}
                 rows={fPacks.rows}
-                onRowClick={(p: any) =>
-                  setPickedPacks((s2) => ({ ...s2, [p.id]: !s2[p.id] }))}
                 cols={[
-                  { key: 'sel', head: '', width: 34, render: (p: any) => (
-                    <input type="checkbox" style={{ width: 17, height: 17 }}
-                      checked={!!pickedPacks[p.id]} readOnly />
+                  { key: 'p', head: 'Product', sort: (g: any) => g.product_name, render: (g: any) => (
+                    <div className="row" style={{ gap: 8 }}>
+                      <Icon name={g.icon ?? 'produce'} size={18} />
+                      <div><b>{g.product_name}</b>
+                        <div className="small muted mono">{g.batch_no}</div></div>
+                    </div>
                   ) },
-                  { key: 'c', head: 'Barcode', render: (p: any) => (
-                    <div><b className="mono">{p.code}</b>
-                      <div className="small muted">{p.group_label ?? `pack ${p.pack_no}`}</div></div>
+                  { key: 'sz', head: 'Box', num: true, render: (g: any) => (
+                    <b>{num(g.qty, 2)} <span className="small muted">{g.uom}</span></b>
                   ) },
-                  { key: 'p', head: 'Product', render: (p: any) => (
-                    <div>{p.product_name}<div className="small muted mono">{p.batch_no}</div></div>
-                  ) },
-                  { key: 'q', head: 'Contains', num: true, render: (p: any) =>
-                    <span>{num(p.qty, 2)} <span className="small muted">{p.uom}</span></span> },
-                  { key: 'r', head: 'Sells for', num: true, render: (p: any) => <b>{inr(p.price)}</b> },
+                  { key: 'g', head: 'Grade', sort: (g: any) => g.grade, render: (g: any) =>
+                    g.grade ? <Chip tone={g.grade === 'A' ? 'ok' : g.grade === 'B' ? 'primary'
+                      : g.grade === 'C' ? 'warn' : 'danger'}>{g.grade}</Chip>
+                      : <span className="muted small">—</span> },
+                  { key: 'n', head: 'On the shelf', num: true, desc: true,
+                    sort: (g: any) => g.boxes, render: (g: any) => (
+                      <div><b>{g.boxes}</b>
+                        {g.shelves ? <div className="small muted">{g.shelves}</div> : null}</div>
+                    ) },
+                  { key: 'r', head: 'Each', num: true, desc: true,
+                    sort: (g: any) => Number(g.price) || 0,
+                    render: (g: any) => <b>{inr(g.price)}</b> },
+                  /* How many, not which. The boxes in a group are identical by
+                     definition — same batch, grade, size and price — so choosing
+                     between them is a decision with no content. */
+                  { key: 'take', head: 'Sell how many', width: 200, render: (g: any) => {
+                    const k = groupKey(g);
+                    const n = Number(pickedPacks[k]) || 0;
+                    return (
+                      <div className="row" style={{ gap: 5, justifyContent: 'flex-end' }}>
+                        <button className="btn sm" disabled={n <= 0}
+                          onClick={() => setPickedPacks((s2: any) => ({ ...s2, [k]: Math.max(0, n - 1) }))}>−</button>
+                        <input className="inline num" style={{ width: 62 }} type="number"
+                          min={0} max={g.boxes} value={n || ''}
+                          onChange={(e) => setPickedPacks((s2: any) => ({
+                            ...s2, [k]: Math.max(0, Math.min(g.boxes, Number(e.target.value) || 0)),
+                          }))} />
+                        <button className="btn sm" disabled={n >= g.boxes}
+                          onClick={() => setPickedPacks((s2: any) => ({ ...s2, [k]: Math.min(g.boxes, n + 1) }))}>+</button>
+                        <button className="btn sm ghost" disabled={n >= g.boxes}
+                          onClick={() => setPickedPacks((s2: any) => ({ ...s2, [k]: g.boxes }))}>all</button>
+                      </div>
+                    );
+                  } },
                 ]}
                 empty={<Empty icon="📦"
-                  title={fPacks.active > 0 ? 'No pack matches those filters' : 'No packs made up yet'}
+                  title={fPacks.active > 0 ? 'Nothing matches those filters' : 'No boxes made up yet'}
                   hint={fPacks.active > 0 ? 'Clear a filter to widen the search.'
-                    : 'Make packs on the Packing screen and they appear here to sell.'} />}
+                    : 'Make boxes on the Packing screen and they appear here to sell.'} />}
               />
             </div>
           </div>

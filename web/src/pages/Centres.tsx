@@ -542,8 +542,15 @@ export function SendToCentreModal({ centres, fromWarehouseId, defaultCentre, onC
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
 
+  /* Boxes, not loose kilos.
+   *
+   * This read /inventory/issuable, which reports batch balances and knows
+   * nothing about packing — so a warehouse whose stock had all been boxed up
+   * still offered "free" kilos, the boxes just made were nowhere on the
+   * screen, and sending was refused later by the rule that only whole boxes
+   * travel. It now reads the same grouped boxes the till sells from. */
   const stock = useApi<any[]>(
-    from ? `/inventory/issuable?warehouseId=${from}` : null, [from]);
+    from ? `/inventory/pack-groups?warehouseId=${from}` : null, [from]);
   const { data: vehicles } = useApi<any[]>('/masters/vehicles');
   const { data: places } = useApi<any[]>('/masters/warehouses');
 
@@ -552,27 +559,57 @@ export function SendToCentreModal({ centres, fromWarehouseId, defaultCentre, onC
   const sources = (places ?? []).filter((w: any) => w.id !== to);
   const targets = centres.filter((c: any) => c.id !== from);
 
-  const rows = stock.data ?? [];
+  /* Merged one step coarser than the till groups them.
+   *
+   * /pack-groups splits on price, because the till sells at a price. Sending
+   * does not: you are choosing which produce goes on the lorry, and two rows
+   * reading "Alphonso · BAT/…29 · 5.00 KG · A · C2-R1-2" that differ only by a
+   * price the table does not show look like the same thing listed twice. They
+   * are merged here, with the spread shown so the difference is not hidden. */
+  const rows = React.useMemo(() => {
+    const m = new Map<string, any>();
+    for (const g of stock.data ?? []) {
+      const k = `${g.batch_id}|${g.grade}|${g.qty}`;
+      const cur = m.get(k);
+      if (!cur) {
+        m.set(k, { ...g, boxes: Number(g.boxes) || 0,
+          lowest: Number(g.price), highest: Number(g.price) });
+      } else {
+        cur.boxes += Number(g.boxes) || 0;
+        cur.lowest = Math.min(cur.lowest, Number(g.price));
+        cur.highest = Math.max(cur.highest, Number(g.price));
+        if (g.shelves && !String(cur.shelves ?? '').includes(g.shelves)) {
+          cur.shelves = [cur.shelves, g.shelves].filter(Boolean).join(', ');
+        }
+      }
+    }
+    return [...m.values()];
+  }, [stock.data]);
+
+  const groupKey = (g: any) => `${g.batch_id}|${g.grade}|${g.qty}`;
   const f = useFilters<any>(rows, {
-    search: (b: any) => [b.product_name, b.sku, b.batch_no, b.grade].filter(Boolean).join(' '),
+    search: (b: any) => [b.product_name, b.sku, b.batch_no, b.grade, b.shelves]
+      .filter(Boolean).join(' '),
     facets: [
       { key: 'p', label: 'product', of: (b: any) => b.product_name },
       { key: 'g', label: 'grade', of: (b: any) => b.grade },
+      { key: 'sz', label: 'box size', of: (b: any) => `${b.qty} ${b.uom}` },
       { key: 'e', label: 'shelf life', all: 'Any shelf life', of: (b: any) =>
         b.days_to_expiry == null ? null
           : b.days_to_expiry <= 2 ? 'send it today'
           : b.days_to_expiry <= 5 ? 'this week' : 'plenty of time' },
     ],
     totals: [
-      { label: 'Free to send', of: (b: any) => Number(b.available_qty) || 0 },
+      { label: 'Boxes there', of: (b: any) => Number(b.boxes) || 0 },
     ],
   });
 
   const picked = rows
-    .map((b: any) => ({ b, q: Number(qty[b.batch_id]) || 0 }))
-    .filter((x) => x.q > 0);
-  const over = picked.filter((x) => x.q > Number(x.b.available_qty) + 0.0001);
-  const worth = picked.reduce((a, x) => a + x.q * (Number(x.b.landed_rate) || 0), 0);
+    .map((b: any) => ({ b, n: Number(qty[groupKey(b)]) || 0 }))
+    .filter((x) => x.n > 0);
+  const over = picked.filter((x) => x.n > Number(x.b.boxes));
+  const boxCount = picked.reduce((a, x) => a + x.n, 0);
+  const worth = picked.reduce((a, x) => a + x.n * (Number(x.b.price) || 0), 0);
   const dest = centres.find((c: any) => c.id === to);
 
   const send = async () => {
@@ -586,7 +623,11 @@ export function SendToCentreModal({ centres, fromWarehouseId, defaultCentre, onC
         driverName: driverName.trim() || undefined,
         transportCost: transportCost ? Number(transportCost) : undefined,
         note: note.trim() || undefined,
-        lines: picked.map((x) => ({ batchId: x.b.batch_id, qty: x.q })),
+        /* Whole boxes. The server takes a quantity and picks the boxes to
+           match; sending boxes × size means it never has to break one. */
+        lines: picked.map((x) => ({
+          batchId: x.b.batch_id, qty: x.n * Number(x.b.qty),
+        })),
       });
       onDone(r.message);
     } catch (e: any) { setError(e); } finally { setBusy(false); }
@@ -603,7 +644,7 @@ export function SendToCentreModal({ centres, fromWarehouseId, defaultCentre, onC
           disabled={busy || !from || !to || !picked.length || !!over.length}
           onClick={send}>
           {busy ? 'Sending…'
-            : picked.length ? `Send ${picked.length} batch${picked.length === 1 ? '' : 'es'}`
+            : boxCount ? `Send ${boxCount} box${boxCount === 1 ? '' : 'es'}`
             : 'Send'}
         </button>
       </>}
@@ -649,26 +690,43 @@ export function SendToCentreModal({ centres, fromWarehouseId, defaultCentre, onC
       ) : null}
 
       <div className="section-head"><h2>What to send</h2><span className="rule" /></div>
+      {/* Produce leaves in a labelled box and no other way, so this offers
+          boxes. Loose stock that has not been through the bench does not
+          appear at all — it is not sendable, and listing it as "free" was the
+          thing that made the screen look broken. */}
       <FilterBar f={f} placeholder="Search product, batch, grade" />
-      <FilterTotals f={f} noun="batch" />
+      <FilterTotals f={f} noun="kind of box" />
       <div className="table-wrap" style={{ maxHeight: '38vh', overflowY: 'auto' }}>
         <table className="data">
           <thead><tr>
-            <th>Product</th><th>Batch</th><th className="num">Free</th>
-            <th className="num">Shelf life</th><th className="num">Send</th>
+            <th>Product</th><th>Box</th><th className="num">On the shelf</th>
+            <th className="num">Shelf life</th><th className="num">Send how many</th>
           </tr></thead>
           <tbody>
             {f.rows.map((b: any) => {
-              const q = Number(qty[b.batch_id]) || 0;
-              const tooMuch = q > Number(b.available_qty) + 0.0001;
+              const k = groupKey(b);
+              const n = Number(qty[k]) || 0;
+              const tooMany = n > Number(b.boxes);
               return (
-                <tr key={b.batch_id} className={tooMuch ? 'row-crit' : q > 0 ? 'row-ok' : ''}>
-                  <td><b>{b.product_name}</b>
-                    <div className="small muted">{b.sku}</div></td>
-                  <td><span className="mono small">{b.batch_no}</span>
-                    {b.grade ? <Chip tone="neutral">{b.grade}</Chip> : null}</td>
-                  <td className="num mono">{num(b.available_qty, 1)}{' '}
-                    <span className="small muted">{b.base_uom}</span></td>
+                <tr key={k} className={tooMany ? 'row-crit' : n > 0 ? 'row-ok' : ''}>
+                  <td>
+                    <b>{b.product_name}</b>
+                    <div className="small muted mono">{b.batch_no}</div>
+                  </td>
+                  <td>
+                    <b>{num(b.qty, 2)} {b.uom}</b>{' '}
+                    {b.grade ? <Chip tone="neutral">{b.grade}</Chip> : null}
+                    {b.shelves ? <div className="small muted">{b.shelves}</div> : null}
+                    {/* The labels on these boxes do not all say the same thing.
+                        Shown because the alternative is a row that quietly
+                        averages three prices. */}
+                    <div className="small muted">
+                      {b.lowest === b.highest
+                        ? inr(b.lowest)
+                        : `${inr(b.lowest)}–${inr(b.highest)} on the labels`}
+                    </div>
+                  </td>
+                  <td className="num mono">{b.boxes}</td>
                   <td className="num">
                     {b.days_to_expiry == null ? <span className="muted">—</span>
                       : <Chip tone={b.days_to_expiry <= 2 ? 'danger'
@@ -677,14 +735,18 @@ export function SendToCentreModal({ centres, fromWarehouseId, defaultCentre, onC
                         </Chip>}
                   </td>
                   <td className="num">
-                    <input className="inline num" type="number" step="0.001" min={0}
-                      max={Number(b.available_qty)} style={{ width: 92 }}
-                      value={qty[b.batch_id] ?? ''}
-                      onChange={(e) => setQty((s) => ({ ...s, [b.batch_id]: e.target.value }))} />
-                    {/* The cap is stated, not just enforced — being told "too
-                        much" after typing is worse than being told the limit. */}
-                    {tooMuch ? (
-                      <div className="small text-danger">only {num(b.available_qty, 1)} free</div>
+                    <div className="row" style={{ gap: 5, justifyContent: 'flex-end' }}>
+                      <input className="inline num" type="number" min={0} max={b.boxes}
+                        style={{ width: 74 }} value={qty[k] ?? ''}
+                        onChange={(e) => setQty((s2) => ({ ...s2, [k]: e.target.value }))} />
+                      <button className="btn sm ghost" disabled={n >= b.boxes}
+                        onClick={() => setQty((s2) => ({ ...s2, [k]: String(b.boxes) }))}>all</button>
+                    </div>
+                    {n > 0 && !tooMany ? (
+                      <div className="small muted">{num(n * Number(b.qty), 1)} {b.uom}</div>
+                    ) : null}
+                    {tooMany ? (
+                      <div className="small text-danger">only {b.boxes} there</div>
                     ) : null}
                   </td>
                 </tr>
@@ -695,7 +757,8 @@ export function SendToCentreModal({ centres, fromWarehouseId, defaultCentre, onC
                 {!from ? 'Choose where it is coming from.'
                   : stock.loading ? 'Looking at the shelves…'
                   : f.active > 0 ? 'Nothing matches those filters.'
-                  : 'Nothing on hand there to send.'}
+                  : 'No boxes there to send. Stock has to be graded and packed '
+                    + 'on the bench before it can go to a shop.'}
               </td></tr>
             ) : null}
           </tbody>
@@ -726,12 +789,13 @@ export function SendToCentreModal({ centres, fromWarehouseId, defaultCentre, onC
       {picked.length ? (
         <div className="filter-total">
           <span>
-            <b>{picked.length}</b> batch{picked.length === 1 ? '' : 'es'}
+            <b>{boxCount}</b> box{boxCount === 1 ? '' : 'es'}
+            <span className="muted"> from {picked.length} kind(s)</span>
             {dest ? <span className="muted"> → {dest.name}</span> : null}
           </span>
           <span className="row" style={{ gap: 20 }}>
             <span className="ft-num"><em>Going</em>
-              <b>{num(picked.reduce((a, x) => a + x.q, 0), 1)}</b></span>
+              <b>{num(picked.reduce((a, x) => a + x.n * Number(x.b.qty), 0), 1)}</b></span>
             <span className="ft-num"><em>Worth</em><b>{inr(worth, 0)}</b></span>
             {Number(transportCost) > 0 ? (
               <span className="ft-num"><em>Transport</em>

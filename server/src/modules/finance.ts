@@ -146,6 +146,10 @@ export async function createRequest(tx: any, actor: any, r: {
   expenseCategoryId?: string | null; warehouseId?: string | null;
   dueDate?: string; priority?: string; note?: string;
   sourceType?: string; sourceId?: string | null;
+  /** The freight sitting inside amount, where somebody carried the goods.
+   *  Part of the figure, not on top of it — so Finance pays once and can still
+   *  see what it is made of, and so pricing can find the lorry. */
+  transportAmount?: number | null;
   /** Set when a document queued itself rather than a person asking. */
   systemRaised?: boolean;
 }) {
@@ -155,8 +159,8 @@ export async function createRequest(tx: any, actor: any, r: {
     `INSERT INTO payment_requests (company_id, branch_id, request_no, kind,
             supplier_id, payee_user_id, payee_name, expense_category_id, warehouse_id,
             source_type, source_id, amount, due_date, priority, note,
-            is_system_raised, requested_by, created_by, updated_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$17,$16,$16,$16)
+            is_system_raised, transport_amount, requested_by, created_by, updated_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$17,$18,$16,$16,$16)
      ON CONFLICT (company_id, source_type, source_id)
        WHERE source_id IS NOT NULL AND status <> 'CANCELLED'
        DO NOTHING
@@ -165,7 +169,8 @@ export async function createRequest(tx: any, actor: any, r: {
      r.payeeUserId ?? null, r.payeeName, r.expenseCategoryId ?? null,
      r.warehouseId ?? null, r.sourceType ?? null, r.sourceId ?? null,
      money(r.amount), r.dueDate ?? null, r.priority ?? 'NORMAL', r.note ?? null,
-     actor.userId, r.systemRaised ?? false]);
+     actor.userId, r.systemRaised ?? false,
+     r.transportAmount ?? null]);
 
   // Already queued from the same document — return what is there rather than
   // a second claim for the same money.
@@ -243,6 +248,8 @@ export async function ensureOrderPayable(tx: any, actor: any, o: {
   /** The invoice this order is now billed under, if one has been filed. */
   invoiceId?: string | null; invoiceNo?: string | null;
   note?: string;
+  /** Freight the supplier is carrying, already included in `amount`. */
+  transportAmount?: number | null;
 }) {
   const standing = await orderPayable(tx, actor.companyId, o.poId);
 
@@ -259,6 +266,7 @@ export async function ensureOrderPayable(tx: any, actor: any, o: {
       note: o.note ?? (o.invoiceNo ? `Invoice ${o.invoiceNo} for ${o.poNo}` : `${o.poNo} — ordered`),
       sourceType: o.invoiceId ? 'supplier_invoice' : 'purchase_order',
       sourceId: o.invoiceId ?? o.poId,
+      transportAmount: o.transportAmount ?? null,
       systemRaised: true,
     });
   }
@@ -286,6 +294,7 @@ export async function ensureOrderPayable(tx: any, actor: any, o: {
       note: o.note ?? `Invoice ${o.invoiceNo} for ${o.poNo}`,
       sourceType: 'supplier_invoice',
       sourceId: o.invoiceId,
+      transportAmount: o.transportAmount ?? null,
       systemRaised: true,
     });
   }
@@ -307,12 +316,14 @@ export async function ensureOrderPayable(tx: any, actor: any, o: {
         SET source_type = 'supplier_invoice', source_id = $2,
             kind = 'SUPPLIER_INVOICE',
             amount = $3,
+            transport_amount = COALESCE($7, transport_amount),
             due_date = COALESCE($4::date, due_date),
             note = $5,
             updated_by = $6
       WHERE id = $1 RETURNING *`,
     [standing.id, o.invoiceId, money(o.amount), o.dueDate ?? null,
-     o.note ?? `Invoice ${o.invoiceNo} for ${o.poNo}`, actor.userId]);
+     o.note ?? `Invoice ${o.invoiceNo} for ${o.poNo}`, actor.userId,
+     o.transportAmount ?? null]);
 
   await emit(tx, actor, 'payment_request', standing.id, 'payment.rebilled', {
     requestNo: standing.request_no, poNo: o.poNo, invoiceNo: o.invoiceNo,
@@ -379,13 +390,29 @@ financeRouter.get('/requests', h(async (req) => {
                     FROM po_lines l JOIN products p2 ON p2.id = l.product_id
                    WHERE l.po_id = pr.source_id)
                WHEN 'supplier_invoice' THEN
-                 (SELECT json_agg(json_build_object(
-                           'productName', COALESCE(p3.name, il.raw_description),
-                           'icon', p3.icon,
-                           'qty', il.qty, 'uom', COALESCE(il.uom, p3.base_uom), 'rate', il.rate,
-                           'lineTotal', il.amount) ORDER BY il.line_no)
-                    FROM invoice_lines il LEFT JOIN products p3 ON p3.id = il.product_id
-                   WHERE il.invoice_id = pr.source_id)
+                 /* The invoice's own lines where it has them — and the ORDER's
+                  * lines where it does not. A supplier filing their invoice as
+                  * they accept types a number and a total, not a line for every
+                  * crate, so this was NULL on every such row and Finance was
+                  * back to approving a name and an amount. The order behind it
+                  * says what was bought. */
+                 COALESCE(
+                   (SELECT json_agg(json_build_object(
+                             'productName', COALESCE(p3.name, il.raw_description),
+                             'icon', p3.icon,
+                             'qty', il.qty, 'uom', COALESCE(il.uom, p3.base_uom),
+                             'rate', il.rate,
+                             'lineTotal', il.amount) ORDER BY il.line_no)
+                      FROM invoice_lines il LEFT JOIN products p3 ON p3.id = il.product_id
+                     WHERE il.invoice_id = pr.source_id),
+                   (SELECT json_agg(json_build_object(
+                             'productName', p4.name, 'icon', p4.icon,
+                             'qty', l2.qty, 'uom', l2.uom, 'rate', l2.rate,
+                             'lineTotal', l2.line_total) ORDER BY l2.line_no)
+                      FROM supplier_invoices si2
+                      JOIN po_lines l2 ON l2.po_id = si2.po_id
+                      JOIN products p4 ON p4.id = l2.product_id
+                     WHERE si2.id = pr.source_id))
              END) AS goods,
             (pr.due_date IS NOT NULL AND pr.due_date < CURRENT_DATE
              AND pr.status NOT IN ('PAID','REJECTED','CANCELLED')) AS overdue

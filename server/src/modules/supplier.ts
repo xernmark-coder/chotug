@@ -208,6 +208,13 @@ supplierRouter.post('/orders/:id/respond', requires('supplier.order.accept'), h(
      * invent one and then ask for transport separately. Saying "I have not got
      * one, please send" is now an answer the form takes. */
     needVehicle: z.boolean().default(false),
+    /* What they are charging to bring it, where they are bringing it.
+     *
+     * This is the moment to ask: they are naming the lorry on this same form,
+     * so they know the fare. It rides on the one claim the order already has
+     * rather than becoming a second one — Finance pays once, and pricing can
+     * still see which part of it was the lorry. */
+    transportCost: z.coerce.number().nonnegative().optional(),
   }), req.body ?? {});
 
   const supplierId = await mySupplier(req.actor);
@@ -247,6 +254,14 @@ supplierRouter.post('/orders/:id/respond', requires('supplier.order.accept'), h(
       throw ApiError.rule(
         'Enter the vehicle number, or tick "I need a vehicle" and we will send one.');
     }
+    /* Only one side pays for the lorry. If they are asking us to send one, the
+     * fare is ours and gets recorded on Dispatch — charging for it here would
+     * put the same journey into the cost of the produce twice. */
+    if (input.decision === 'ACCEPT' && input.transportCost && input.needVehicle) {
+      throw ApiError.rule(
+        'You have asked us to send a vehicle, so we are paying for the transport. '
+        + 'Leave the transport charge blank.');
+    }
 
     await tx.query(
       `UPDATE purchase_orders
@@ -272,7 +287,10 @@ supplierRouter.post('/orders/:id/respond', requires('supplier.order.accept'), h(
           throw ApiError.conflict(
             `You have already filed invoice ${dup[0].invoice_no}. Use a different number.`);
         }
-        const total = input.invoiceTotal ?? Number(o.grand_total);
+        /* The freight goes on the invoice with the goods, because that is what
+         * the supplier is actually billing us for. */
+        const freight = Number(input.transportCost ?? 0);
+        const total = (input.invoiceTotal ?? Number(o.grand_total)) + freight;
         await tx.query(
           `INSERT INTO supplier_invoices (company_id, branch_id, supplier_id, po_id,
                   invoice_no, invoice_date, due_date, subtotal, tax_amount, total,
@@ -302,7 +320,10 @@ supplierRouter.post('/orders/:id/respond', requires('supplier.order.accept'), h(
             amount: Number(invRow[0].total), warehouseId: o.warehouse_id,
             dueDate: invRow[0].due_date ?? o.expected_date,
             invoiceId: invRow[0].id, invoiceNo: invRow[0].invoice_no,
-            note: `Invoice ${invRow[0].invoice_no} for ${o.po_no} — filed by the supplier`,
+            transportAmount: freight > 0 ? freight : null,
+            note: [`Invoice ${invRow[0].invoice_no} for ${o.po_no} — filed by the supplier`,
+                   freight > 0 ? `includes ₹${freight.toFixed(2)} transport` : null]
+              .filter(Boolean).join(' · '),
           });
         }
       }
@@ -728,6 +749,49 @@ supplierRouter.get('/receipts', requires('supplier.invoice.submit'), h(async (re
       WHERE g.company_id = $1 AND g.supplier_id = $2 AND g.status = 'POSTED'
       ORDER BY g.posting_date DESC LIMIT 100`,
     [req.actor.companyId, supplierId]);
+}));
+
+/* What we turned away from their loads, and what became of it.
+ *
+ * The supplier used to learn this from a telephone call or, worse, from a short
+ * payment three weeks later — by which time it is an argument about what was
+ * actually in the crates rather than a lorry they could have come and collected
+ * the same afternoon. Same view the warehouse writes against, so there is one
+ * number and not two.
+ */
+supplierRouter.get('/rejections', requires('supplier.order.view'), h(async (req) => {
+  const supplierId = await mySupplier(req.actor);
+  return query(req.actor,
+    `SELECT inspection_id, inspection_no, inspected_at, po_no, warehouse_name,
+            product_name, product_icon, uom,
+            received_qty, accepted_qty, rejected_qty,
+            rejection_reason_codes, remarks,
+            returned_qty, returned_at, return_outcome, return_vehicle_reg, return_note,
+            rejected_value, awaiting_decision
+       FROM v_qc_rejections
+      WHERE company_id = $1 AND supplier_id = $2
+      ORDER BY inspected_at DESC
+      LIMIT 200`,
+    [req.actor.companyId, supplierId]);
+}));
+
+/* They have read it. Recorded so nothing keeps shouting at them about a load
+ * they have already dealt with — and so we can tell, in a dispute, whether
+ * they were told at the time. */
+supplierRouter.post('/rejections/seen', requires('supplier.order.view'), h(async (req) => {
+  const supplierId = await mySupplier(req.actor);
+  return withTx(req.actor, async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE qc_inspections q
+          SET return_seen_at = now()
+         FROM po_lines l, purchase_orders o
+        WHERE q.po_line_id = l.id AND o.id = l.po_id
+          AND q.company_id = $1 AND o.supplier_id = $2
+          AND q.rejected_qty > 0 AND q.return_seen_at IS NULL
+        RETURNING q.id`,
+      [req.actor.companyId, supplierId]);
+    return { ok: true, marked: rows.length };
+  });
 }));
 
 supplierRouter.get('/invoices', requires('supplier.invoice.view'), h(async (req) => {

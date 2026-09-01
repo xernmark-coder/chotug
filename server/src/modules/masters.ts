@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { config, pool, query, withTx } from '../db.js';
+import { config, pool, query, withTx, type Actor, type Tx } from '../db.js';
 import { ApiError, body, h } from '../platform/http.js';
 import { authenticate, staffOnly, loadActor, requires, signToken, verifyPassword, hashPassword } from '../platform/auth.js';
 import { encryptSecret, inviteEmail, loadSmtp, sendMail, sendTestMail } from '../platform/mailer.js';
@@ -372,6 +372,10 @@ mastersRouter.put('/products/:id', requires('master.product.manage'), h(async (r
     minStock: z.number().nonnegative().nullable().optional(),
     maxStock: z.number().nonnegative().nullable().optional(),
     shelfLifeDays: z.number().int().positive().nullable().optional(),
+    /* Which checklist the quality screen uses for this product. A product
+     * added today inherited its category's default or, if the category had
+     * none, nothing at all — and a check that asks nothing reads as a pass. */
+    qcTemplateId: z.string().uuid().nullable().optional(),
     isActive: z.boolean().optional(),
   }), req.body);
 
@@ -384,12 +388,14 @@ mastersRouter.put('/products/:id', requires('master.product.manage'), h(async (r
           reorder_point = COALESCE($8, reorder_point),
           min_stock = COALESCE($9, min_stock), max_stock = COALESCE($10, max_stock),
           shelf_life_days = COALESCE($11, shelf_life_days),
+          qc_template_id = COALESCE($14, qc_template_id),
           is_active = COALESCE($12, is_active), updated_by = $13
         WHERE id=$1 AND company_id=$2 RETURNING *`,
       [req.params.id, req.actor.companyId, input.name ?? null, input.nameHi ?? null,
        input.variety ?? null, input.icon ?? null, input.categoryId ?? null,
        input.reorderPoint ?? null, input.minStock ?? null, input.maxStock ?? null,
-       input.shelfLifeDays ?? null, input.isActive ?? null, req.actor.userId]);
+       input.shelfLifeDays ?? null, input.isActive ?? null, req.actor.userId,
+       input.qcTemplateId ?? null]);
     if (!rows[0]) throw ApiError.notFound('Product not found');
     return rows[0];
   });
@@ -436,10 +442,12 @@ mastersRouter.get('/pricing/basis', h(async (req) => {
     `SELECT * FROM v_overhead_per_kg WHERE company_id = $1`, [req.actor.companyId]);
   const [outbound] = await query(req.actor,
     `SELECT * FROM v_outbound_cost_per_kg WHERE company_id = $1`, [req.actor.companyId]);
+  const [inbound] = await query(req.actor,
+    `SELECT * FROM v_inbound_freight_per_kg WHERE company_id = $1`, [req.actor.companyId]);
   const [company] = await query(req.actor,
     `SELECT default_margin_pct, overhead_window_days FROM companies WHERE id = $1`,
     [req.actor.companyId]);
-  return { overhead, outbound, company };
+  return { overhead, inbound, outbound, company };
 }));
 
 mastersRouter.put('/products/:id/pricing', requires('master.pricing.manage'), h(async (req) => {
@@ -587,7 +595,7 @@ mastersRouter.get('/suppliers', h(async (req) => {
     `SELECT s.id, s.code, s.legal_name, s.trade_name, s.source_type, s.gstin, s.pan,
             s.is_unregistered, s.phone, s.email, s.district, s.state_code, s.payment_terms_days,
             s.status, s.status_reason, s.trust_score, s.performance_score,
-            s.first_purchase_at, s.last_purchase_at,
+            s.first_purchase_at, s.last_purchase_at, s.created_at,
             a.commission_pct, a.settlement_cycle_days,
             m.name AS mandi_name,
             (SELECT count(*) FROM purchase_orders o
@@ -1043,11 +1051,12 @@ mastersRouter.get('/charge-types', h(async (req) =>
 
 mastersRouter.get('/bins', h(async (req) =>
   query(req.actor,
-    `SELECT b.id, b.code, b.capacity_kg, b.current_fill_kg, b.is_pickface,
+    `SELECT b.id, b.code, b.capacity_kg, f.fill_kg AS current_fill_kg, b.is_pickface,
             r.code AS rack_code, z.code AS zone_code, z.storage_type, z.warehouse_id
        FROM bins b
        JOIN racks r ON r.id = b.rack_id
        JOIN zones z ON z.id = r.zone_id
+       JOIN v_bin_fill f ON f.bin_id = b.id
       WHERE b.company_id = $1 AND b.is_active
         AND ($2::uuid IS NULL OR z.warehouse_id = $2)
       ORDER BY z.code, r.code, b.code`,
@@ -1126,7 +1135,11 @@ mastersRouter.patch('/company', requires('admin.settings.manage'), h(async (req)
 
 mastersRouter.get('/qc-templates', h(async (req) =>
   query(req.actor,
-    `SELECT t.id, t.code, t.name, t.version, t.sampling_rule, t.scoring_rule,
+    `SELECT t.id, t.code, t.name, t.name_hi, t.template_version AS version,
+            t.category_id, t.product_id, t.note, t.sampling_rule, t.scoring_rule,
+            (SELECT count(*)::int FROM qc_inspections i WHERE i.template_id = t.id) AS inspections,
+            (SELECT count(*)::int FROM products p2 WHERE p2.qc_template_id = t.id
+                AND p2.is_active) AS products,
             (SELECT json_agg(json_build_object(
                 'id',p.id,'code',p.code,'label',p.label,'labelHi',p.label_hi,
                 'paramType',p.param_type,'unit',p.unit,'minOk',p.min_ok,'maxOk',p.max_ok,
@@ -1137,6 +1150,324 @@ mastersRouter.get('/qc-templates', h(async (req) =>
        FROM qc_templates t
       WHERE t.company_id = $1 AND t.is_active ORDER BY t.code`,
     [req.actor.companyId])));
+
+/* ===========================================================================
+ * THE QUALITY CHECKLIST
+ *
+ * qc_templates and qc_parameters drive the inspection screen and there was no
+ * way to change them: three arrived with the seed and nothing wrote. A product
+ * added today inherits its category's default or gets nothing at all.
+ *
+ * EDITING A TEMPLATE THAT HAS BEEN USED MAKES A NEW VERSION.
+ *
+ * qc_results.parameter_id points at the parameter that was scored, so deleting
+ * one would either fail on the foreign key or strand an inspection that says
+ * "8 out of 10" against a question nobody can read any more. A past inspection
+ * has to keep meaning what it meant, so the old version is retired intact and
+ * everything pointing at it moves to the new one.
+ * ======================================================================== */
+
+const qcParam = z.object({
+  code: z.string().trim().min(1, 'Give the check a code').max(40),
+  label: z.string().trim().min(1, 'What is being checked?').max(120),
+  labelHi: z.string().trim().max(120).nullable().optional(),
+  paramType: z.enum(['NUMERIC', 'PERCENT', 'COUNT', 'BOOLEAN', 'SELECT', 'PHOTO', 'TEXT']),
+  unit: z.string().trim().max(16).nullable().optional(),
+  /* A NUMBER check without a range accepts anything, which is the same as not
+   * asking. Guarded below rather than here, so the message can say why. */
+  minOk: z.coerce.number().nullable().optional(),
+  maxOk: z.coerce.number().nullable().optional(),
+  /* A choice is scored, not just named: the inspection's score comes from the
+   * option's `score`, so accepting a bare list of strings here would have
+   * quietly turned "Fresh 100 / Acceptable 75 / Wilted 30" into three
+   * unscored words and broken every result computed from it. Strings are
+   * still accepted for convenience and score full marks. */
+  options: z.array(z.union([
+    z.string().trim().min(1).max(40),
+    z.object({
+      value: z.string().trim().min(1).max(40),
+      label: z.string().trim().min(1).max(60),
+      score: z.coerce.number().min(0).max(100),
+    }),
+  ])).nullable().optional(),
+  isCritical: z.boolean().default(false),
+  isMandatory: z.boolean().default(true),
+  weight: z.coerce.number().positive().max(100).default(1),
+  requiresPhoto: z.boolean().default(false),
+  helpText: z.string().trim().max(300).nullable().optional(),
+});
+
+const qcTemplateBody = z.object({
+  code: z.string().trim().min(2, 'Give the template a code').max(40),
+  name: z.string().trim().min(2, 'Name it').max(120),
+  nameHi: z.string().trim().max(120).nullable().optional(),
+  categoryId: z.string().uuid().nullable().optional(),
+  productId: z.string().uuid().nullable().optional(),
+  note: z.string().trim().max(300).nullable().optional(),
+  scoringRule: z.object({
+    accept_min: z.coerce.number().min(0).max(100),
+    partial_min: z.coerce.number().min(0).max(100),
+    downgrade_min: z.coerce.number().min(0).max(100),
+  }).optional(),
+  samplingRule: z.record(z.any()).optional(),
+  parameters: z.array(qcParam).min(1, 'A checklist with no checks on it is not a checklist'),
+});
+
+/** Rules that hold whichever way a template arrives. */
+function assertTemplateSane(i: z.infer<typeof qcTemplateBody>) {
+  const seen = new Set<string>();
+  for (const p of i.parameters) {
+    const key = p.code.toUpperCase();
+    if (seen.has(key)) {
+      throw ApiError.rule(`Two checks share the code "${p.code}". They have to be different.`);
+    }
+    seen.add(key);
+    const numeric = ['NUMERIC', 'PERCENT', 'COUNT'].includes(p.paramType);
+    if (numeric && p.minOk == null && p.maxOk == null) {
+      throw ApiError.rule(
+        `"${p.label}" takes a number but has no acceptable range, so every answer passes. `
+        + 'Give it a minimum, a maximum, or both.');
+    }
+    if (numeric && p.minOk != null && p.maxOk != null
+        && Number(p.minOk) > Number(p.maxOk)) {
+      throw ApiError.rule(`"${p.label}" has a minimum above its maximum.`);
+    }
+    if (p.paramType === 'SELECT' && !(p.options ?? []).length) {
+      throw ApiError.rule(`"${p.label}" is a choice with nothing to choose from.`);
+    }
+  }
+  const s = i.scoringRule;
+  if (s && !(s.accept_min >= s.downgrade_min && s.downgrade_min >= s.partial_min)) {
+    throw ApiError.rule(
+      'The thresholds have to descend: accept at or above downgrade, downgrade at or '
+      + `above partial. You gave accept ${s.accept_min}, downgrade ${s.downgrade_min}, `
+      + `partial ${s.partial_min}.`);
+  }
+}
+
+/** A bare string becomes a full-marks option, so both shapes can be sent. */
+function normaliseOptions(opts: (string | { value: string; label: string; score: number })[]) {
+  return opts.map((o) => (typeof o === 'string'
+    ? { value: o.toUpperCase().replace(/[^A-Z0-9]/g, '_').slice(0, 40), label: o, score: 100 }
+    : o));
+}
+
+async function writeParameters(tx: Tx, actor: Actor, templateId: string,
+                               params: z.infer<typeof qcParam>[]) {
+  let seq = 0;
+  for (const p of params) {
+    seq += 1;
+    await tx.query(
+      `INSERT INTO qc_parameters (company_id, template_id, seq, code, label, label_hi,
+              param_type, unit, min_ok, max_ok, options, is_critical, is_mandatory,
+              weight, requires_photo, help_text)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+      [actor.companyId, templateId, seq, p.code.toUpperCase(), p.label, p.labelHi ?? null,
+       p.paramType, p.unit ?? null, p.minOk ?? null, p.maxOk ?? null,
+       p.options ? JSON.stringify(normaliseOptions(p.options)) : null,
+       p.isCritical, p.isMandatory,
+       p.weight, p.requiresPhoto, p.helpText ?? null]);
+  }
+}
+
+mastersRouter.post('/qc-templates', requires('quality.template.manage'), h(async (req) => {
+  const i = body(qcTemplateBody, req.body);
+  assertTemplateSane(i);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows: dup } = await tx.query(
+      `SELECT code FROM qc_templates
+        WHERE company_id=$1 AND lower(code)=lower($2) AND is_active LIMIT 1`,
+      [req.actor.companyId, i.code]);
+    if (dup[0]) {
+      throw ApiError.conflict(`A live template already uses the code ${dup[0].code}.`);
+    }
+
+    const { rows } = await tx.query(
+      `INSERT INTO qc_templates (company_id, code, name, name_hi, category_id, product_id,
+              template_version, is_active, scoring_rule, sampling_rule, note,
+              created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,1,true,
+               COALESCE($7::jsonb, '{"accept_min":85,"partial_min":50,"downgrade_min":70}'),
+               COALESCE($8::jsonb, (SELECT sampling_rule FROM qc_templates
+                                     WHERE company_id=$1 ORDER BY created_at LIMIT 1),
+                        '{"mode":"SQRT","min_units":5}'),
+               $9,$10,$10)
+       RETURNING *`,
+      [req.actor.companyId, i.code.toUpperCase(), i.name, i.nameHi ?? null,
+       i.categoryId ?? null, i.productId ?? null,
+       i.scoringRule ? JSON.stringify(i.scoringRule) : null,
+       i.samplingRule ? JSON.stringify(i.samplingRule) : null,
+       i.note ?? null, req.actor.userId]);
+    const t = rows[0];
+
+    await writeParameters(tx, req.actor, t.id, i.parameters);
+    await emit(tx, req.actor, 'qc_template', t.id, 'qc_template.created',
+      { code: t.code, checks: i.parameters.length });
+
+    return { ...t, message: `${t.name} created with ${i.parameters.length} check(s).` };
+  });
+}));
+
+mastersRouter.put('/qc-templates/:id', requires('quality.template.manage'), h(async (req) => {
+  const i = body(qcTemplateBody, req.body);
+  assertTemplateSane(i);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows: cur } = await tx.query(
+      `SELECT * FROM qc_templates WHERE id=$1 AND company_id=$2 FOR UPDATE`,
+      [req.params.id, req.actor.companyId]);
+    const old = cur[0];
+    if (!old) throw ApiError.notFound('Template not found');
+    if (!old.is_active) throw ApiError.rule('That template has been retired. Edit the live one.');
+
+    const { rows: used } = await tx.query(
+      `SELECT count(*)::int n FROM qc_inspections WHERE template_id=$1`, [old.id]);
+    const inspections = used[0].n;
+
+    const scoring = i.scoringRule ? JSON.stringify(i.scoringRule) : JSON.stringify(old.scoring_rule);
+    const sampling = i.samplingRule ? JSON.stringify(i.samplingRule) : JSON.stringify(old.sampling_rule);
+
+    /* Never used: nothing points at its parameters, so change it in place and
+     * keep the version number honest — a v2 nobody ever inspected against is
+     * noise in a list somebody has to read. */
+    if (inspections === 0) {
+      await tx.query(
+        `UPDATE qc_templates SET name=$2, name_hi=$3, category_id=$4, product_id=$5,
+                scoring_rule=$6::jsonb, sampling_rule=$7::jsonb, note=$8,
+                updated_by=$9, updated_at=now()
+          WHERE id=$1`,
+        [old.id, i.name, i.nameHi ?? null, i.categoryId ?? null, i.productId ?? null,
+         scoring, sampling, i.note ?? null, req.actor.userId]);
+      await tx.query(`DELETE FROM qc_parameters WHERE template_id=$1`, [old.id]);
+      await writeParameters(tx, req.actor, old.id, i.parameters);
+      await emit(tx, req.actor, 'qc_template', old.id, 'qc_template.updated',
+        { code: old.code, checks: i.parameters.length });
+      return {
+        id: old.id, version: old.template_version, superseded: false,
+        message: `${i.name} updated. It had not been used, so no new version was needed.`,
+      };
+    }
+
+    /* Used: the old parameters are what past inspections were scored against.
+     * Retire it whole and move everything pointing at it to the new version.
+     *
+     * Retire FIRST. uq_qc_template_live allows one live row per code, and a
+     * unique index cannot be deferred to the end of the transaction — inserting
+     * the new version while the old one was still active tripped it. */
+    await tx.query(
+      `UPDATE qc_templates SET is_active=false, retired_at=now(), updated_by=$2 WHERE id=$1`,
+      [old.id, req.actor.userId]);
+
+    const { rows: ins } = await tx.query(
+      `INSERT INTO qc_templates (company_id, code, name, name_hi, category_id, product_id,
+              template_version, is_active, scoring_rule, sampling_rule, note, supersedes_id,
+              created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8::jsonb,$9::jsonb,$10,$11,$12,$12)
+       RETURNING *`,
+      [req.actor.companyId, old.code, i.name, i.nameHi ?? null,
+       i.categoryId ?? null, i.productId ?? null, Number(old.template_version) + 1,
+       scoring, sampling, i.note ?? null, old.id, req.actor.userId]);
+    const next = ins[0];
+
+    await writeParameters(tx, req.actor, next.id, i.parameters);
+
+    const { rowCount: movedProducts } = await tx.query(
+      `UPDATE products SET qc_template_id=$2, updated_by=$3 WHERE qc_template_id=$1`,
+      [old.id, next.id, req.actor.userId]);
+    const { rowCount: movedCats } = await tx.query(
+      `UPDATE product_categories SET default_qc_template_id=$2 WHERE default_qc_template_id=$1`,
+      [old.id, next.id]);
+
+    await emit(tx, req.actor, 'qc_template', next.id, 'qc_template.versioned', {
+      code: old.code, from: old.template_version, to: next.template_version, inspections,
+      movedProducts, movedCats,
+    });
+
+    return {
+      id: next.id, version: next.template_version, superseded: true, supersededId: old.id,
+      message: `${i.name} is now v${next.template_version}. `
+        + `v${old.template_version} was used on ${inspections} inspection(s), `
+        + 'so it is kept exactly as it was; '
+        + `${movedProducts} product(s) now use the new one.`,
+    };
+  });
+}));
+
+/**
+ * Which checklist a product is inspected against.
+ *
+ * Its own endpoint rather than a field on the product master, because it is a
+ * quality decision and the QC people who own the checklists should be able to
+ * point a product at one without holding master.product.manage — which would
+ * also let them rename products and change reorder points.
+ */
+mastersRouter.put('/products/:id/qc-template',
+  requires('quality.template.manage'), h(async (req) => {
+    const i = body(z.object({
+      templateId: z.string().uuid().nullable(),
+    }), req.body);
+
+    return withTx(req.actor, async (tx) => {
+      if (i.templateId) {
+        const { rows: t } = await tx.query(
+          `SELECT id, name FROM qc_templates
+            WHERE id=$1 AND company_id=$2 AND is_active`, [i.templateId, req.actor.companyId]);
+        if (!t[0]) throw ApiError.rule('That checklist does not exist, or has been retired.');
+      }
+      const { rows } = await tx.query(
+        `UPDATE products SET qc_template_id=$3, updated_by=$4
+          WHERE id=$1 AND company_id=$2 RETURNING name`,
+        [req.params.id, req.actor.companyId, i.templateId, req.actor.userId]);
+      if (!rows[0]) throw ApiError.notFound('Product not found');
+
+      await emit(tx, req.actor, 'product', req.params.id, 'product.qc_template.set',
+        { templateId: i.templateId });
+      return {
+        ok: true,
+        message: i.templateId
+          ? `${rows[0].name} will be checked against that list.`
+          : `${rows[0].name} now has no checklist — its quality check will ask nothing.`,
+      };
+    });
+  }));
+
+/** Retire one. Nothing is deleted — past inspections still point at it. */
+mastersRouter.post('/qc-templates/:id/retire',
+  requires('quality.template.manage'), h(async (req) => {
+    const i = body(z.object({
+      reason: z.string().trim().min(3, 'Say why it is being retired'),
+      replacementId: z.string().uuid().nullable().optional(),
+    }), req.body);
+
+    return withTx(req.actor, async (tx) => {
+      const { rows: cur } = await tx.query(
+        `SELECT id, code, name FROM qc_templates
+          WHERE id=$1 AND company_id=$2 AND is_active FOR UPDATE`,
+        [req.params.id, req.actor.companyId]);
+      const t = cur[0];
+      if (!t) throw ApiError.notFound('No live template with that id');
+
+      const { rows: on } = await tx.query(
+        `SELECT count(*)::int n FROM products WHERE qc_template_id=$1 AND is_active`, [t.id]);
+      if (on[0].n > 0 && !i.replacementId) {
+        throw ApiError.rule(
+          `${on[0].n} product(s) are checked with this. Say which template they should use `
+          + 'instead, or those checks stop happening.');
+      }
+      if (i.replacementId) {
+        await tx.query(
+          `UPDATE products SET qc_template_id=$2, updated_by=$3 WHERE qc_template_id=$1`,
+          [t.id, i.replacementId, req.actor.userId]);
+      }
+      await tx.query(
+        `UPDATE qc_templates SET is_active=false, retired_at=now(), note=$2, updated_by=$3
+          WHERE id=$1`, [t.id, i.reason, req.actor.userId]);
+      await emit(tx, req.actor, 'qc_template', t.id, 'qc_template.retired',
+        { code: t.code, reason: i.reason, moved: on[0].n });
+      return { ok: true, message: `${t.name} retired.` };
+    });
+  }));
 
 mastersRouter.get('/audit', requires('admin.audit.view'), h(async (req) =>
   query(req.actor,

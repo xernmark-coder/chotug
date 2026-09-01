@@ -1312,6 +1312,59 @@ second time thinking the first went astray.
 Everyone can also change their own password from their profile — it used to be
 set once from an invite link and never again, by anybody.
 
+## The quality checklist — `/catalogue` → Quality checklists
+
+What the inspection screen asks about each product. It arrived with the seed
+and had no editor: a checklist could only be changed in SQL, and a product
+added today inherited whatever its category happened to default to — or, where
+the category had no default, nothing at all, and a check that asks nothing
+reads as a pass.
+
+Both the admin and the **QC team** can now create and edit them.
+`quality.template.manage` already existed, held by OWNER and QC_HEAD and used
+by no endpoint; QC_EXEC has it too, because the people running the checks
+should be able to fix the checklist they are running.
+
+### Editing a used checklist makes a new version
+
+`qc_results.parameter_id` points at the question that was scored. Deleting a
+question would either fail on the foreign key or strand an inspection that says
+*8 out of 10* against something nobody can read. So:
+
+| The checklist | What Save does |
+|---|---|
+| Never used | Changed in place. A v2 nobody inspected against is noise in a list somebody has to read. |
+| Used | v1 is retired **exactly as it was**, v2 is created, and every product using it moves across. |
+
+The dialog says which will happen before you press Save, with the number of
+inspections at stake. The code is fixed once created — it is the identity that
+carries across versions.
+
+### A choice is scored
+
+`Fresh 100, Acceptable 75, Wilted 30` — the number after each answer is what it
+scores, and the inspection's result is computed from those. The editor reads
+and writes them in that form. Getting this wrong would have been silent: an
+early version of the editor took a plain list of words, so re-saving Leafy
+Greens would have turned three scored answers into three unscored ones and
+quietly changed every result computed afterwards.
+
+### Which product is checked against what
+
+The same tab lists every product with its checklist and a dropdown to change
+it. Products with none are red and named in a banner at the top. Setting one is
+its own endpoint gated on `quality.template.manage`, not on
+`master.product.manage` — it is a quality decision, and QC should not need the
+power to rename products and change reorder points in order to make it.
+
+### Two versions of "version"
+
+`qc_templates.version` looks like the template's version and is not: a trigger
+bumps it on every UPDATE as an optimistic-locking counter. Retiring v1
+therefore moved its `version` to 2 and collided with the v2 being inserted
+beside it. The human-facing number is **`template_version`**, added in `db/43`,
+with `uq_qc_template_live` keeping one live row per code.
+
 ## Filters, everywhere, with the numbers under them
 
 One hook and one bar (`useFilters`, `FilterBar`, `FilterTotals` in `ui.tsx`),

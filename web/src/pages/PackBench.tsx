@@ -23,6 +23,25 @@ import { LabelSheet, RemovePackModal } from './Packing';
  * bench for the trolley run.
  * ======================================================================== */
 
+/* What this box has to fetch, and therefore what the label should say.
+ *
+ *   what it cost us + overheads + freight in + freight to the shop
+ *   ───────────────────────────────────────────────────────────────  × (1 + margin)
+ *                          1 − wastage
+ *
+ * The database does that sum per unit in v_batch_pricing (the margin coming
+ * from the product, or the company default where the product has none). All
+ * that is left here is the size of the box, because that is chosen on this
+ * screen and nowhere else. Rounded UP to the rupee — a suggestion that lands a
+ * few paise under the floor it was computed from would be its own bug report.
+ */
+function suggestPrice(minSellPerUnit: number, qtyPerPack: number): string {
+  const floor = Number(minSellPerUnit) || 0;
+  const per = Number(qtyPerPack) || 0;
+  if (floor <= 0 || per <= 0) return '';
+  return String(Math.ceil(floor * per));
+}
+
 const GRADES = [
   { key: 'A', label: 'A', hint: 'best', tone: 'ok' },
   { key: 'B', label: 'B', hint: 'good', tone: 'primary' },
@@ -50,9 +69,23 @@ export function PackBenchPage() {
   const [storing, setStoring] = useState(false);
 
   /* Price is per grade in practice, so remembering the last one for this grade
-     saves typing it on every box. */
+     saves typing it on every box. A price somebody set by hand outranks the
+     worked-out one — they had the fruit in front of them. */
   const [priceByGrade, setPriceByGrade] = useState<Record<string, string>>({});
-  useEffect(() => { setPrice(priceByGrade[grade] ?? ''); }, [grade]); // eslint-disable-line
+  const [pricedByHand, setPricedByHand] = useState(false);
+
+  /* The label price, worked out from what this batch cost and the margin set
+     on the product. It follows the weight as it is keyed in, because a box
+     price without a box size is not a number anybody can check. */
+  const suggested = suggestPrice(Number(data?.min_sell_price) || 0, Number(qty) || 0);
+  useEffect(() => {
+    const own = priceByGrade[grade];
+    if (own != null) { setPrice(own); setPricedByHand(true); return; }
+    setPricedByHand(false);
+  }, [grade]); // eslint-disable-line
+  useEffect(() => {
+    if (!pricedByHand) setPrice(suggested);
+  }, [suggested, pricedByHand]);
 
   const addBox = async () => {
     if (!Number(qty)) return;
@@ -68,7 +101,10 @@ export function PackBenchPage() {
         binCode: binCode.trim() || undefined,
       });
       toast(r.message, 'ok');
-      setPriceByGrade((s) => ({ ...s, [grade]: price }));
+      /* Remember only a price somebody chose. Storing the worked-out one would
+         freeze it, and the next box of a different size would carry the last
+         box's price. */
+      if (pricedByHand) setPriceByGrade((s) => ({ ...s, [grade]: price }));
       setNote('');
       reload();
       setPrinting([r]);
@@ -173,7 +209,25 @@ export function PackBenchPage() {
               <div className="grid c2 mt">
                 <div>
                   <label className="lbl">Price on the label (₹)</label>
-                  <input type="number" value={price} onChange={(e) => setPrice(e.target.value)} />
+                  <input type="number" value={price}
+                    onChange={(e) => { setPrice(e.target.value); setPricedByHand(true); }} />
+                  {/* Worked out rather than remembered: cost, overheads, both
+                      freight legs and the margin on this product. Editable,
+                      because the person holding the box can see it. */}
+                  {suggested ? (
+                    <div className="small muted mt">
+                      {pricedByHand && price !== suggested ? (
+                        <>Worked out at {inr(Number(suggested))} ·{' '}
+                          <button className="btn sm ghost" type="button"
+                            onClick={() => {
+                              setPrice(suggested); setPricedByHand(false);
+                              setPriceByGrade((s2) => { const n2 = { ...s2 }; delete n2[grade]; return n2; });
+                            }}>use it</button></>
+                      ) : (
+                        <>cost + {num(data.margin_pct, 0)}% margin on {qty || 0} {data.base_uom}</>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
                 <div>
                   <label className="lbl">Shelf, if it goes now</label>
@@ -431,6 +485,11 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
   const [size, setSize] = useState('');
   const [grade, setGrade] = useState(initialGrade);
   const [price, setPrice] = useState('');
+  /* Whether the person has priced this themselves. Until they do, the box
+     price follows the size they are typing; the moment they overrule it, it
+     stays overruled — a field that keeps rewriting what you typed is worse
+     than one that starts empty. */
+  const [pricedByHand, setPricedByHand] = useState(false);
   const [binCode, setBinCode] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
@@ -451,9 +510,18 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
   /* The least this box can sell for and still make the margin, given what the
      produce cost, what it costs to handle and what the trip to the shop costs.
      Per box, not per kilo, because per box is what goes on the label. */
-  const floorPerKg = Number(bench.min_sell_price) || 0;
-  const floorPerBox = floorPerKg > 0 && per > 0 ? floorPerKg * per : 0;
+  const floorPerUnit = Number(bench.min_sell_price) || 0;
+  const floorPerBox = floorPerUnit > 0 && per > 0 ? floorPerUnit * per : 0;
   const belowFloor = floorPerBox > 0 && Number(price) > 0 && Number(price) < floorPerBox;
+  const suggested = suggestPrice(floorPerUnit, per);
+
+  /* Fill it in as soon as the size is known. Somebody at a bench should not be
+     doing this arithmetic in their head against a floor printed underneath the
+     box — and before this, the field started empty and most boxes went out at
+     whatever was typed last. */
+  useEffect(() => {
+    if (!pricedByHand) setPrice(suggested);
+  }, [suggested, pricedByHand]);
 
   return (
     <Modal
@@ -549,16 +617,26 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
         <div>
           <label className="lbl">Price on each label (₹)</label>
           <input type="number" step="0.01" min={0} value={price}
-            onChange={(e) => setPrice(e.target.value)} placeholder="120" />
+            onChange={(e) => { setPrice(e.target.value); setPricedByHand(true); }}
+            placeholder="120" />
           {/* Selling happens from the box now, so this IS the selling price and
-              this is where it is decided. The floor has to be in front of the
-              person typing it, or they are guessing against a cost nobody
-              showed them. */}
+              this is where it is decided. Worked out from what the produce cost
+              and the margin set on it, then left editable — the number is a
+              starting point, not a rule, and the person at the bench can see
+              the fruit. */}
           {floorPerBox > 0 ? (
             <div className={`small mt ${belowFloor ? 'chip danger' : 'muted'}`}>
               {belowFloor
                 ? `Under the ${inr(floorPerBox)} this box has to fetch`
-                : `Floor for a ${num(per, 1)} ${bench.base_uom} box: ${inr(floorPerBox)}`}
+                : pricedByHand && price !== suggested
+                  ? <>Worked out at {inr(Number(suggested))} for a {num(per, 1)}{' '}
+                      {bench.base_uom} box ·{' '}
+                      <button className="btn sm ghost" type="button"
+                        onClick={() => { setPrice(suggested); setPricedByHand(false); }}>
+                        use it
+                      </button></>
+                  : `Worked out from cost + ${num(bench.margin_pct, 0)}% margin, `
+                    + `for a ${num(per, 1)} ${bench.base_uom} box. Change it if you need to.`}
             </div>
           ) : null}
         </div>

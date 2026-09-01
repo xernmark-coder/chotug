@@ -1405,3 +1405,12 @@ table.mini tr.voided { opacity: .5; text-decoration: line-through; }
   .modal-foot { padding: 10px 14px; }
   .login-page { padding-top: 14px; align-items: flex-start; }
 }
+
+/* ------------------------------------------------------- shelf details --
+   Label above number, the way the totals strip does it — .ft-num only stacks
+   inside a .filter-total, so used loose it read "Boxes5". */
+.shelf-stats { display: flex; gap: 22px; flex-wrap: wrap; }
+.shelf-stats span { display: flex; flex-direction: column; }
+.shelf-stats em { font-style: normal; font-size: 10px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--muted); }
+.shelf-stats b { font-size: 17px; font-variant-numeric: tabular-nums; }

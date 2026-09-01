@@ -359,8 +359,15 @@ SELECT b.id                       AS batch_id,
 /* The same arithmetic one level up, for the catalogue: what a kilo of THIS
  * product costs us all-in, and the least it can be sold for. Priced off live
  * stock where there is any, and off the last thing we paid where there is not
- * — a product with nothing in stock still has to show a price. */
-CREATE OR REPLACE VIEW v_product_pricing AS
+ * — a product with nothing in stock still has to show a price.
+ *
+ * DROP rather than CREATE OR REPLACE, for the same reason as v_batch_pricing
+ * above: db/46 adds the inbound freight leg as a column in the MIDDLE of this
+ * list, and Postgres will not replace a view whose columns have moved. Without
+ * the drop, re-running the migrations died here — before 46 could put the
+ * column back — and left both pricing views short of the costs they are for. */
+DROP VIEW IF EXISTS v_product_pricing;
+CREATE VIEW v_product_pricing AS
 WITH live AS (
     SELECT b.company_id, b.product_id,
            SUM(b.landed_rate_per_kg * GREATEST(b.remaining_qty, 0)) AS weighted,

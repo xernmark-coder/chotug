@@ -92,7 +92,7 @@ done
 # An endpoint is not a button. The client asked for the option ON THE DROPDOWN,
 # so check the screens where someone picks from a list and would need a new one.
 #   file : the select's marker text : the modal that must be reachable from it
-for r in "Sales.tsx:customer:AddCustomerModal" \
+for r in "Packing.tsx:customer:AddCustomerModal" \
          "Receiving.tsx:vehicle:VehicleModal" \
          "Receiving.tsx:driver:DriverModal" \
          "Purchase.tsx:Choose a supplier:SupplierModal" \
@@ -248,6 +248,160 @@ chk "queue accepts the request" "$(Q "SELECT count(*) FROM pg_constraint WHERE c
 grep -q "Arrange a vehicle" web/src/pages/Purchase.tsx \
   && ok "...or the office assigns one from the order" || no "assign" "no button"
 
+echo "── 71 · a quality check without a checklist"
+# The plan endpoint refused when a product had no template, so the dialog was
+# empty, "Save inspection" stayed enabled, and pressing it died on
+# «can't access property "template", plan is null» — with the lorry at the gate.
+chk "an inspection may have no checklist" "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='qc_inspections' AND column_name='template_id' AND is_nullable='YES'")"
+chk "...and then carries no score"        "$(Q "SELECT count(*) FROM pg_constraint WHERE conname='ck_qc_scored_only_with_template'")"
+grep -q "No checklist is not a refusal" server/src/modules/receiving.ts \
+  && ok "the plan comes back either way" || no "plan" "still refuses"
+grep -q "templateId: z.string().uuid().nullable()" server/src/modules/receiving.ts \
+  && ok "the save accepts none" || no "save" "still demands one"
+grep -q "})).default(\[\])," server/src/modules/receiving.ts \
+  && ok "...with no answers to give" || no "answers" "still min(1)"
+grep -q "plan.template?.id ?? null" web/src/pages/Receiving.tsx \
+  && ok "the screen stops reaching into null" || no "screen" "still crashes"
+grep -q "No checklist has been set up for" server/src/modules/receiving.ts \
+  && ok "...and says what to do about it" || no "message" "unexplained"
+
+# An option is {value,label,score}; one template briefly held bare strings and
+# rendered as three blank buttons.
+chk "no bare-string options left" "$(Q "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM qc_parameters WHERE param_type='SELECT' AND options IS NOT NULL AND jsonb_typeof(options->0)='string')")"
+grep -q "typeof o === 'string' ? o : o?.value" web/src/pages/Receiving.tsx \
+  && ok "and a stray one can no longer blank a button" || no "renderer" "assumes objects"
+
+echo "── 69 · how full a shelf is"
+# bins.current_fill_kg is a stored number nothing maintains: the bench puts
+# boxes on a shelf without touching it, and selling takes them off without
+# touching it. It read 0 on a shelf holding 10 kg of bananas — and, worse and
+# invisibly, made the put-away suggestion think every shelf was empty.
+chk "there is one definition of it" "$(Q "SELECT count(*) FROM information_schema.views WHERE table_name='v_bin_fill'")"
+grep -q "JOIN v_bin_fill f ON f.bin_id = b.id" server/src/modules/receiving.ts \
+  && ok "the put-away suggestion uses it" || no "suggestion" "reads the stale column"
+grep -q "v_bin_fill" server/src/modules/inventory.ts \
+  && ok "the packing bench uses it" || no "bench" "reads the stale column"
+grep -q "v_bin_fill" server/src/modules/warehousemap.ts \
+  && ok "the shelf on the map uses it" || no "map" "reads the stale column"
+grep -q "v_bin_fill" server/src/modules/masters.ts \
+  && ok "so does the bin list" || no "bins" "reads the stale column"
+# A box counted in kilos weighs its quantity; only 8 of 97 carried a weight.
+grep -q "CASE WHEN pk.uom = 'KG' THEN pk.qty END" db/44_bin_fill.sql \
+  && ok "a box counted in kilos weighs its quantity" || no "weight" "sums nulls"
+grep -q "sb.base_uom === 'KG' ? g.qtyPerPack : null" server/src/modules/inventory.ts \
+  && ok "...and new boxes record it" || no "packing" "still leaves it empty"
+chk "shelves reporting a real weight" "$(Q "SELECT count(*) FROM v_bin_fill WHERE fill_kg > 0")"
+chk "capacity now actually limits"    "$(Q "
+  SELECT count(*) FROM bins b JOIN v_bin_fill f ON f.bin_id=b.id
+   WHERE b.capacity_kg IS NOT NULL AND f.fill_kg + 1450 > b.capacity_kg")"
+
+echo "── 67 · selling is the priority"
+# The send screen split on price, which it does not show — so two rows reading
+# "Alphonso · BAT/…29 · 5.00 KG · A · C2-R1-2" looked like the same thing twice.
+grep -q "Merged one step coarser than the till groups them" web/src/pages/Centres.tsx \
+  && ok "send rows merge when only the price differs" || no "send rows" "split invisibly"
+grep -q "on the labels" web/src/pages/Centres.tsx \
+  && ok "...and the spread is shown, not averaged" || no "price range" "hidden"
+
+# A man at the counter with money is a sale. Which shop a customer is filed
+# under, and whether somebody archived him, are management facts.
+grep -q "forSale=1" web/src/pages/Packing.tsx \
+  && ok "the till sees every customer" || no "till" "filters them out"
+grep -q "forSale ? " server/src/modules/centres.ts \
+  || grep -q "(\$4::boolean OR c.is_active)" server/src/modules/centres.ts \
+  && ok "...archived and other-shop ones included" || no "list" "still filtered"
+grep -q "AS is_ours" server/src/modules/centres.ts \
+  && ok "...labelled so the seller knows which" || no "labels" "indistinguishable"
+grep -q "No customer with that id" server/src/modules/inventory.ts \
+  && ok "and the sale is no longer refused" || no "server" "still blocks the sale"
+chk "a sale to an archived customer exists" "$(Q "
+  SELECT count(*) FROM stock_issues si JOIN customers c ON c.id=si.customer_id
+   WHERE si.warehouse_id <> COALESCE(c.warehouse_id, si.warehouse_id)")"
+
+echo "── 65 · what is on a shelf"
+# The map showed a shelf as a count and a weight. Standing at a rack the
+# questions are the other ones — what is it, whose was it, how long has it got,
+# what did it cost, what are we asking. The audit scan already returned most of
+# it and had nowhere to be read outside an audit.
+grep -q "ShelfModal" web/src/pages/WarehouseMap.tsx \
+  && ok "clicking a shelf opens what is on it" || no "shelf detail" "still prints a label"
+grep -q "days_on_the_shelf" server/src/modules/warehousemap.ts \
+  && ok "...how long it has been there" || no "age" "missing"
+grep -q "pr.min_sell_price, pr.overhead_per_kg" server/src/modules/warehousemap.ts \
+  && ok "...what it cost and the least it can go for" || no "money" "missing"
+grep -q "LEFT JOIN grn_lines gl ON gl.id = b.grn_line_id" server/src/modules/warehousemap.ts \
+  && ok "...and who it came from" || no "provenance" "wrong join"
+# The average hid a box priced at zero among sixteen priced properly.
+grep -q "MIN(pk.price)" server/src/modules/warehousemap.ts \
+  && ok "judged on the cheapest box, not the average" || no "pricing check" "averages"
+grep -q "cheapest is under the floor" web/src/pages/WarehouseMap.tsx \
+  && ok "...and says so on the row" || no "row flag" "missing"
+grep -q "has a box with no price on its label" web/src/pages/WarehouseMap.tsx \
+  && ok "no price and under the floor are told apart" || no "warnings" "lumped together"
+grep -q "shelf-stats" web/src/pages/WarehouseMap.tsx \
+  && ok "the summary reads as label and number" || no "layout" "ran together"
+
+echo "── 63 · boxes, grouped"
+# 300 boxes of mango were 300 rows and 300 checkboxes on the till, and the send
+# screen read a loose-stock endpoint that knew nothing about packing — so a
+# warehouse whose stock was all boxed offered "free" kilos and showed none of
+# the boxes just made.
+grep -q "inventoryRouter.get('/pack-groups'" server/src/modules/inventory.ts \
+  && ok "boxes are grouped by what you can ask for" || no "pack-groups" "missing"
+grep -q "array_agg(k.id ORDER BY k.created_at" server/src/modules/inventory.ts \
+  && ok "...oldest boxes go out first" || no "ordering" "arbitrary"
+grep -q "pack-groups" web/src/pages/Sales.tsx \
+  && ok "the till reads groups" || no "till" "still one row per box"
+grep -q "pack-groups" web/src/pages/Centres.tsx \
+  && ok "so does the send screen" || no "send" "still loose stock"
+grep -q "Send how many" web/src/pages/Centres.tsx \
+  && ok "sending is counted in boxes" || no "send" "still asks for kilos"
+grep -q "graded and packed" web/src/pages/Centres.tsx \
+  && ok "...and says why nothing loose is listed" || no "empty state" "unexplained"
+
+# Margin, at both levels.
+chk "a company default margin"  "$(Q "SELECT count(*) FROM companies WHERE default_margin_pct IS NOT NULL")"
+grep -q "defaultMarginPct" web/src/pages/Finance.tsx \
+  && ok "...settable in Settings" || no "company margin" "no UI"
+grep -q "minMarginPct" web/src/pages/Catalogue.tsx \
+  && ok "and per product where it differs" || no "product margin" "no UI"
+
+echo "── 61 · the quality checklist is editable"
+# It arrived with the seed and had no editor: a checklist could only be changed
+# in SQL, and a product added today inherited its category default or nothing.
+grep -q "mastersRouter.post('/qc-templates'" server/src/modules/masters.ts \
+  && ok "a checklist can be created" || no "create" "read-only"
+grep -q "mastersRouter.put('/qc-templates/:id'" server/src/modules/masters.ts \
+  && ok "...and edited" || no "edit" "missing"
+grep -q "requires('quality.template.manage')" server/src/modules/masters.ts \
+  && ok "...by admin and the QC team" || no "permission" "not gated"
+chk "QC holds the permission" "$(Q "SELECT count(*) FROM role_permissions rp JOIN roles r ON r.id=rp.role_id WHERE rp.permission_code='quality.template.manage' AND r.code='QC_EXEC'")"
+grep -q "QcTemplatesPanel" web/src/pages/Catalogue.tsx \
+  && ok "there is a screen for it" || no "screen" "API only"
+
+# Editing a used checklist versions rather than mutates: qc_results.parameter_id
+# points at the questions that were scored.
+chk "template_version is its own column" "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='qc_templates' AND column_name='template_version'")"
+chk "one live checklist per code"        "$(Q "SELECT count(*) FROM pg_indexes WHERE indexname='uq_qc_template_live'")"
+chk "retired versions kept whole"        "$(Q "SELECT count(*) FROM qc_templates WHERE retired_at IS NOT NULL")"
+chk "...with their parameters intact"    "$(Q "SELECT count(*) FROM qc_parameters p JOIN qc_templates t ON t.id=p.template_id WHERE NOT t.is_active")"
+chk "old inspections still readable"     "$(Q "SELECT count(*) FROM qc_results r JOIN qc_parameters p ON p.id=r.parameter_id")"
+grep -q "Retire FIRST" server/src/modules/masters.ts \
+  && ok "the live index is respected on supersede" || no "supersede" "order trips the index"
+
+# A choice is scored; the score drives the result.
+grep -q "normaliseOptions" server/src/modules/masters.ts \
+  && ok "choice scores survive an edit" || no "options" "scores are dropped"
+grep -q "optionsToText" web/src/pages/Catalogue.tsx \
+  && ok "...and are editable as text" || no "editor" "cannot see scores"
+
+# Assigning a checklist to a product.
+grep -q "products/:id/qc-template" server/src/modules/masters.ts \
+  && ok "a product can be pointed at one" || no "assign" "no way to set it"
+grep -q "What each product is checked against" web/src/pages/Catalogue.tsx \
+  && ok "...from the same screen" || no "assign UI" "missing"
+chk "every product has a checklist" "$(Q "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM products WHERE is_active AND qc_template_id IS NULL)")"
+
 echo "── 59 · the fourth round"
 # The supplier is agreeing to goods, not to a document number.
 grep -q "What we want" web/src/pages/SupplierPortal.tsx \
@@ -287,7 +441,7 @@ grep -q "count: z.coerce.number().int().min(1).max(200" server/src/modules/recei
   && ok "10 boxes of 20 kg in one entry" || no "bulk boxes" "one at a time"
 grep -q "generate_series(1, \$13::int)" server/src/modules/receiving.ts \
   && ok "...still one row per box, each voidable" || no "bulk boxes" "stored as one row"
-grep -q "Weigh the boxes" web/src/pages/Receiving.tsx \
+grep -q "nav(\`/unload/" web/src/pages/Receiving.tsx \
   && ok "the gate offers the box scale instead" || no "gate" "no way to the boxes"
 grep -q "Booked in — the crates are still on the floor" web/src/pages/Grn.tsx \
   && ok "a posted receipt points at the bench" || no "receipt" "dead ends"
@@ -417,6 +571,152 @@ grep -q "finance/payments/" web/src/pages/FinanceDesk.tsx \
   && ok "a payment made in error can be reversed" || no "reverse" "no way in"
 chk "reversals recorded"    "$(Q "SELECT count(*) FROM payments WHERE status='REVERSED'")"
 chk "...and the money owed again" "$(Q "SELECT count(*) FROM payment_requests pr JOIN payments p ON p.request_id=pr.id WHERE p.status='REVERSED' AND pr.status<>'PAID'")"
+
+echo "── 46 · who paid for the lorry in"
+# Both directions, because there are two of them and each was a separate gap:
+# the supplier charging to bring it, and us paying somebody to fetch it.
+chk "the supplier can name their fare" \
+  "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='payment_requests' AND column_name='transport_amount'")"
+chk "a collection can carry a fare" \
+  "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='pickups' AND column_name='transport_cost'")"
+# Both columns must accept NULL: "nobody has priced this yet" is not "free",
+# and the money_amt domain would have flattened the two together.
+NN=$(Q "SELECT count(*) FROM information_schema.columns WHERE is_nullable='NO' AND (
+        (table_name='pickups' AND column_name='transport_cost')
+     OR (table_name='payment_requests' AND column_name='transport_amount'))")
+[ "$NN" = "0" ] && ok "an unpriced trip is not a free one" || no "freight columns" "$NN NOT NULL"
+grep -q "transportCost" server/src/modules/supplier.ts \
+  && ok "asked on the form where they name the lorry" || no "supplier freight" "no field"
+grep -q "needVehicle" server/src/modules/supplier.ts \
+  && grep -q "we are paying for the transport" server/src/modules/supplier.ts \
+  && ok "only one side pays for the same journey" || no "double charge" "not guarded"
+grep -q "pickups/:id/cost" server/src/modules/receiving.ts \
+  && ok "the fare can be recorded after the trip" || no "fare" "no endpoint"
+grep -q "raiseFreightClaim" server/src/modules/receiving.ts \
+  && ok "a fare somebody must be paid reaches Finance" || no "fare claim" "goes nowhere"
+chk "freight spread over the kilos it brought" \
+  "$(Q "SELECT count(*) FROM pg_views WHERE viewname='v_inbound_freight_per_kg'")"
+# The whole point: it has to come out the far end in the price.
+chk "…and lands in what the produce cost" \
+  "$(Q "SELECT count(*) FROM v_batch_pricing WHERE freight_in > 0")"
+chk "…before the margin, not after" \
+  "$(Q "SELECT count(*) FROM v_batch_pricing WHERE min_sell_price > true_cost AND freight_in > 0")"
+grep -q "is transport" web/src/pages/FinanceDesk.tsx \
+  && ok "Finance sees which part was the lorry" || no "finance view" "fare is buried"
+grep -q "supplier_freight" server/src/modules/receiving.ts \
+  && grep -q "already charging" web/src/pages/Dispatch.tsx \
+  && ok "warned before booking a lorry they are already billing for" \
+  || no "double freight" "not surfaced"
+# A claim Finance turned down is not a cost the produce should carry.
+chk "a rejected claim buys no freight" \
+  "$(Q "SELECT count(*) FROM pg_views WHERE viewname='v_inbound_freight_per_kg' AND definition LIKE '%REJECTED%'")"
+
+echo "── 51 · the margin, and the price it puts on a box"
+# Where the admin sets it: a company default, and an override per product.
+chk "a company-wide profit target"  "$(Q "SELECT count(*) FROM companies WHERE default_margin_pct > 0")"
+chk "…overridable per product"      "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='products' AND column_name='min_margin_pct'")"
+grep -q "margin_is_own" web/src/pages/Catalogue.tsx \
+  && ok "the screen says which of the two is in force" || no "margin source" "not shown"
+grep -q "minMarginPct: ownMargin ? Number(margin) : null" web/src/pages/Catalogue.tsx \
+  && ok "off puts it back on the default, not on the same number" \
+  || no "margin reset" "cannot go back to the default"
+# One definition of the cost. Two views compute it, and they must agree.
+chk "the per-product view carries freight in" \
+  "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='v_product_pricing' AND column_name='freight_in'")"
+DIFF=$(Q "SELECT count(*) FROM v_product_pricing pp WHERE abs(pp.total_cost
+        - (pp.cost_to_warehouse + pp.overhead_cost + pp.freight_in + pp.cost_to_centre)) > 0.02")
+[ "$DIFF" = "0" ] && ok "the columns on screen add up to the total" \
+  || no "cost breakdown" "$DIFF products do not add up"
+# The floor must never be under the cost it was derived from.
+BAD=$(Q "SELECT count(*) FROM v_product_pricing WHERE min_sell_price < total_cost AND total_cost > 0")
+[ "$BAD" = "0" ] && ok "the floor always clears the cost" || no "floor" "$BAD below cost"
+# And the box price on the bench comes from that, rather than from memory.
+grep -q "function suggestPrice" web/src/pages/PackBench.tsx \
+  && ok "the label price is worked out, not typed from memory" \
+  || no "pack price" "still blank"
+grep -q "Math.ceil" web/src/pages/PackBench.tsx \
+  && ok "…rounded up, so it never lands under the floor" || no "rounding" "may fall short"
+grep -c "pricedByHand" web/src/pages/PackBench.tsx | grep -qv '^0$' \
+  && ok "…and the person at the bench can overrule it" || no "override" "not editable"
+grep -q "if (pricedByHand) setPriceByGrade" web/src/pages/PackBench.tsx \
+  && ok "a worked-out price is not remembered as a decision" \
+  || no "price memory" "freezes the suggestion"
+chk "boxes carry a price" "$(Q "SELECT count(*) FROM packs WHERE status='IN_STOCK' AND price > 0")"
+
+echo "── 52 · order in any unit, name the goods, sort by time"
+# The unit belongs to the order, not to the product: a thing held in boxes is
+# often bought by the kilo, and the rate follows whichever is chosen.
+grep -q "function uomChoices" web/src/pages/Purchase.tsx \
+  && ok "an order line can change its unit" || no "line uom" "fixed to the product"
+chk "…and the unit is stored per line" \
+  "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='po_lines' AND column_name='uom'")"
+chk "…proven: a BOX product ordered in KG" \
+  "$(Q "SELECT count(*) FROM po_lines l JOIN products p ON p.id=l.product_id
+         WHERE p.purchase_uom <> l.uom")"
+# Finance approves a name and a number unless the goods are on the row.
+grep -q "si2.po_id" server/src/modules/finance.ts \
+  && ok "a supplier's own invoice still names the goods" \
+  || no "finance goods" "blank when the invoice has no lines"
+BLANK=$(Q "SELECT count(*) FROM payment_requests pr
+            JOIN supplier_invoices si ON si.id = pr.source_id
+           WHERE pr.source_type='supplier_invoice' AND pr.status <> 'CANCELLED'
+             AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.invoice_id=si.id)
+             AND NOT EXISTS (SELECT 1 FROM po_lines l WHERE l.po_id=si.po_id)")
+[ "$BLANK" = "0" ] && ok "…no claim left without something to check it against" \
+  || no "finance goods" "$BLANK claims name nothing"
+# First come / latest come, on every table that has rows with a time.
+grep -q "const TIME_FIELDS" web/src/components/ui.tsx \
+  && ok "every table sorts by when the row arrived" || no "time sort" "per-page only"
+grep -q "noAddedColumn" web/src/components/ui.tsx \
+  && ok "…with a way out where a row has no age" || no "time sort" "forced everywhere"
+grep -q "String(c.sort(probe) ?? '') === timeOf(probe)" web/src/components/ui.tsx \
+  && ok "…and never twice on a table that already shows it" \
+  || no "time sort" "can duplicate an existing column"
+
+echo "── 53 · what was refused, in what, and where it went"
+# The unit. A rejection printed as a bare number is the start of an argument.
+chk "an inspection records what it was counted in" \
+  "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='qc_inspections' AND column_name='uom'")"
+BARE=$(Q "SELECT count(*) FROM qc_inspections WHERE uom IS NULL")
+[ "$BARE" = "0" ] && ok "…on every inspection ever taken, backfilled" \
+  || no "qc uom" "$BARE inspections still have no unit"
+chk "…and it is the order's unit, not a guess" \
+  "$(Q "SELECT count(*) FROM qc_inspections q JOIN po_lines l ON l.id=q.po_line_id WHERE q.uom = l.uom")"
+chk "…proven on a non-KG line" \
+  "$(Q "SELECT count(*) FROM qc_inspections WHERE uom <> 'KG'")"
+grep -q "i.uom" web/src/pages/Receiving.tsx \
+  && ok "…and no screen prints the number bare" || no "qc list" "still a bare number"
+
+# The send-back: one answer, and it cannot exceed what was refused.
+chk "one place both sides read"  "$(Q "SELECT count(*) FROM pg_views WHERE viewname='v_qc_rejections'")"
+chk "a rejection can be answered" \
+  "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='qc_inspections' AND column_name='return_outcome'")"
+chk "…never for more than was refused" \
+  "$(Q "SELECT count(*) FROM pg_constraint WHERE conname='ck_qc_return_qty'")"
+chk "…and never anonymously"      "$(Q "SELECT count(*) FROM pg_constraint WHERE conname='ck_qc_return_recorded'")"
+# Unanswered is not the same as "nothing went back" — only NULL can say the first.
+NN=$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='qc_inspections'
+        AND column_name='returned_qty' AND is_nullable='NO'")
+[ "$NN" = "0" ] && ok "…and \"nobody has said yet\" is not \"nothing went back\"" \
+  || no "returned_qty" "NOT NULL"
+grep -q "rejections/:id/return" server/src/modules/receiving.ts \
+  && ok "the warehouse is the one who answers" || no "send-back" "no endpoint"
+grep -q "has already been answered" server/src/modules/receiving.ts \
+  && ok "…once, so it cannot be rewritten under the supplier" \
+  || no "send-back" "can be changed after the supplier saw it"
+
+# And the supplier is actually told.
+grep -q "supplierRouter.get('/rejections'" server/src/modules/supplier.ts \
+  && ok "the supplier sees what was refused" || no "supplier view" "still a phone call"
+grep -q "v_qc_rejections" server/src/modules/supplier.ts \
+  && ok "…the same rows the warehouse wrote, not a second count" \
+  || no "supplier view" "computes its own number"
+grep -q "AND supplier_id = \$2" server/src/modules/supplier.ts \
+  && ok "…and only their own" || no "supplier view" "not scoped"
+grep -q "REFUSED_LABEL" web/src/pages/SupplierPortal.tsx \
+  && ok "…said in their words, not the database's" || no "supplier view" "shows SENT_BACK"
+chk "proven: something has actually gone back" \
+  "$(Q "SELECT count(*) FROM qc_inspections WHERE return_outcome='SENT_BACK' AND returned_qty > 0")"
 
 echo "── 43 · filters with totals"
 # This check used to name three pages and pass when those three had filters —

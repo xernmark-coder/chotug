@@ -475,10 +475,94 @@ none, so "what we last paid them" was permanently blank.
 | Method | Path | Permission | Notes |
 |---|---|---|---|
 | POST | `/supplier/orders/:id/request-vehicle` | `supplier.transport.request` | A request, not a booking. Refused if a pickup already exists or they have already asked. Lands in the `TRANSPORT_REQUEST` queue and puts the order at the top of Dispatch |
+| POST | `/supplier/orders/:id/respond` | `supplier.order.accept` | Takes `transportCost` — what the supplier is charging to bring it. Refused together with `needVehicle`: one journey has one payer |
+| POST | `/receiving/pickups` | `logistics.pickup.manage` | Takes `transportCost` where the fare is already agreed |
+| POST | `/receiving/pickups/:id/cost` | `logistics.pickup.manage` | The fare after the trip, which is when it is usually settled. Raises a `TRANSPORT` request against `source_type='pickup'`. Refuses to change a figure Finance is already holding — cancel that request first |
 
 `GET /receiving/pickups/candidates` covers `APPROVED` and `CONFIRMED` orders —
 a lorry takes arranging, and waiting for the supplier's answer loses a day.
-Arranging a pickup clears the request and resolves the task.
+Arranging a pickup clears the request and resolves the task. Each candidate
+carries `supplier_freight`, so nobody books a lorry for a load the supplier is
+already billing us to bring.
+
+#### Who paid for the lorry in
+
+The leg out of the warehouse already reached the price: a transfer carries
+`transport_cost`, `v_outbound_cost_per_kg` spreads it over the kilos moved, and
+`v_batch_pricing` adds it before the margin. The leg *in* had nowhere to be
+recorded, so produce looked cheaper than it was and was priced accordingly.
+
+It arrives two ways and the difference is Finance's:
+
+- **the supplier brings it** — part of what we owe them, so it rides on the one
+  claim the order already has (`payment_requests.transport_amount`), named
+  separately rather than buried in a higher rate per kilo
+- **we send a vehicle** — our own cost, agreed on Dispatch (`pickups.transport_cost`)
+  and raised as a `TRANSPORT` claim so the driver actually gets paid
+
+`v_inbound_freight_per_kg` sums both over the company's overhead window and
+divides by the kilos received in it. A claim Finance rejected buys no freight.
+`v_batch_pricing.freight_in` is where it lands:
+
+```
+bought for + overheads + freight IN + freight OUT
+─────────────────────────────────────────────────  × (1 + margin)
+                1 − wastage
+```
+
+Both columns are `numeric`, not `money_amt`: that domain is `NOT NULL DEFAULT 0`,
+which would make "nobody has priced this yet" indistinguishable from "the trip
+was free" — and Dispatch chases only the first.
+
+#### What was refused, in what, and where it went
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/receiving/rejections` | `quality.inspection.view` | `v_qc_rejections` — everything QC turned away. `?state=open` is the warehouse's queue: refused, and nobody has said what became of it |
+| POST | `/receiving/rejections/:id/return` | `quality.rejection.return` | `SENT_BACK` · `PART_SENT_BACK` · `DESTROYED` · `KEPT_AT_A_DISCOUNT`. Answerable **once** — it cannot be rewritten under a supplier who has already read it |
+| GET | `/supplier/rejections` | `supplier.order.view` | The same rows, scoped to that supplier |
+| POST | `/supplier/rejections/seen` | `supplier.order.view` | They have read it — so a dispute can tell whether they were told at the time |
+
+`qc_inspections.uom` is written at save from the **order line**, because that is
+the unit the supplier is billing in — a rejection and the invoice it argues with
+have to be in the same terms. Forty kilos and forty crates are an argument, and
+before this the record could not settle it; the entry form knew the unit and
+threw it away on save. Every screen that prints a rejected quantity now prints
+the unit with it.
+
+Rejecting and sending back are **two events**, hours apart, done by two people:
+QC decides at the bay, the warehouse puts it on a lorry — or dumps it, or keeps
+it at an agreed discount. The answer hangs off the inspection rather than
+becoming its own document: there is exactly one rejection to answer, the
+quantity can never exceed it (`ck_qc_return_qty`), and it must say who and when
+(`ck_qc_return_recorded`). `returned_qty` is nullable on purpose — "nobody has
+said yet" is the warehouse's queue and is not the same as "nothing went back".
+
+#### Where the margin is set, and where it comes out
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/masters/pricing` | any | `v_product_pricing`: bought at, handling, freight in, to the shop, total cost, margin, wastage, floor, and what it is actually selling at |
+| GET | `/masters/pricing/basis` | any | What the three per-kilo figures are made of, so a number nobody can trace is not a number anybody believes |
+| PUT | `/masters/products/:id/pricing` | `master.pricing.manage` | `minMarginPct: null` puts the product back on the company default — different from setting it to the same number, because it then moves when policy moves |
+
+The company default lives on `companies.default_margin_pct` (Settings); a
+product overrides it with `products.min_margin_pct`. `v_product_pricing`
+carries `margin_is_own` so the screen can say which of the two is in force.
+
+`v_product_pricing` and `v_batch_pricing` compute the same sum at two levels —
+per product across the batches in stock, and per batch. **They must stay in
+step**: the first is what an admin prices against, the second is the floor at
+the packing bench, and a difference between them is a number nobody can
+defend. Both are DROPped and recreated rather than replaced, because
+`CREATE OR REPLACE VIEW` cannot move a column and `freight_in` sits in the
+middle of the costs it belongs between.
+
+The packing bench fills the label price in from that floor — `min_sell_price ×
+box size`, rounded up to the rupee so a suggestion never lands under the floor
+it came from — and leaves it editable. A price the operator sets by hand is
+remembered for that grade; a worked-out one is not, or the next box of a
+different size would carry the last box's price.
 
 ## receiving — invoice-first entry and per-box weighing
 
@@ -677,6 +761,11 @@ number somebody earned beats a star somebody gave them.
 
 | Method | Path | Permission | Notes |
 |---|---|---|---|
+| GET | `/masters/qc-templates` | any | Live checklists with their checks, how many products use each, and how many inspections have been run against it |
+| POST | `/masters/qc-templates` | `quality.template.manage` | Refuses a numeric check with no range (every answer would pass), a choice with nothing to choose from, duplicate check codes, and thresholds that do not descend |
+| PUT | `/masters/qc-templates/:id` | `quality.template.manage` | Never used → changed in place. Used → v1 retired intact, v2 created, products moved. Retires **before** inserting, because `uq_qc_template_live` cannot be deferred |
+| POST | `/masters/qc-templates/:id/retire` | `quality.template.manage` | Needs a reason, and a replacement if products still use it |
+| PUT | `/masters/products/:id/qc-template` | `quality.template.manage` | Which checklist a product is inspected against |
 | GET | `/masters/company` | any | Company UPI, default margin, overhead window, and what **each place actually prints** |
 | PATCH | `/masters/company` | `admin.settings.manage` | |
 

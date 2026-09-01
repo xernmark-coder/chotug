@@ -117,9 +117,22 @@ export function PoListPage() {
 /* ======================================================= PO CREATE ======= */
 type Line = {
   productId: string; name: string; sku: string; uom: string;
+  /* What the product is normally bought and held in. Kept on the line so the
+     unit can be changed here without going back to the catalogue: a supplier
+     who quotes by the box this week and by the kilo the next is normal, and
+     the order has to be able to say which. */
+  purchaseUom?: string; baseUom?: string;
   qty: number; rate: number; expectedWeightKg: number | null;
   requirementLineId?: string | null; expectedGrade?: string;
 };
+
+/* The units this line may be ordered in: what the product is set up for, plus
+   kilos, which everything can ultimately be weighed in. Deduped and never
+   empty, so the select always has the unit currently on the line in it. */
+function uomChoices(l: Line): string[] {
+  return [...new Set([l.uom, l.purchaseUom, l.baseUom, 'KG']
+    .filter(Boolean) as string[])];
+}
 
 export function PoCreatePage() {
   const nav = useNavigate();
@@ -152,6 +165,7 @@ export function PoCreatePage() {
     if (!requirement?.lines) return;
     setLines(requirement.lines.map((l: any) => ({
       productId: l.product_id, name: l.product_name, sku: l.sku, uom: l.uom,
+      purchaseUom: l.purchase_uom, baseUom: l.base_uom,
       qty: Number(l.final_qty) - Number(l.converted_qty ?? 0),
       rate: 0, expectedWeightKg: null, requirementLineId: l.id,
     })).filter((l: Line) => l.qty > 0));
@@ -265,6 +279,7 @@ export function PoCreatePage() {
                   if (!p || lines.some((l) => l.productId === p.id)) return;
                   setLines((s) => [...s, {
                     productId: p.id, name: p.name, sku: p.sku, uom: p.purchase_uom,
+                    purchaseUom: p.purchase_uom, baseUom: p.base_uom,
                     qty: 0, rate: 0, expectedWeightKg: null,
                   }]);
                 }}>
@@ -303,7 +318,18 @@ export function PoCreatePage() {
                                 <input className="inline num" style={{ width: 82 }} type="number" value={l.qty}
                                   onChange={(e) => setLines((s) => s.map((x, j) =>
                                     j === i ? { ...x, qty: Number(e.target.value) } : x))} />
-                                <span className="small muted">{l.uom}</span>
+                                {/* The unit is part of the order, not a fact
+                                    about the product. A product held in boxes
+                                    is often bought by weight, and the rate
+                                    below is per whatever is chosen here. */}
+                                <select className="inline" style={{ width: 78 }} value={l.uom}
+                                  title="What this quantity is counted in. The rate is per this unit."
+                                  onChange={(e) => setLines((s) => s.map((x, j) =>
+                                    j === i ? { ...x, uom: e.target.value } : x))}>
+                                  {uomChoices(l).map((u) => (
+                                    <option key={u} value={u}>{u}</option>
+                                  ))}
+                                </select>
                               </div>
                             </td>
                             <td className="num">
@@ -441,6 +467,7 @@ export function PoCreatePage() {
               setLines((s) => s.some((l) => l.productId === created.id) ? s : [...s, {
                 productId: created.id, name: created.name, sku: created.sku,
                 uom: created.purchase_uom ?? created.base_uom,
+                purchaseUom: created.purchase_uom, baseUom: created.base_uom,
                 qty: 0, rate: 0, expectedWeightKg: null,
               }]);
             }

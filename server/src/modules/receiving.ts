@@ -12,6 +12,7 @@ import {
 } from '../domain/index.js';
 import { qcPhotoAssist } from '../ai/features.js';
 import { checkInvoiceAgainstReceipts } from './costing.js';
+import { createRequest } from './finance.js';
 
 export const receivingRouter = Router();
 receivingRouter.use(authenticate);
@@ -707,12 +708,15 @@ receivingRouter.get('/gate-entries/:id/qc-plan/:productId', h(async (req) => {
        LEFT JOIN qc_templates t ON t.id = p.qc_template_id
       WHERE p.id = $1 AND p.company_id = $2`, [req.params.productId, req.actor.companyId]);
   if (!row) throw ApiError.notFound('Product not found');
-  if (!row.template_id) throw ApiError.rule('No QC template is configured for this product.');
-
-  const parameters = await query(req.actor,
+  /* No checklist is not a refusal. The essential record is the decision — this
+   * much arrived, this much we accept — and it has to be possible whether or
+   * not anybody has written the questions for this product yet. Refusing here
+   * left goods standing at the gate because a product added that morning had
+   * no template. */
+  const parameters = row.template_id ? await query(req.actor,
     `SELECT id, code, label, label_hi, param_type, unit, min_ok, max_ok, options,
             is_critical, is_mandatory, weight, requires_photo, ai_assisted, help_text
-       FROM qc_parameters WHERE template_id = $1 ORDER BY seq`, [row.template_id]);
+       FROM qc_parameters WHERE template_id = $1 ORDER BY seq`, [row.template_id]) : [];
 
   /* The LATEST completed net, not a SUM. Weighments are append-only, so a
    * re-weigh adds a row rather than replacing one — summing them counts the
@@ -734,23 +738,153 @@ receivingRouter.get('/gate-entries/:id/qc-plan/:productId', h(async (req) => {
       WHERE g.id = $1`, [req.params.id]);
 
   const lotQty = Number(lot?.net_kg ?? 0);
-  const sample = sampleSize(lotQty, row.sampling_rule, {
+  /* The sampling rule lives on the checklist, so with no checklist there is no
+   * sample to size — the inspector looks at the load and says what they accept. */
+  const sample = row.sampling_rule ? sampleSize(lotQty, row.sampling_rule, {
     newSupplier: Number(supRisk?.order_count ?? 0) <= 1,
     highRejection: Number(supRisk?.rejection_pct ?? 0) > 8,
-  });
+  }) : 0;
 
   return {
     product: { id: row.id, name: row.name, sku: row.sku, gradesAllowed: row.grades_allowed },
-    template: { id: row.template_id, code: row.template_code, name: row.template_name,
-      version: row.template_version, scoringRule: row.scoring_rule, samplingRule: row.sampling_rule },
+    template: row.template_id
+      ? { id: row.template_id, code: row.template_code, name: row.template_name,
+          version: row.template_version, scoringRule: row.scoring_rule,
+          samplingRule: row.sampling_rule }
+      : null,
     parameters, lotQty, sampleSize: sample,
-    samplingNote: `Inspect ${sample} unit(s) from a lot of ${lotQty}` +
-      (Number(supRisk?.order_count ?? 0) <= 1 ? ' — doubled because this is a new supplier' : '') +
-      (Number(supRisk?.rejection_pct ?? 0) > 8 ? ' — doubled due to a high recent rejection rate' : ''),
+    samplingNote: row.template_id
+      ? `Inspect ${sample} unit(s) from a lot of ${lotQty}`
+        + (Number(supRisk?.order_count ?? 0) <= 1 ? ' — doubled because this is a new supplier' : '')
+        + (Number(supRisk?.rejection_pct ?? 0) > 8 ? ' — doubled due to a high recent rejection rate' : '')
+      : `No checklist has been set up for ${row.name}, so there are no questions to `
+        + 'answer. Record what arrived and what you are accepting — that is the part '
+        + 'that matters. A checklist can be added in Catalogue → Quality checklists.',
   };
 }));
 
 /** F5 — vision pre-fill. Advisory. Never writes an inspection. */
+/* ---------------------------------------------------------------------------
+ * WHAT BECAME OF WHAT WE TURNED AWAY
+ *
+ * Rejecting produce and sending it back are two different events, hours apart,
+ * done by two different people. QC decides at the bay; the warehouse puts it on
+ * a lorry — or dumps it, or the buyer keeps it at a discount. Until now only the
+ * first was recorded, so a supplier whose load was turned away found out by
+ * telephone, if at all, and nobody could say afterwards where it went.
+ * ------------------------------------------------------------------------ */
+
+/** Rejections and what became of them. The warehouse's list. */
+receivingRouter.get('/rejections', requires('quality.inspection.view'), h(async (req) =>
+  query(req.actor,
+    `SELECT * FROM v_qc_rejections
+      WHERE company_id = $1
+        AND ($2 = '' OR ($2 = 'open' AND awaiting_decision)
+                     OR ($2 = 'done' AND NOT awaiting_decision))
+      ORDER BY awaiting_decision DESC, inspected_at DESC
+      LIMIT 300`,
+    [req.actor.companyId, String(req.query.state ?? '')])));
+
+/** The warehouse says what became of it. One answer per rejection. */
+receivingRouter.post('/rejections/:id/return', requires('quality.rejection.return'),
+  h(async (req) => {
+    const input = body(z.object({
+      outcome: z.enum(['SENT_BACK', 'PART_SENT_BACK', 'DESTROYED', 'KEPT_AT_A_DISCOUNT']),
+      /* How much actually went back. Defaulted from the outcome rather than
+       * asked twice: "all of it" means all of it, and the others mean none
+       * unless a number is given. */
+      returnedQty: z.coerce.number().nonnegative().optional(),
+      vehicleReg: z.string().trim().max(20).optional(),
+      note: z.string().trim().max(400).optional(),
+    }), req.body);
+
+    return withTx(req.actor, async (tx) => {
+      const { rows } = await tx.query(
+        `SELECT q.id, q.inspection_no, q.rejected_qty, q.returned_qty, q.uom,
+                q.branch_id, q.warehouse_id, q.product_id,
+                p.name AS product_name,
+                l.po_id, o.po_no, o.supplier_id,
+                COALESCE(s.trade_name, s.legal_name) AS supplier_name
+           FROM qc_inspections q
+           JOIN products p ON p.id = q.product_id
+           LEFT JOIN po_lines        l ON l.id = q.po_line_id
+           LEFT JOIN purchase_orders o ON o.id = l.po_id
+           LEFT JOIN suppliers       s ON s.id = o.supplier_id
+          WHERE q.id = $1 AND q.company_id = $2
+          FOR UPDATE OF q`,
+        [req.params.id, req.actor.companyId]);
+      const q = rows[0];
+      if (!q) throw ApiError.notFound('That inspection does not exist.');
+      if (Number(q.rejected_qty) <= 0) {
+        throw ApiError.rule(
+          'Nothing was rejected on this inspection, so there is nothing to send back.');
+      }
+      /* Answered once. Changing it later would rewrite what the supplier has
+       * already been shown, which is the one thing this record exists to
+       * prevent. */
+      if (q.returned_qty != null) {
+        throw ApiError.rule(
+          `${q.inspection_no} has already been answered. `
+          + 'Raise a new inspection if the goods moved again.');
+      }
+
+      const rejected = Number(q.rejected_qty);
+      const qty = input.returnedQty ?? (input.outcome === 'SENT_BACK' ? rejected : 0);
+      if (qty > rejected + 0.001) {
+        throw ApiError.rule(
+          `Only ${rejected} ${q.uom} was rejected. You cannot send back more than that.`);
+      }
+      if (input.outcome === 'PART_SENT_BACK' && !(qty > 0 && qty < rejected)) {
+        throw ApiError.rule(
+          `"Part of it went back" needs a quantity between 0 and ${rejected} ${q.uom}.`);
+      }
+      if (input.outcome === 'SENT_BACK' && Math.abs(qty - rejected) > 0.001) {
+        throw ApiError.rule(
+          `"All of it went back" means ${rejected} ${q.uom}. `
+          + 'Choose "part of it" for anything less.');
+      }
+      if (input.outcome === 'KEPT_AT_A_DISCOUNT' && !input.note) {
+        throw ApiError.rule(
+          'Say what was agreed — the supplier is being billed for goods we rejected.');
+      }
+
+      const { rows: upd } = await tx.query(
+        `UPDATE qc_inspections
+            SET returned_qty = $3, returned_at = now(), returned_by = $4,
+                return_outcome = $5, return_vehicle_reg = $6, return_note = $7,
+                updated_by = $4
+          WHERE id = $1 AND company_id = $2
+          RETURNING *`,
+        [q.id, req.actor.companyId, qty, req.actor.userId,
+         input.outcome, input.vehicleReg ?? null, input.note ?? null]);
+
+      /* Tell the supplier, on their own panel, the same afternoon. A rejection
+       * they hear about a week later at invoice time is a dispute; one they can
+       * see today is a load they can come and collect. */
+      if (q.supplier_id) {
+        await emit(tx, req.actor, 'qc_inspection', q.id, 'qc.rejection.returned', {
+          inspectionNo: q.inspection_no, poNo: q.po_no, supplierId: q.supplier_id,
+          productName: q.product_name, qty, uom: q.uom, outcome: input.outcome,
+        });
+      }
+
+      const said: Record<string, string> = {
+        SENT_BACK: `All ${rejected} ${q.uom} of ${q.product_name} is going back.`,
+        PART_SENT_BACK: `${qty} of ${rejected} ${q.uom} is going back; the rest stays with us.`,
+        DESTROYED: `${rejected} ${q.uom} written off — nothing is going back.`,
+        KEPT_AT_A_DISCOUNT: `${rejected} ${q.uom} kept at a discount.`,
+      };
+
+      return {
+        ok: true,
+        rejection: upd[0],
+        message: q.supplier_name
+          ? `${said[input.outcome]} ${q.supplier_name} can see it on their panel.`
+          : said[input.outcome],
+      };
+    });
+  }));
+
 receivingRouter.post('/qc/photo-assist', requires('quality.inspection.create'), h(async (req) => {
   const input = body(z.object({
     branchId: z.string().uuid(),
@@ -779,7 +913,9 @@ receivingRouter.post('/gate-entries/:id/inspections', requires('quality.inspecti
   const input = body(z.object({
     productId: z.string().uuid(),
     poLineId: z.string().uuid().nullable().optional(),
-    templateId: z.string().uuid(),
+    /* Nullable: a product with no checklist is still inspected, it just has
+     * no questions to answer. See db/45. */
+    templateId: z.string().uuid().nullable().optional(),
     receivedQty: z.number().positive('Received quantity is required'),
     lotSize: z.number().nonnegative().optional(),
     sampleSize: z.number().nonnegative().optional(),
@@ -794,7 +930,7 @@ receivingRouter.post('/gate-entries/:id/inspections', requires('quality.inspecti
       aiPrefilled: z.boolean().default(false),
       aiValue: z.number().nullable().optional(),
       inspectorChanged: z.boolean().default(false),
-    })).min(1, 'Fill the quality checklist'),
+    })).default([]),
     /** Inspector's final call — may differ from the computed disposition. */
     acceptedQty: z.number().nonnegative(),
     rejectedQty: z.number().nonnegative().default(0),
@@ -856,6 +992,18 @@ receivingRouter.post('/gate-entries/:id/inspections', requires('quality.inspecti
       `SELECT * FROM gate_entries WHERE id=$1 AND company_id=$2`, [req.params.id, req.actor.companyId]);
     const g = gr[0];
     if (!g) throw ApiError.notFound('Gate entry not found');
+
+    /* What these quantities are counted in, from the order line the inspector
+     * is working against — the same unit the supplier is billing in, so a
+     * rejection and the bill it argues with are in the same terms. Where there
+     * is no line behind it, how the product is held. */
+    const { rows: uomRow } = await tx.query(
+      `SELECT COALESCE((SELECT l.uom FROM po_lines l WHERE l.id = $1),
+                       (SELECT p.base_uom FROM products p WHERE p.id = $2),
+                       'KG') AS uom`,
+      [input.poLineId ?? null, input.productId]);
+    const qcUom: string = uomRow[0].uom;
+
     /* The weighbridge is optional.
      *
      * It used to gate this: a vehicle still at ARRIVED could not be inspected
@@ -878,11 +1026,15 @@ receivingRouter.post('/gate-entries/:id/inspections', requires('quality.inspecti
       throw ApiError.rule('The weight variance on this vehicle is waiting for approval. Clear that first.');
     }
 
-    const { rows: tpl } = await tx.query(
-      `SELECT scoring_rule, version FROM qc_templates WHERE id=$1`, [input.templateId]);
-    const { rows: paramRows } = await tx.query(
+    const { rows: tpl } = input.templateId ? await tx.query(
+      `SELECT scoring_rule, version FROM qc_templates WHERE id=$1`, [input.templateId])
+      : { rows: [] as any[] };
+    if (input.templateId && !tpl[0]) throw ApiError.rule('That checklist no longer exists.');
+
+    const { rows: paramRows } = input.templateId ? await tx.query(
       `SELECT id, code, label, param_type, min_ok, max_ok, options, is_critical, weight
-         FROM qc_parameters WHERE template_id=$1 ORDER BY seq`, [input.templateId]);
+         FROM qc_parameters WHERE template_id=$1 ORDER BY seq`, [input.templateId])
+      : { rows: [] as any[] };
 
     const params: QcParam[] = paramRows.map((p: any) => ({
       code: p.code, label: p.label, paramType: p.param_type,
@@ -890,7 +1042,16 @@ receivingRouter.post('/gate-entries/:id/inspections', requires('quality.inspecti
       isCritical: p.is_critical, weight: Number(p.weight),
     }));
 
-    const scored = scoreQc(params, input.answers, tpl[0].scoring_rule);
+    /* With no checklist there is nothing to score. A score computed from no
+     * questions is 100% of nothing, and would read as a clean pass on the
+     * screen that ranks suppliers by it — so there is no score, and the
+     * inspector's own decision stands alone. */
+    const scored: ReturnType<typeof scoreQc> = input.templateId
+      ? scoreQc(params, input.answers, tpl[0].scoring_rule)
+      /* Same shape, deliberately empty. The inspector's own decision is the
+         record; there is nothing to compute a score from. */
+      : { qualityScore: null as any, result: null as any, grade: null as any,
+          criticalFailures: [], perParam: [] };
 
     // If the inspector's disposition contradicts a critical failure, the
     // system requires an explicit override reason (§13.4).
@@ -914,12 +1075,13 @@ receivingRouter.post('/gate-entries/:id/inspections', requires('quality.inspecti
           template_id, template_version, inspector_id, lot_size, sample_size, sampling_note,
           overall_result, received_qty, accepted_qty, rejected_qty, hold_qty, expected_grade,
           assigned_grade, downgraded_from, quality_score, critical_failures, rejection_reason_codes,
-          ai_run_id, ai_overridden, override_reason, remarks, created_by, updated_by)
+          ai_run_id, ai_overridden, override_reason, remarks, uom, created_by, updated_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
-               $24,$25,$26,$27,$28,$29,$29)
+               $24,$25,$26,$27,$30,$28,$29,$29)
        RETURNING *`,
       [req.actor.companyId, g.branch_id, g.warehouse_id, inspectionNo, g.id,
-       input.poLineId ?? null, input.productId, input.templateId, tpl[0].version, req.actor.userId,
+       input.poLineId ?? null, input.productId, input.templateId ?? null,
+       tpl[0]?.version ?? null, req.actor.userId,
        input.lotSize ?? input.receivedQty, input.sampleSize ?? null, input.samplingNote ?? null,
        inspectorResult, input.receivedQty, input.acceptedQty, input.rejectedQty, input.holdQty,
        input.expectedGrade ?? null, input.assignedGrade ?? scored.grade,
@@ -927,7 +1089,12 @@ receivingRouter.post('/gate-entries/:id/inspections', requires('quality.inspecti
          ? input.expectedGrade : null,
        scored.qualityScore, scored.criticalFailures, input.rejectionReasonCodes,
        input.aiRunId ?? null, !!input.overrideReason, input.overrideReason ?? null,
-       input.remarks ?? null, req.actor.userId]);
+       input.remarks ?? null, req.actor.userId,
+       /* The unit these numbers are in. The form has always known it — every
+        * box on it is labelled "Rejected (CRATE)" from the order line — and
+        * every screen downstream then printed a bare number against a
+        * supplier's name. Forty kilos and forty crates are an argument. */
+       qcUom]);
 
     const inspection = ins[0];
 
@@ -1307,12 +1474,16 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
 
         /* --- put-away suggestion (§15): FEFO/FIFO + storage type match ---- */
         const { rows: bin } = await tx.query(
+          /* v_bin_fill, not bins.current_fill_kg — nothing maintains the
+           * stored column, so every shelf looked empty and this always
+           * suggested the same one and never noticed a full one. */
           `SELECT b.id AS bin_id, r.id AS rack_id, z.id AS zone_id
              FROM bins b JOIN racks r ON r.id = b.rack_id JOIN zones z ON z.id = r.zone_id
+             JOIN v_bin_fill f ON f.bin_id = b.id
             WHERE z.warehouse_id = $1 AND b.is_active AND z.is_active
               AND z.storage_type = $2
-              AND (b.capacity_kg IS NULL OR b.current_fill_kg + $3 <= b.capacity_kg)
-            ORDER BY b.is_pickface DESC, b.current_fill_kg ASC LIMIT 1`,
+              AND (b.capacity_kg IS NULL OR f.fill_kg + $3 <= b.capacity_kg)
+            ORDER BY b.is_pickface DESC, f.fill_kg ASC LIMIT 1`,
           [g.warehouse_id, p?.storage_type ?? 'AMBIENT', l.netWeightKg ?? 0]);
 
         /* The next job is the bench, not a put-away.
@@ -1554,13 +1725,17 @@ receivingRouter.get('/pickups', h(async (req) =>
   query(req.actor,
     `SELECT p.*, s.trade_name AS supplier_name, s.phone AS supplier_phone,
             o.po_no, o.grand_total, w.name AS warehouse_name,
-            d.full_name AS driver_name, d.phone AS driver_phone, v.reg_no AS vehicle_no
+            d.full_name AS driver_name, d.phone AS driver_phone, v.reg_no AS vehicle_no,
+            pr.request_no AS fare_request_no, pr.status AS fare_status
        FROM pickups p
        JOIN suppliers s ON s.id = p.supplier_id
        JOIN purchase_orders o ON o.id = p.po_id
        LEFT JOIN warehouses w ON w.id = p.warehouse_id
        LEFT JOIN drivers d ON d.id = p.driver_id
        LEFT JOIN vehicles v ON v.id = p.vehicle_id
+       LEFT JOIN payment_requests pr ON pr.company_id = p.company_id
+                                    AND pr.source_type = 'pickup' AND pr.source_id = p.id
+                                    AND pr.status <> 'CANCELLED'
       WHERE p.company_id = $1
         AND ($2 = '' OR p.status = $2)
       ORDER BY (p.status = 'DELIVERED'), p.pickup_on DESC, p.created_at DESC
@@ -1575,6 +1750,19 @@ receivingRouter.get('/pickups/candidates', requires('logistics.pickup.manage'), 
             o.transport_requested_at, o.transport_request_note,
             s.id AS supplier_id, s.trade_name AS supplier_name,
             s.phone AS supplier_phone,
+            /* What the supplier is already charging to bring this one.
+             *
+             * Sending a vehicle to an order the supplier is billing us freight
+             * for means paying twice for one journey. Not forbidden — their
+             * lorry may have fallen through — but nobody should do it without
+             * being told, and the number was invisible on this screen. */
+            (SELECT pr.transport_amount FROM payment_requests pr
+              LEFT JOIN supplier_invoices si ON si.id = pr.source_id
+              WHERE pr.company_id = o.company_id
+                AND pr.transport_amount > 0
+                AND pr.status NOT IN ('CANCELLED', 'REJECTED')
+                AND (pr.source_id = o.id OR si.po_id = o.id)
+              LIMIT 1) AS supplier_freight,
             NULLIF(concat_ws(', ',
               s.address->>'line1', s.address->>'line2',
               s.address->>'city', s.address->>'state'), '') AS pickup_address
@@ -1594,6 +1782,40 @@ receivingRouter.get('/pickups/candidates', requires('logistics.pickup.manage'), 
         o.expected_date LIMIT 100`,
     [req.actor.companyId])));
 
+/* The fare for a vehicle we sent, raised with Finance as its own claim.
+ *
+ * It is the same reasoning as a centre transfer: a cost typed onto a document
+ * and never paid to anybody is not a cost, it is a note. This way the driver
+ * gets paid, and v_inbound_freight_per_kg finds the money and puts it into the
+ * price of what the lorry brought.
+ */
+async function raiseFreightClaim(
+  tx: any, actor: any, pickup: any, poNo: string, note?: string | null,
+) {
+  const { rows: cat } = await tx.query(
+    `SELECT id FROM expense_categories WHERE company_id=$1 AND code='TRANSPORT'`,
+    [actor.companyId]);
+  const { rows: who } = await tx.query(
+    `SELECT COALESCE(d.full_name, v.transporter_name, v.reg_no, 'Transport') AS payee
+       FROM pickups p
+       LEFT JOIN drivers d ON d.id = p.driver_id
+       LEFT JOIN vehicles v ON v.id = p.vehicle_id
+      WHERE p.id = $1`, [pickup.id]);
+
+  return createRequest(tx, actor, {
+    kind: 'TRANSPORT',
+    amount: Number(pickup.transport_cost),
+    payeeName: who[0]?.payee ?? 'Transport',
+    branchId: pickup.branch_id,
+    expenseCategoryId: cat[0]?.id ?? null,
+    warehouseId: pickup.warehouse_id,
+    note: [`${pickup.pickup_no} collecting ${poNo}`, note].filter(Boolean).join(' — '),
+    sourceType: 'pickup',
+    sourceId: pickup.id,
+    systemRaised: true,
+  });
+}
+
 receivingRouter.post('/pickups', requires('logistics.pickup.manage'), h(async (req) => {
   const input = body(z.object({
     poId: z.string().uuid(),
@@ -1606,6 +1828,11 @@ receivingRouter.post('/pickups', requires('logistics.pickup.manage'), h(async (r
      * second is what actually happens with a pool of freelance vehicles. */
     driverId: z.string().uuid().nullable().optional(),
     vehicleId: z.string().uuid().nullable().optional(),
+    /* What the trip costs us, where we are the ones sending the vehicle. Often
+     * not known until the driver has been and the fare is agreed, so it can be
+     * left out here and filled in afterwards on /pickups/:id/cost. */
+    transportCost: z.coerce.number().nonnegative().optional(),
+    costNote: z.string().trim().max(300).optional(),
   }), req.body);
 
   return withTx(req.actor, async (tx) => {
@@ -1634,16 +1861,22 @@ receivingRouter.post('/pickups', requires('logistics.pickup.manage'), h(async (r
     const { rows } = await tx.query(
       `INSERT INTO pickups (company_id, branch_id, pickup_no, po_id, supplier_id, warehouse_id,
              pickup_on, window_start, window_end, pickup_address, notes,
-             driver_id, vehicle_id, assigned_at, status, created_by, updated_by)
+             driver_id, vehicle_id, assigned_at, status, transport_cost, cost_note,
+             created_by, updated_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
                CASE WHEN $12::uuid IS NULL THEN NULL ELSE now() END,
                CASE WHEN $12::uuid IS NULL THEN 'OFFERED' ELSE 'ASSIGNED' END,
-               $14,$14)
+               $15,$16,$14,$14)
        RETURNING *`,
       [req.actor.companyId, po.branch_id, pickupNo, po.id, po.supplier_id, po.warehouse_id,
        input.pickupOn, input.windowStart || null, input.windowEnd || null,
        input.pickupAddress || po.pickup_address || null,
-       input.notes ?? null, input.driverId ?? null, input.vehicleId ?? null, req.actor.userId]);
+       input.notes ?? null, input.driverId ?? null, input.vehicleId ?? null, req.actor.userId,
+       input.transportCost ?? null, input.costNote ?? null]);
+
+    if (input.transportCost && input.transportCost > 0) {
+      await raiseFreightClaim(tx, req.actor, rows[0], po.po_no, input.costNote);
+    }
 
     /* If the supplier asked for this, the asking is now answered. Leaving the
      * flag up would keep the order at the top of the list forever. */
@@ -1655,6 +1888,68 @@ receivingRouter.post('/pickups', requires('logistics.pickup.manage'), h(async (r
     await emit(tx, req.actor, 'pickup', rows[0].id, 'pickup.created',
       { pickupNo, poNo: po.po_no, offered: !assigned });
     return rows[0];
+  });
+}));
+
+/* What the trip actually cost, once the fare is agreed.
+ *
+ * Separate from arranging the vehicle because that is how it happens: the
+ * vehicle is booked today and the driver names his price when he gets back.
+ */
+receivingRouter.post('/pickups/:id/cost', requires('logistics.pickup.manage'), h(async (req) => {
+  const input = body(z.object({
+    transportCost: z.coerce.number().nonnegative('A fare cannot be negative'),
+    costNote: z.string().trim().max(300).optional(),
+  }), req.body);
+
+  return withTx(req.actor, async (tx) => {
+    const { rows: before } = await tx.query(
+      `SELECT p.id, p.pickup_no, p.status, p.transport_cost, p.branch_id, p.warehouse_id,
+              o.po_no
+         FROM pickups p JOIN purchase_orders o ON o.id = p.po_id
+        WHERE p.id = $1 AND p.company_id = $2 FOR UPDATE OF p`,
+      [req.params.id, req.actor.companyId]);
+    const p = before[0];
+    if (!p) throw ApiError.notFound('Pickup not found');
+    if (p.status === 'CANCELLED') {
+      throw ApiError.rule('That pickup was cancelled — there is no fare to record.');
+    }
+    /* Finance may already be holding a claim for the old figure. Changing the
+     * number underneath it would leave the two disagreeing about what is owed,
+     * so the claim has to be settled or withdrawn first. */
+    const { rows: claim } = await tx.query(
+      `SELECT request_no, status FROM payment_requests
+        WHERE company_id=$1 AND source_type='pickup' AND source_id=$2
+          AND status <> 'CANCELLED'`,
+      [req.actor.companyId, p.id]);
+    if (claim[0] && Number(p.transport_cost) !== input.transportCost) {
+      throw ApiError.rule(
+        `${claim[0].request_no} is already with Finance for ₹${Number(p.transport_cost).toFixed(0)}. `
+        + 'Cancel that request first if the fare has changed.');
+    }
+
+    const { rows } = await tx.query(
+      `UPDATE pickups SET transport_cost=$3, cost_note=$4, updated_by=$5, updated_at=now()
+        WHERE id=$1 AND company_id=$2 RETURNING *`,
+      [p.id, req.actor.companyId, input.transportCost, input.costNote ?? null,
+       req.actor.userId]);
+
+    let requestNo: string | null = null;
+    if (input.transportCost > 0) {
+      const pr = await raiseFreightClaim(tx, req.actor, rows[0], p.po_no, input.costNote);
+      requestNo = pr?.request_no ?? null;
+    }
+    await emit(tx, req.actor, 'pickup', p.id, 'pickup.cost.recorded',
+      { pickupNo: p.pickup_no, amount: input.transportCost, requestNo });
+
+    return {
+      ok: true, pickup: rows[0], requestNo,
+      message: !requestNo
+        ? 'Recorded — nothing to pay.'
+        : claim[0]
+          ? `Unchanged — ${requestNo} is already with Finance for ₹${input.transportCost.toFixed(0)}.`
+          : `₹${input.transportCost.toFixed(0)} sent to Finance as ${requestNo}.`,
+    };
   });
 }));
 

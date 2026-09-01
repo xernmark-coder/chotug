@@ -366,7 +366,8 @@ planningRouter.get('/requirements/:id', h(async (req) => {
       WHERE r.id = $1 AND r.company_id = $2`, [req.params.id, req.actor.companyId]);
   if (!r) throw ApiError.notFound('Requirement not found');
   const lines = await query(req.actor,
-    `SELECT l.*, p.sku, p.name AS product_name, p.name_hi AS product_name_hi
+    `SELECT l.*, p.sku, p.name AS product_name, p.name_hi AS product_name_hi,
+            p.purchase_uom, p.base_uom
        FROM requirement_lines l JOIN products p ON p.id = l.product_id
       WHERE l.requirement_id = $1 ORDER BY l.line_no`, [req.params.id]);
   return { ...r, lines };
@@ -678,6 +679,7 @@ planningRouter.post('/purchase-orders', requires('purchase.po.create'), h(async 
 planningRouter.get('/purchase-orders', h(async (req) =>
   query(req.actor,
     `SELECT o.id, o.po_no, o.doc_type, o.order_date, o.expected_date, o.status, o.source_type,
+            o.created_at,
             o.grand_total, o.is_urgent, o.revision_no,
             s.trade_name AS supplier_name, s.legal_name AS supplier_legal_name,
             b.name AS branch_name,

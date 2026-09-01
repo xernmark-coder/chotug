@@ -243,7 +243,12 @@ VALUES
  ('01919000-0000-7000-8000-000000000091','01919000-0000-7000-8000-000000000001','QC-VEG-GEN','Vegetable — General','सब्ज़ी सामान्य','01919000-0000-7000-8000-000000000052',1,true),
  ('01919000-0000-7000-8000-000000000092','01919000-0000-7000-8000-000000000001','QC-FRU-GEN','Fruit — General','फल सामान्य','01919000-0000-7000-8000-000000000051',1,true),
  ('01919000-0000-7000-8000-000000000093','01919000-0000-7000-8000-000000000001','QC-LEAFY','Leafy Greens','पत्तेदार','01919000-0000-7000-8000-000000000053',1,true)
-ON CONFLICT (company_id, code, version) DO NOTHING;
+-- Keyed on the id, which these rows state explicitly and which is the primary
+-- key. It used to be (company_id, code, version) — the unique constraint that
+-- db/43 replaces, because `version` there is the optimistic-locking counter a
+-- trigger bumps on every update, not the template's own version. The seed then
+-- failed on a re-run against a database that had been migrated.
+ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO qc_parameters (company_id, template_id, seq, code, label, label_hi, param_type, unit,
                            min_ok, max_ok, options, is_critical, is_mandatory, weight, requires_photo,
