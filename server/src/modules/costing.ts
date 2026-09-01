@@ -78,6 +78,215 @@ costingRouter.get('/landing-cost/:grnId/known-charges', h(async (req) => {
   };
 }));
 
+/* The freight this receipt's order already has on record — the supplier's own
+ * charge, or the fare we agreed with a driver. Written as a charge on the
+ * receipt so the landed cost picks it up like any other, and marked AUTO so a
+ * recompute can tell it apart from something a person typed. */
+export async function autoFreightCharges(tx: Tx, actor: Actor, grnId: string) {
+  const { rows: g } = await tx.query(
+    `SELECT g.id, g.po_id FROM grns g WHERE g.id = $1 AND g.company_id = $2`,
+    [grnId, actor.companyId]);
+  if (!g[0]?.po_id) return [];
+
+  const { rows: ct } = await tx.query(
+    `SELECT id FROM charge_types WHERE company_id = $1 AND code = 'TRANSPORT' LIMIT 1`,
+    [actor.companyId]);
+  if (!ct[0]) return [];
+
+  const { rows } = await tx.query(
+    `SELECT COALESCE(SUM(amount), 0) AS freight FROM (
+        SELECT pr.transport_amount AS amount
+          FROM payment_requests pr
+          LEFT JOIN supplier_invoices si ON si.id = pr.source_id
+         WHERE pr.company_id = $1 AND pr.transport_amount > 0
+           AND pr.status NOT IN ('CANCELLED', 'REJECTED')
+           AND (pr.source_id = $2 OR si.po_id = $2)
+        UNION ALL
+        SELECT pk.transport_cost
+          FROM pickups pk
+         WHERE pk.company_id = $1 AND pk.po_id = $2
+           AND pk.transport_cost > 0 AND pk.status <> 'CANCELLED') x`,
+    [actor.companyId, g[0].po_id]);
+
+  const freight = Number(rows[0]?.freight ?? 0);
+  return freight > 0
+    ? [{ chargeTypeId: ct[0].id, amount: round(freight, 2), allocationBasis: 'WEIGHT' as const }]
+    : [];
+}
+
+/* Working out the landed cost, in one place.
+ *
+ * Called by the button on the receipt AND by the receipt itself the moment it
+ * is posted — because everything the sum needs is already known by then, and a
+ * cost that waits for somebody to press Recompute is a cost that is wrong on
+ * every screen until they do. */
+export async function computeLandingFor(
+  tx: Tx, actor: Actor, grnId: string,
+  input: {
+    costStatus: 'ESTIMATED' | 'ACTUAL';
+    charges: { chargeTypeId: string; amount: number; allocationBasis?: any;
+               supplierId?: string | null; referenceNo?: string | null }[];
+    discountTotal: number;
+    replaceCharges: boolean;
+  },
+) {
+  const { rows: grnRows } = await tx.query(
+    `SELECT g.*, s.trade_name AS supplier_name FROM grns g
+       JOIN suppliers s ON s.id = g.supplier_id
+      WHERE g.id=$1 AND g.company_id=$2`, [grnId, actor.companyId]);
+  const grn = grnRows[0];
+  if (!grn) throw ApiError.notFound('Goods receipt not found');
+  if (grn.status !== 'POSTED') throw ApiError.rule('Landing cost can only be computed for a posted receipt.');
+
+  if (input.replaceCharges) {
+    await tx.query(`DELETE FROM purchase_charges WHERE doc_type='GRN' AND doc_id=$1 AND source='MANUAL'`, [grn.id]);
+  }
+  for (const c of input.charges) {
+    const { rows: ct } = await tx.query(
+      `SELECT allocation_basis, is_creditable, affects_landing_cost FROM charge_types WHERE id=$1`,
+      [c.chargeTypeId]);
+    if (!ct[0]) throw ApiError.badRequest('Unknown charge type');
+    await tx.query(
+      `INSERT INTO purchase_charges (company_id, doc_type, doc_id, charge_type_id, amount,
+            allocation_basis, is_creditable, affects_landing_cost, supplier_id, reference_no,
+            source, created_by)
+       VALUES ($1,'GRN',$2,$3,$4,$5,$6,$7,$8,$9,'MANUAL',$10)`,
+      [actor.companyId, grn.id, c.chargeTypeId, c.amount,
+       c.allocationBasis ?? ct[0].allocation_basis, ct[0].is_creditable,
+       ct[0].affects_landing_cost, c.supplierId ?? null, c.referenceNo ?? null, actor.userId]);
+  }
+
+  // Charges can come from the PO as well as be added at receipt.
+  const { rows: chargeRows } = await tx.query(
+    `SELECT ct.code, pc.amount, pc.allocation_basis, pc.is_creditable, pc.affects_landing_cost
+       FROM purchase_charges pc JOIN charge_types ct ON ct.id = pc.charge_type_id
+      WHERE pc.doc_type='GRN' AND pc.doc_id=$1
+      UNION ALL
+     SELECT ct.code, poc.amount, poc.allocation_basis, poc.is_creditable, true
+       FROM po_charges poc JOIN charge_types ct ON ct.id = poc.charge_type_id
+      WHERE poc.po_id = $2 AND poc.borne_by <> 'SUPPLIER'`,
+    [grn.id, grn.po_id]);
+
+  const charges: Charge[] = chargeRows.map((c: any) => ({
+    code: c.code, amount: Number(c.amount), basis: c.allocation_basis,
+    isCreditable: c.is_creditable, affectsLandingCost: c.affects_landing_cost,
+  }));
+
+  const { rows: lineRows } = await tx.query(
+    `SELECT l.id, l.product_id, l.batch_id, l.accepted_qty, l.net_weight_kg, l.rate,
+            p.default_wastage_pct, p.name AS product_name, p.sku,
+            (SELECT b2.landed_rate_per_kg FROM batches b2
+               JOIN grn_lines gl2 ON gl2.id = b2.grn_line_id
+               JOIN grns g2 ON g2.id = gl2.grn_id
+              WHERE b2.product_id = l.product_id AND g2.id <> $2 AND b2.landed_rate_per_kg IS NOT NULL
+              ORDER BY g2.posting_date DESC LIMIT 1) AS prev_landed_rate_per_kg
+       FROM grn_lines l JOIN products p ON p.id = l.product_id
+      WHERE l.grn_id=$1 AND l.accepted_qty > 0 ORDER BY l.line_no`, [grn.id, grn.id]);
+
+  if (lineRows.length === 0) throw ApiError.rule('This receipt has no accepted quantity to cost.');
+
+  const costLines: CostLine[] = lineRows.map((l: any) => ({
+    grnLineId: l.id, productId: l.product_id, batchId: l.batch_id,
+    acceptedQty: Number(l.accepted_qty),
+    acceptedWeightKg: Number(l.net_weight_kg ?? l.accepted_qty),
+    baseRate: Number(l.rate), wastagePct: Number(l.default_wastage_pct ?? 0),
+    prevLandedRatePerKg: l.prev_landed_rate_per_kg ? Number(l.prev_landed_rate_per_kg) : null,
+  }));
+
+  const result = computeLandingCost(costLines, charges, input.discountTotal);
+
+  const { rows: est } = await tx.query(
+    `SELECT total_landed FROM landing_costs WHERE grn_id=$1 AND cost_status='ESTIMATED'`, [grn.id]);
+  const estimated = est[0] ? Number(est[0].total_landed) : Number(grn.total_value ?? 0);
+  const varianceVsEstimate = money(result.totals.totalLanded - estimated);
+  const varianceVsEstimatePct = estimated > 0
+    ? round((varianceVsEstimate / estimated) * 100, 4) : null;
+
+  // §16 — abnormal jump detection against this product's own history.
+  const jumpLimit = Number(await getSetting(tx, actor, 'costing.abnormal_jump_pct', 15));
+  let isAbnormal = false;
+  const abnormalProducts: string[] = [];
+  for (const [i, l] of result.lines.entries()) {
+    if (l.rateChangePct != null && Math.abs(l.rateChangePct) > jumpLimit) {
+      isAbnormal = true;
+      abnormalProducts.push(`${lineRows[i].product_name} (${l.rateChangePct > 0 ? '+' : ''}${l.rateChangePct}%)`);
+    }
+  }
+
+  const { rows: lc } = await tx.query(
+    `INSERT INTO landing_costs (company_id, branch_id, grn_id, cost_status, base_amount,
+          discount_amount, total_charges, non_creditable_tax, wastage_provision, total_landed,
+          estimated_total, variance_vs_estimate, variance_vs_estimate_pct, is_abnormal,
+          margin_risk_flag, snapshot, rule_version, computed_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'1.0',$17)
+     ON CONFLICT (grn_id, cost_status) DO UPDATE SET
+          base_amount=EXCLUDED.base_amount, discount_amount=EXCLUDED.discount_amount,
+          total_charges=EXCLUDED.total_charges, non_creditable_tax=EXCLUDED.non_creditable_tax,
+          wastage_provision=EXCLUDED.wastage_provision, total_landed=EXCLUDED.total_landed,
+          estimated_total=EXCLUDED.estimated_total,
+          variance_vs_estimate=EXCLUDED.variance_vs_estimate,
+          variance_vs_estimate_pct=EXCLUDED.variance_vs_estimate_pct,
+          is_abnormal=EXCLUDED.is_abnormal, snapshot=EXCLUDED.snapshot,
+          computed_at=now(), computed_by=EXCLUDED.computed_by
+     RETURNING *`,
+    [actor.companyId, grn.branch_id, grn.id, input.costStatus,
+     result.totals.baseAmount, result.totals.discountAmount, result.totals.totalCharges,
+     result.totals.nonCreditableTax, result.totals.wastageProvision, result.totals.totalLanded,
+     estimated, varianceVsEstimate, varianceVsEstimatePct, isAbnormal, isAbnormal,
+     JSON.stringify({ charges, lines: result.lines, jumpLimit }), actor.userId]);
+
+  await tx.query(`DELETE FROM landing_cost_lines WHERE landing_cost_id=$1`, [lc[0].id]);
+  for (const l of result.lines) {
+    await tx.query(
+      `INSERT INTO landing_cost_lines (company_id, landing_cost_id, grn_line_id, product_id,
+            batch_id, accepted_qty, accepted_weight_kg, base_rate, base_value, allocated_charges,
+            allocated_total, non_creditable_tax, wastage_pct, wastage_amount, landed_value,
+            landed_rate_per_uom, landed_rate_per_kg, prev_landed_rate, rate_change_pct)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+      [actor.companyId, lc[0].id, l.grnLineId, l.productId, l.batchId,
+       l.acceptedQty, l.acceptedWeightKg, l.baseRate, l.baseValue,
+       JSON.stringify(l.allocatedCharges), l.allocatedTotal, l.nonCreditableTax,
+       l.wastagePct, l.wastageAmount, l.landedValue, l.landedRatePerUom, l.landedRatePerKg,
+       l.prevLandedRatePerKg, l.rateChangePct]);
+
+    if (input.costStatus === 'ACTUAL' && l.batchId) {
+      await tx.query(
+        `UPDATE batches SET landed_rate=$2, landed_rate_per_kg=$3 WHERE id=$1`,
+        [l.batchId, l.landedRatePerUom, l.landedRatePerKg]);
+    }
+  }
+
+  if (isAbnormal) {
+    await raiseAlert(tx, actor, {
+      branchId: grn.branch_id, alertType: 'LANDING_COST_ABNORMAL', severity: 'CRITICAL',
+      entityType: 'grn', entityId: grn.id,
+      title: `Landed cost moved sharply on ${grn.grn_no}`,
+      message: `${abnormalProducts.join(', ')}. Check the selling price before this stock goes out.`,
+      meta: { abnormalProducts },
+    });
+  }
+
+  // §16 — landing cost change triggers the Pricing engine downstream.
+  if (input.costStatus === 'ACTUAL') {
+    await emit(tx, actor, 'landing_cost', lc[0].id, 'landing_cost.updated', {
+      grnId: grn.id, grnNo: grn.grn_no,
+      lines: result.lines.map((l) => ({
+        productId: l.productId, batchId: l.batchId,
+        landedRatePerKg: l.landedRatePerKg, rateChangePct: l.rateChangePct,
+      })),
+      isAbnormal,
+    });
+  }
+
+  return {
+    ...lc[0],
+    lines: result.lines.map((l, i) => ({
+      ...l, productName: lineRows[i].product_name, sku: lineRows[i].sku,
+    })),
+    chargesUsed: charges, isAbnormal, abnormalProducts,
+  };
+}
+
 costingRouter.post('/landing-cost/:grnId/compute', requires('costing.landing.recompute'), h(async (req) => {
   const input = body(z.object({
     costStatus: z.enum(['ESTIMATED', 'ACTUAL']).default('ACTUAL'),
@@ -92,163 +301,8 @@ costingRouter.post('/landing-cost/:grnId/compute', requires('costing.landing.rec
     replaceCharges: z.boolean().default(true),
   }), req.body ?? {});
 
-  return withTx(req.actor, async (tx) => {
-    const { rows: grnRows } = await tx.query(
-      `SELECT g.*, s.trade_name AS supplier_name FROM grns g
-         JOIN suppliers s ON s.id = g.supplier_id
-        WHERE g.id=$1 AND g.company_id=$2`, [req.params.grnId, req.actor.companyId]);
-    const grn = grnRows[0];
-    if (!grn) throw ApiError.notFound('Goods receipt not found');
-    if (grn.status !== 'POSTED') throw ApiError.rule('Landing cost can only be computed for a posted receipt.');
-
-    if (input.replaceCharges) {
-      await tx.query(`DELETE FROM purchase_charges WHERE doc_type='GRN' AND doc_id=$1 AND source='MANUAL'`, [grn.id]);
-    }
-    for (const c of input.charges) {
-      const { rows: ct } = await tx.query(
-        `SELECT allocation_basis, is_creditable, affects_landing_cost FROM charge_types WHERE id=$1`,
-        [c.chargeTypeId]);
-      if (!ct[0]) throw ApiError.badRequest('Unknown charge type');
-      await tx.query(
-        `INSERT INTO purchase_charges (company_id, doc_type, doc_id, charge_type_id, amount,
-              allocation_basis, is_creditable, affects_landing_cost, supplier_id, reference_no,
-              source, created_by)
-         VALUES ($1,'GRN',$2,$3,$4,$5,$6,$7,$8,$9,'MANUAL',$10)`,
-        [req.actor.companyId, grn.id, c.chargeTypeId, c.amount,
-         c.allocationBasis ?? ct[0].allocation_basis, ct[0].is_creditable,
-         ct[0].affects_landing_cost, c.supplierId ?? null, c.referenceNo ?? null, req.actor.userId]);
-    }
-
-    // Charges can come from the PO as well as be added at receipt.
-    const { rows: chargeRows } = await tx.query(
-      `SELECT ct.code, pc.amount, pc.allocation_basis, pc.is_creditable, pc.affects_landing_cost
-         FROM purchase_charges pc JOIN charge_types ct ON ct.id = pc.charge_type_id
-        WHERE pc.doc_type='GRN' AND pc.doc_id=$1
-        UNION ALL
-       SELECT ct.code, poc.amount, poc.allocation_basis, poc.is_creditable, true
-         FROM po_charges poc JOIN charge_types ct ON ct.id = poc.charge_type_id
-        WHERE poc.po_id = $2 AND poc.borne_by <> 'SUPPLIER'`,
-      [grn.id, grn.po_id]);
-
-    const charges: Charge[] = chargeRows.map((c: any) => ({
-      code: c.code, amount: Number(c.amount), basis: c.allocation_basis,
-      isCreditable: c.is_creditable, affectsLandingCost: c.affects_landing_cost,
-    }));
-
-    const { rows: lineRows } = await tx.query(
-      `SELECT l.id, l.product_id, l.batch_id, l.accepted_qty, l.net_weight_kg, l.rate,
-              p.default_wastage_pct, p.name AS product_name, p.sku,
-              (SELECT b2.landed_rate_per_kg FROM batches b2
-                 JOIN grn_lines gl2 ON gl2.id = b2.grn_line_id
-                 JOIN grns g2 ON g2.id = gl2.grn_id
-                WHERE b2.product_id = l.product_id AND g2.id <> $2 AND b2.landed_rate_per_kg IS NOT NULL
-                ORDER BY g2.posting_date DESC LIMIT 1) AS prev_landed_rate_per_kg
-         FROM grn_lines l JOIN products p ON p.id = l.product_id
-        WHERE l.grn_id=$1 AND l.accepted_qty > 0 ORDER BY l.line_no`, [grn.id, grn.id]);
-
-    if (lineRows.length === 0) throw ApiError.rule('This receipt has no accepted quantity to cost.');
-
-    const costLines: CostLine[] = lineRows.map((l: any) => ({
-      grnLineId: l.id, productId: l.product_id, batchId: l.batch_id,
-      acceptedQty: Number(l.accepted_qty),
-      acceptedWeightKg: Number(l.net_weight_kg ?? l.accepted_qty),
-      baseRate: Number(l.rate), wastagePct: Number(l.default_wastage_pct ?? 0),
-      prevLandedRatePerKg: l.prev_landed_rate_per_kg ? Number(l.prev_landed_rate_per_kg) : null,
-    }));
-
-    const result = computeLandingCost(costLines, charges, input.discountTotal);
-
-    const { rows: est } = await tx.query(
-      `SELECT total_landed FROM landing_costs WHERE grn_id=$1 AND cost_status='ESTIMATED'`, [grn.id]);
-    const estimated = est[0] ? Number(est[0].total_landed) : Number(grn.total_value ?? 0);
-    const varianceVsEstimate = money(result.totals.totalLanded - estimated);
-    const varianceVsEstimatePct = estimated > 0
-      ? round((varianceVsEstimate / estimated) * 100, 4) : null;
-
-    // §16 — abnormal jump detection against this product's own history.
-    const jumpLimit = Number(await getSetting(tx, req.actor, 'costing.abnormal_jump_pct', 15));
-    let isAbnormal = false;
-    const abnormalProducts: string[] = [];
-    for (const [i, l] of result.lines.entries()) {
-      if (l.rateChangePct != null && Math.abs(l.rateChangePct) > jumpLimit) {
-        isAbnormal = true;
-        abnormalProducts.push(`${lineRows[i].product_name} (${l.rateChangePct > 0 ? '+' : ''}${l.rateChangePct}%)`);
-      }
-    }
-
-    const { rows: lc } = await tx.query(
-      `INSERT INTO landing_costs (company_id, branch_id, grn_id, cost_status, base_amount,
-            discount_amount, total_charges, non_creditable_tax, wastage_provision, total_landed,
-            estimated_total, variance_vs_estimate, variance_vs_estimate_pct, is_abnormal,
-            margin_risk_flag, snapshot, rule_version, computed_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'1.0',$17)
-       ON CONFLICT (grn_id, cost_status) DO UPDATE SET
-            base_amount=EXCLUDED.base_amount, discount_amount=EXCLUDED.discount_amount,
-            total_charges=EXCLUDED.total_charges, non_creditable_tax=EXCLUDED.non_creditable_tax,
-            wastage_provision=EXCLUDED.wastage_provision, total_landed=EXCLUDED.total_landed,
-            estimated_total=EXCLUDED.estimated_total,
-            variance_vs_estimate=EXCLUDED.variance_vs_estimate,
-            variance_vs_estimate_pct=EXCLUDED.variance_vs_estimate_pct,
-            is_abnormal=EXCLUDED.is_abnormal, snapshot=EXCLUDED.snapshot,
-            computed_at=now(), computed_by=EXCLUDED.computed_by
-       RETURNING *`,
-      [req.actor.companyId, grn.branch_id, grn.id, input.costStatus,
-       result.totals.baseAmount, result.totals.discountAmount, result.totals.totalCharges,
-       result.totals.nonCreditableTax, result.totals.wastageProvision, result.totals.totalLanded,
-       estimated, varianceVsEstimate, varianceVsEstimatePct, isAbnormal, isAbnormal,
-       JSON.stringify({ charges, lines: result.lines, jumpLimit }), req.actor.userId]);
-
-    await tx.query(`DELETE FROM landing_cost_lines WHERE landing_cost_id=$1`, [lc[0].id]);
-    for (const l of result.lines) {
-      await tx.query(
-        `INSERT INTO landing_cost_lines (company_id, landing_cost_id, grn_line_id, product_id,
-              batch_id, accepted_qty, accepted_weight_kg, base_rate, base_value, allocated_charges,
-              allocated_total, non_creditable_tax, wastage_pct, wastage_amount, landed_value,
-              landed_rate_per_uom, landed_rate_per_kg, prev_landed_rate, rate_change_pct)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
-        [req.actor.companyId, lc[0].id, l.grnLineId, l.productId, l.batchId,
-         l.acceptedQty, l.acceptedWeightKg, l.baseRate, l.baseValue,
-         JSON.stringify(l.allocatedCharges), l.allocatedTotal, l.nonCreditableTax,
-         l.wastagePct, l.wastageAmount, l.landedValue, l.landedRatePerUom, l.landedRatePerKg,
-         l.prevLandedRatePerKg, l.rateChangePct]);
-
-      if (input.costStatus === 'ACTUAL' && l.batchId) {
-        await tx.query(
-          `UPDATE batches SET landed_rate=$2, landed_rate_per_kg=$3 WHERE id=$1`,
-          [l.batchId, l.landedRatePerUom, l.landedRatePerKg]);
-      }
-    }
-
-    if (isAbnormal) {
-      await raiseAlert(tx, req.actor, {
-        branchId: grn.branch_id, alertType: 'LANDING_COST_ABNORMAL', severity: 'CRITICAL',
-        entityType: 'grn', entityId: grn.id,
-        title: `Landed cost moved sharply on ${grn.grn_no}`,
-        message: `${abnormalProducts.join(', ')}. Check the selling price before this stock goes out.`,
-        meta: { abnormalProducts },
-      });
-    }
-
-    // §16 — landing cost change triggers the Pricing engine downstream.
-    if (input.costStatus === 'ACTUAL') {
-      await emit(tx, req.actor, 'landing_cost', lc[0].id, 'landing_cost.updated', {
-        grnId: grn.id, grnNo: grn.grn_no,
-        lines: result.lines.map((l) => ({
-          productId: l.productId, batchId: l.batchId,
-          landedRatePerKg: l.landedRatePerKg, rateChangePct: l.rateChangePct,
-        })),
-        isAbnormal,
-      });
-    }
-
-    return {
-      ...lc[0],
-      lines: result.lines.map((l, i) => ({
-        ...l, productName: lineRows[i].product_name, sku: lineRows[i].sku,
-      })),
-      chargesUsed: charges, isAbnormal, abnormalProducts,
-    };
-  });
+  return withTx(req.actor, async (tx) =>
+    computeLandingFor(tx, req.actor, req.params.grnId, input as any));
 }));
 
 costingRouter.get('/landing-cost/:grnId', h(async (req) => {

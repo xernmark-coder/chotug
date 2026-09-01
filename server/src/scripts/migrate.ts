@@ -110,6 +110,8 @@ async function main() {
     await run('49_one_unit_cost.sql');
     await run('50_delivery_rate.sql');
     await run('51_cost_before_delivery.sql');
+    await run('52_unit_cost_from_what_was_booked.sql');
+    await run('53_pricing_on_the_booked_unit.sql');
     // Last, so the FORCE that 04 and 06 re-apply is lifted again.
     await run('11_rls_managed_host.sql');
     console.log('\nSchema and master data are in place.');

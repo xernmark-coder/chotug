@@ -785,12 +785,16 @@ chk "the view says the cost per unit HELD" \
   "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='v_batch_pricing' AND column_name='true_cost_per_held_unit'")"
 # The bug: a per-PURCHASE-unit cost multiplied by a number of kilograms. For a
 # batch bought by the box, the two differ by the weight of the box.
-BAD=$(Q "SELECT count(*) FROM v_batch_pricing
-          WHERE base_uom='KG' AND landed_rate_per_kg > 0
-            AND abs(true_cost_per_held_unit
-                    - (landed_rate_per_kg + COALESCE(overhead_per_kg,0)
-                       + COALESCE(inbound_per_kg,0) + COALESCE(outbound_per_kg,0))) > 0.01")
-[ "$BAD" = "0" ] && ok "…and it is the per-kilo build-up, exactly" \
+# The build-up is per HELD unit: what one of them cost, plus the per-kilo
+# figures scaled by the kilos in one. landed_rate_per_kg is NOT the right base —
+# it is per weighed kilo, and stock is not always counted in those. See db/52.
+BAD=$(Q "SELECT count(*) FROM v_batch_pricing pr
+          JOIN v_batch_unit_cost uc ON uc.batch_id = pr.batch_id
+         WHERE abs(pr.true_cost_per_held_unit
+                   - (uc.landed_per_held_unit
+                      + (COALESCE(pr.overhead_per_kg,0) + COALESCE(pr.inbound_per_kg,0)
+                         + COALESCE(pr.outbound_per_kg,0)) * pr.kg_per_held_unit)) > 0.01")
+[ "$BAD" = "0" ] && ok "…and it is the per-held-unit build-up, exactly" \
   || no "held cost" "$BAD batches do not add up"
 # Proven on the batches where it actually differs.
 chk "proven on batches bought by the box" \
@@ -827,11 +831,17 @@ USES=$(grep -rl "landed_per_held_unit" server/src/modules/*.ts | wc -l)
 # And it has to scale linearly: twice the kilos, twice the money.
 chk "proven on batches bought by the box" \
   "$(Q "SELECT count(*) FROM v_batch_unit_cost WHERE kg_per_purchase_unit > 1.5")"
-LIN=$(Q "SELECT count(*) FROM v_batch_unit_cost uc JOIN batches b ON b.id=uc.batch_id
-          WHERE uc.base_uom='KG' AND COALESCE(b.landed_rate_per_kg,0) > 0
-            AND abs(uc.landed_per_held_unit - b.landed_rate_per_kg) > 0.0001")
-[ "$LIN" = "0" ] && ok "…and a kilo costs exactly the per-kilo rate" \
-  || no "unit cost" "$LIN batches disagree with their own per-kg rate"
+# One stock unit costs the batch's landed value divided by what went into
+# stock. Where stock was booked in weighed kilos that equals landed_rate_per_kg;
+# where it was booked in boxes it does not, and must not.
+LIN=$(Q "SELECT count(*) FROM v_batch_unit_cost uc
+          JOIN batches b ON b.id = uc.batch_id
+          JOIN grn_lines gl ON gl.id = b.grn_line_id
+         WHERE b.initial_qty > 0
+           AND abs(uc.landed_per_held_unit
+                   - gl.accepted_qty * COALESCE(b.landed_rate,0) / b.initial_qty) > 0.001")
+[ "$LIN" = "0" ] && ok "…and one stock unit costs what it cost" \
+  || no "unit cost" "$LIN batches disagree with what was paid"
 
 echo "── 60 · the box is priced for the journey it will make"
 chk "each shop has its own delivery rate" \
@@ -876,6 +886,55 @@ grep -q "return (cost / Math.max(1 - wastagePct / 100, 0.05)) \* (1 + marginPct 
      web/src/pages/PackBench.tsx \
   && ok "…and the per-unit figure never sees the box size" \
   || no "linearity" "box size leaks into the per-unit cost"
+
+echo "── 61 · the arithmetic, checked against what was paid"
+# The decisive test: every batch in stock must be worth what we paid for the
+# part of it still there. No unit, no rate, no guess — just the money.
+BAD=$(Q "SELECT count(*) FROM batches b
+          JOIN grn_lines gl ON gl.id = b.grn_line_id
+          JOIN v_batch_unit_cost uc ON uc.batch_id = b.id
+          JOIN stock_balances sb ON sb.batch_id = b.id
+         WHERE sb.qty > 0 AND b.initial_qty > 0
+           AND abs(gl.accepted_qty * b.landed_rate * (sb.qty / b.initial_qty)
+                   - sb.qty * uc.landed_per_held_unit) > 1")
+[ "$BAD" = "0" ] && ok "every batch is valued at what it cost" \
+  || no "valuation" "$BAD batch(es) are not"
+grep -q "gl.accepted_qty \* COALESCE(b.landed_rate, 0) / b.initial_qty" db/52_unit_cost_from_what_was_booked.sql \
+  && ok "…derived from what was booked, not from what the unit is called" \
+  || no "unit cost" "still keyed off base_uom"
+# The per-kilo overheads must be scaled by the kilos in one stock unit.
+BAD2=$(Q "SELECT count(*) FROM v_batch_pricing pr
+           JOIN v_batch_unit_cost uc ON uc.batch_id = pr.batch_id
+          WHERE abs(pr.cost_before_delivery
+                    - (uc.landed_per_held_unit
+                       + COALESCE(pr.overhead_per_kg,0) * pr.kg_per_held_unit
+                       + COALESCE(pr.inbound_per_kg,0)  * pr.kg_per_held_unit)) > 0.01")
+[ "$BAD2" = "0" ] && ok "…and the label price builds on the same figure" \
+  || no "pricing" "$BAD2 batch(es) price off a different base"
+# Documents must add up to their own lines.
+chk "orders add up"   "$(Q "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM po_lines WHERE abs(line_total - qty*rate*(1-discount_pct/100.0)) > 0.02)")"
+chk "receipts add up" "$(Q "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM grn_lines WHERE abs(line_value - accepted_qty*rate) > 0.02)")"
+chk "sales add up"    "$(Q "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM stock_issue_lines WHERE abs(value - qty*rate) > 0.02)")"
+chk "payments add up" "$(Q "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM payment_requests pr WHERE abs(pr.paid_amount - COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.request_id=pr.id AND p.status<>'REVERSED'),0)) > 0.02)")"
+chk "nobody is paid more than was asked" "$(Q "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM payment_requests WHERE paid_amount > amount + 0.01)")"
+chk "no negative stock" "$(Q "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM stock_balances WHERE qty < 0)")"
+
+echo "── 62 · a receipt costs itself"
+grep -q "export async function computeLandingFor" server/src/modules/costing.ts \
+  && ok "the sum lives in one place" || no "landed cost" "still inline in the route"
+grep -q "computeLandingFor(tx, req.actor, grn.id" server/src/modules/receiving.ts \
+  && ok "…and runs the moment the receipt is posted" || no "landed cost" "waits for a button"
+grep -q "autoFreightCharges" server/src/modules/receiving.ts \
+  && ok "…with the freight this order already has on record" || no "landed cost" "freight typed by hand"
+# A receipt is a fact; its costing is an opinion. One must not take the other down.
+grep -q "Landed cost still to be worked out" server/src/modules/receiving.ts \
+  && ok "…and a failed sum never loses the receipt" || no "landed cost" "posting can fail on costing"
+chk "proven: receipts costed with their transport" \
+  "$(Q "SELECT count(*) FROM landing_costs lc WHERE lc.cost_status='ACTUAL' AND lc.total_charges > 0")"
+# The screen and the API must agree on the shape of a line.
+grep -q "row_to_json(x)) FROM landing_cost_lines" server/src/modules/receiving.ts \
+  && no "landed cost lines" "snake_case where the screen reads camelCase" \
+  || ok "the landed-cost lines reach the screen in the shape it reads"
 
 echo "── 43 · filters with totals"
 # This check used to name three pages and pass when those three had filters —

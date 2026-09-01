@@ -11,7 +11,9 @@ import {
   type QcParam,
 } from '../domain/index.js';
 import { qcPhotoAssist } from '../ai/features.js';
-import { checkInvoiceAgainstReceipts } from './costing.js';
+import {
+  autoFreightCharges, checkInvoiceAgainstReceipts, computeLandingFor,
+} from './costing.js';
 import { createRequest } from './finance.js';
 
 export const receivingRouter = Router();
@@ -1574,6 +1576,30 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
       batches: createdBatches.map((b) => ({ id: b.id, batchNo: b.batch_no })),
     });
 
+    /* Cost it now, not when somebody remembers to.
+     *
+     * Everything the sum needs is known the moment the receipt is posted: the
+     * quantities, the weights, the charges from the order, and the freight this
+     * order already has on record. Leaving it for a button meant the batch went
+     * onto the shelf at its base rate — so the packing bench priced boxes off a
+     * cost missing the lorry, and the screen sat there offering a prefilled
+     * figure nobody had pressed. */
+    let landedNote = '';
+    try {
+      const freight = await autoFreightCharges(tx, req.actor, grn.id);
+      await computeLandingFor(tx, req.actor, grn.id, {
+        costStatus: 'ACTUAL', charges: freight, discountTotal: 0, replaceCharges: true,
+      });
+      landedNote = freight.length
+        ? ` Landed cost worked out, including ₹${freight[0].amount.toFixed(0)} of transport.`
+        : ' Landed cost worked out.';
+    } catch (e: any) {
+      /* A receipt is a fact; its costing is an opinion about that fact. If the
+       * sum cannot be done — no accepted quantity, a charge type missing — the
+       * goods are still in the warehouse and the button is still there. */
+      landedNote = ' Landed cost still to be worked out.';
+    }
+
     const response = {
       ...grn,
       batches: createdBatches.map((b) => ({
@@ -1581,7 +1607,8 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
         qty: b.initial_qty, expiryDate: b.expiry_date, grade: b.grade,
       })),
       putawayTasks,
-      message: `${grnNo} posted. ${Q(totals.accepted)} accepted into stock, ${Q(totals.rejected)} rejected.`,
+      message: `${grnNo} posted. ${Q(totals.accepted)} accepted into stock, `
+        + `${Q(totals.rejected)} rejected.${landedNote}`,
     };
 
     await tx.query(
@@ -1630,8 +1657,22 @@ receivingRouter.get('/grns/:id', h(async (req) => {
          LEFT JOIN qc_inspections q ON q.id = l.qc_inspection_id
         WHERE l.grn_id=$1 ORDER BY l.line_no`, [g.id]),
     query(req.actor,
-      `SELECT lc.*, (SELECT json_agg(row_to_json(x)) FROM landing_cost_lines x
-                      WHERE x.landing_cost_id = lc.id) AS lines
+      /* Named one by one rather than row_to_json, which hands back snake_case
+       * while the screen reads camelCase — so every cell in the landed-cost
+       * table rendered as a dash next to totals that were perfectly correct.
+       * The same projection as GET /costing/landing-cost/:grnId, because two
+       * shapes for one row is what caused it. */
+      `SELECT lc.*, (SELECT json_agg(json_build_object(
+                       'grnLineId', x.grn_line_id, 'productName', p.name, 'sku', p.sku,
+                       'acceptedQty', x.accepted_qty, 'acceptedWeightKg', x.accepted_weight_kg,
+                       'baseRate', x.base_rate, 'baseValue', x.base_value,
+                       'allocatedCharges', x.allocated_charges, 'allocatedTotal', x.allocated_total,
+                       'wastagePct', x.wastage_pct, 'wastageAmount', x.wastage_amount,
+                       'landedValue', x.landed_value, 'landedRatePerUom', x.landed_rate_per_uom,
+                       'landedRatePerKg', x.landed_rate_per_kg, 'prevLandedRate', x.prev_landed_rate,
+                       'rateChangePct', x.rate_change_pct))
+                      FROM landing_cost_lines x JOIN products p ON p.id = x.product_id
+                     WHERE x.landing_cost_id = lc.id) AS lines
          FROM landing_costs lc WHERE lc.grn_id=$1 ORDER BY cost_status`, [g.id]),
   ]);
   return { ...g, lines, landingCosts: landing };

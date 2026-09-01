@@ -24,7 +24,10 @@
 \set ON_ERROR_STOP on
 BEGIN;
 
-CREATE OR REPLACE VIEW v_batch_unit_cost AS
+-- DROP first: db/52 widens this view, and CREATE OR REPLACE cannot shrink one
+-- back on a re-run. Nothing in the schema depends on it.
+DROP VIEW IF EXISTS v_batch_unit_cost CASCADE;
+CREATE VIEW v_batch_unit_cost AS
 SELECT b.id                                       AS batch_id,
        b.company_id,
        b.product_id,
