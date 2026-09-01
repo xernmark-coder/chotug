@@ -35,27 +35,51 @@ import { LabelSheet, RemovePackModal } from './Packing';
  * screen and nowhere else. Rounded UP to the rupee — a suggestion that lands a
  * few paise under the floor it was computed from would be its own bug report.
  */
-function suggestPrice(bench: any, qtyPerPack: number, marginPct?: number | string): string {
+/* What one unit costs, all in, for the journey it is actually going to make.
+ *
+ *   what we paid + handling + freight IN   ← the same for every box
+ * + the rate to WHERE THIS BOX IS GOING    ← nothing, if it sells from here
+ *
+ * The old sum used a company-wide average of everybody's deliveries, added to
+ * every box before anyone knew where it was headed: a box sold at the warehouse
+ * carried ₹9 a kilo for a trip it never took, and a box to Kothrud carried ₹9
+ * for a trip that costs ₹22.80. */
+function costPerUnit(bench: any, deliveryRate: number): number {
+  const base = Number(bench?.cost_before_delivery);
+  if (Number.isFinite(base) && base > 0) return base + (Number(deliveryRate) || 0);
+  // A batch the pricing view has nothing for — fall back to what it does have.
+  return Number(bench?.true_cost) || 0;
+}
+
+function suggestPrice(
+  bench: any, qtyPerPack: number, marginPct: number | string | undefined,
+  deliveryRate: number,
+): string {
   const per = Number(qtyPerPack) || 0;
   if (per <= 0) return '';
 
-  const cost = Number(bench?.true_cost) || 0;
+  const cost = costPerUnit(bench, deliveryRate);
   const wastage = Number(bench?.wastage_pct) || 0;
   const m = marginPct === '' || marginPct == null ? null : Number(marginPct);
+  if (cost <= 0) return '';
+  const margin = m == null || Number.isNaN(m) ? Number(bench?.margin_pct) || 0 : m;
 
-  /* No margin typed, or one that is not a number: the floor the database
-     already worked out at the margin set in the catalogue. */
-  if (m == null || Number.isNaN(m) || cost <= 0) {
-    const floor = Number(bench?.min_sell_price) || 0;
-    return floor > 0 ? String(Math.ceil(floor * per)) : '';
-  }
-  return String(Math.ceil(perUnitAt(cost, wastage, m) * per));
+  return String(Math.ceil(perUnitAt(cost, wastage, margin) * per));
 }
 
 /** The price of one unit at a given margin, wastage carried the same way the
  *  database carries it. Kept next to suggestPrice so the two cannot drift. */
 function perUnitAt(cost: number, wastagePct: number, marginPct: number): number {
   return (cost / Math.max(1 - wastagePct / 100, 0.05)) * (1 + marginPct / 100);
+}
+
+
+/* Where a run of boxes is going, and what that leg costs a kilo. "Sell from
+   here" is a destination too — the one that costs nothing, and the one most
+   sales actually take. */
+function destRate(dests: any[], id: string): number {
+  if (!id) return 0;
+  return Number(dests.find((d: any) => d.warehouse_id === id)?.rate_per_kg) || 0;
 }
 
 const GRADES = [
@@ -95,11 +119,16 @@ export function PackBenchPage() {
      going to Settings to change a company-wide number and back again is not a
      thing anybody does mid-shift. */
   const [margin, setMargin] = useState('');
+  /* Chosen before the price is worked out, because it changes the price.
+     Empty means selling from where it stands. */
+  const [dest, setDest] = useState('');
 
   /* The label price, worked out from what this batch cost and the margin set
      on the product. It follows the weight as it is keyed in, because a box
      price without a box size is not a number anybody can check. */
-  const suggested = suggestPrice(data, Number(qty) || 0, margin);
+  const dests: any[] = data?.destinations ?? [];
+  const rate = destRate(dests, dest);
+  const suggested = suggestPrice(data, Number(qty) || 0, margin, rate);
   useEffect(() => {
     const own = priceByGrade[grade];
     if (own != null) { setPrice(own); setPricedByHand(true); return; }
@@ -122,6 +151,7 @@ export function PackBenchPage() {
         weightKg: data.base_uom === 'KG' ? Number(qty) : undefined,
         grade,
         price: Number(price) || 0,
+        destinationWarehouseId: dest || null,
         note: note.trim() || undefined,
         binCode: binCode.trim() || undefined,
       });
@@ -231,6 +261,27 @@ export function PackBenchPage() {
                   }}>{k}</button>
                 ))}
               </div>
+              {/* Where these are going, chosen BEFORE the price, because it
+                  changes the price. The delivery to that shop is part of what
+                  the box costs; a box sold from here has no delivery in it. */}
+              <div className="mt">
+                <label className="lbl">Where will these be sold?</label>
+                <select value={dest}
+                  onChange={(e) => { setDest(e.target.value); setPricedByHand(false); }}>
+                  <option value="">Sell from here — no delivery cost</option>
+                  {dests.filter((d: any) => d.is_centre).map((d: any) => (
+                    <option key={d.warehouse_id} value={d.warehouse_id}>
+                      {d.name} — {inr(d.rate_per_kg, 2)}/{data.base_uom?.toLowerCase()}
+                    </option>
+                  ))}
+                </select>
+                <div className="small muted mt">
+                  {dest
+                    ? <>{inr(rate, 2)} a {data.base_uom?.toLowerCase()} to get it there ·{' '}
+                        {dests.find((d: any) => d.warehouse_id === dest)?.rate_source}</>
+                    : <>Nothing added for delivery. Pick a shop and its trip goes into the price.</>}
+                </div>
+              </div>
               <div className="grid c3 mt">
                 {/* The margin, on the bench, where the boxes are.
                     The catalogue sets the policy and this box starts there —
@@ -267,7 +318,10 @@ export function PackBenchPage() {
                               setPriceByGrade((s2) => { const n2 = { ...s2 }; delete n2[grade]; return n2; });
                             }}>use it</button></>
                       ) : (
-                        <>cost + {num(Number(margin) || 0, 0)}% margin on {qty || 0} {data.base_uom}</>
+                        <>{inr(costPerUnit(data, rate), 2)}/{data.base_uom?.toLowerCase()}{' '}
+                          ({inr(Number(data.cost_before_delivery) || 0, 2)}
+                          {rate > 0 ? <> + {inr(rate, 2)} delivery</> : null})
+                          {' '}+ {num(Number(margin) || 0, 0)}% × {qty || 0} {data.base_uom}</>
                       )}
                     </div>
                   ) : null}
@@ -536,6 +590,11 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
   /* The margin for this run of boxes, starting at the product's own. */
   const [margin, setMargin] = useState(
     bench.margin_pct != null ? String(Number(bench.margin_pct)) : '');
+  /* Where this run is going. One run, one destination — a run is one decision.
+     Defaulted from whichever shop is waiting for this size, if one is. */
+  const dests: any[] = bench.destinations ?? [];
+  const [dest, setDest] = useState('');
+  const rate = destRate(dests, dest);
   const [binCode, setBinCode] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
@@ -563,7 +622,7 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
   const floorPerUnit = Number(bench.min_sell_price) || 0;
   const floorPerBox = floorPerUnit > 0 && per > 0 ? floorPerUnit * per : 0;
   const belowFloor = floorPerBox > 0 && Number(price) > 0 && Number(price) < floorPerBox;
-  const suggested = suggestPrice(bench, per, margin);
+  const suggested = suggestPrice(bench, per, margin, rate);
 
   /* Fill it in as soon as the size is known. Somebody at a bench should not be
      doing this arithmetic in their head against a floor printed underneath the
@@ -586,6 +645,7 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
               const r = await api.post<any>(`/inventory/pack-bench/${bench.batch_id}/run`, {
                 warehouseId: bench.warehouse_id,
                 binCode: binCode.trim() || undefined,
+                destinationWarehouseId: dest || null,
                 note: note.trim() || undefined,
                 groups: [{
                   count: n, qtyPerPack: per, grade,
@@ -628,6 +688,10 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
                 onClick={() => {
                   setSize(String(Number(wnt.pack_size_kg)));
                   setCount(String(wnt.boxes_wanted));
+                  /* The shop that asked for these is where they are going, so
+                     its delivery goes into the price without being asked. */
+                  const d = dests.find((x: any) => x.name === wnt.centre_name);
+                  if (d) { setDest(d.warehouse_id); setPricedByHand(false); }
                 }}>
                 {wnt.centre_name ?? 'A shop'}: {wnt.boxes_wanted} × {num(wnt.pack_size_kg, 1)} kg
               </button>
@@ -635,6 +699,20 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
           </div>
         </div>
       ) : null}
+
+      {/* Chosen first, because everything below is priced against it. */}
+      <div className="mb">
+        <label className="lbl">Where will these be sold?</label>
+        <select value={dest}
+          onChange={(e) => { setDest(e.target.value); setPricedByHand(false); }}>
+          <option value="">Sell from here — no delivery cost</option>
+          {dests.filter((d: any) => d.is_centre).map((d: any) => (
+            <option key={d.warehouse_id} value={d.warehouse_id}>
+              {d.name} — {inr(d.rate_per_kg, 2)}/{bench.base_uom?.toLowerCase()} to deliver
+            </option>
+          ))}
+        </select>
+      </div>
 
       <div className="grid c2">
         <div>
@@ -720,6 +798,42 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
             placeholder="Small size this lot" />
         </div>
       </div>
+
+      {/* The arithmetic, said out loud. A label price nobody can take apart is a
+          label price nobody argues with when it is wrong. */}
+      {per > 0 && Number(bench.cost_before_delivery) > 0 ? (
+        <div className="card mb"><div className="card-body">
+          <div className="perf-line">
+            <span>Bought, handled and carried in</span>
+            <b>{inr(Number(bench.cost_before_delivery), 2)} / {bench.base_uom?.toLowerCase()}</b>
+          </div>
+          <div className="perf-line">
+            <span>{dest
+              ? `Delivery to ${dests.find((d: any) => d.warehouse_id === dest)?.name}`
+              : 'Delivery — selling from here'}</span>
+            <b>{rate > 0 ? `${inr(rate, 2)} / ${bench.base_uom?.toLowerCase()}` : '—'}</b>
+          </div>
+          <div className="perf-line">
+            <span><b>Costs us</b></span>
+            <b>{inr(costPerUnit(bench, rate), 2)} / {bench.base_uom?.toLowerCase()}</b>
+          </div>
+          {Number(bench.wastage_pct) > 0 ? (
+            <div className="perf-line">
+              <span>Spread over what survives ({num(bench.wastage_pct, 0)}% wastage)</span>
+              <b>{inr(costPerUnit(bench, rate) / Math.max(1 - Number(bench.wastage_pct) / 100, 0.05), 2)}</b>
+            </div>
+          ) : null}
+          <div className="perf-line">
+            <span>Plus {num(Number(margin) || 0, 0)}% margin</span>
+            <b>{inr(perUnitAt(costPerUnit(bench, rate), Number(bench.wastage_pct) || 0, Number(margin) || 0), 2)}
+              {' '}/ {bench.base_uom?.toLowerCase()}</b>
+          </div>
+          <div className="perf-line">
+            <span><b>A {num(per, 1)} {bench.base_uom} box</b></span>
+            <b>{inr(Number(suggested) || 0, 0)}</b>
+          </div>
+        </div></div>
+      ) : null}
 
       {n > 0 && per > 0 ? (
         <div className={`banner ${tooMuch ? 'danger' : 'info'} mt`}>

@@ -241,6 +241,49 @@ export function PerformancePage() {
 
                 {open ? (
                   <div className="card-body perf-body">
+                    {/* What one unit costs, and what one unit fetched. Every
+                        other number on this page is a total; these two are the
+                        question — and the cost side used to stop at what the
+                        supplier charged, leaving handling and both lorries out
+                        of a figure people were pricing against. */}
+                    {p.unitCost ? (
+                      <div className="card mb"><div className="card-body">
+                        <div className="section-head sm">
+                          <h3>What one {p.uom?.toLowerCase()} costs, and what it fetched</h3>
+                          <span className="rule" />
+                        </div>
+                        <div className="perf-line">
+                          <span>Bought at</span><b>{inr(p.unitCost.boughtAt, 2)}</b></div>
+                        <div className="perf-line">
+                          <span>Handling — wages, power, cold store, rent</span>
+                          <b>{inr(p.unitCost.handling, 2)}</b></div>
+                        <div className="perf-line">
+                          <span>Getting it here</span><b>{inr(p.unitCost.freightIn, 2)}</b></div>
+                        <div className="perf-line">
+                          <span>Out to the shops</span><b>{inr(p.unitCost.toTheShop, 2)}</b></div>
+                        <div className="perf-line">
+                          <span><b>Costs us</b></span>
+                          <b>{inr(p.unitCost.total, 2)}</b></div>
+                        <div className="perf-line">
+                          <span>Should fetch at {num(p.unitCost.marginPct, 0)}% margin
+                            {p.unitCost.wastagePct > 0
+                              ? `, ${num(p.unitCost.wastagePct, 0)}% wastage` : ''}</span>
+                          <b>{inr(p.unitCost.floor, 2)}</b></div>
+                        <div className="perf-line">
+                          <span><b>Actually fetched</b></span>
+                          {p.soldAt == null ? <span className="muted">nothing sold yet</span> : (
+                            <b className={p.soldAt < p.unitCost.total ? 'text-danger' : ''}>
+                              {inr(p.soldAt, 2)}
+                              {p.soldAt < p.unitCost.total
+                                ? ` — ${inr(p.unitCost.total - p.soldAt, 2)} under cost`
+                                : p.soldAt < p.unitCost.floor
+                                  ? ` — under the ${inr(p.unitCost.floor, 0)} floor`
+                                  : ''}
+                            </b>
+                          )}
+                        </div>
+                      </div></div>
+                    ) : null}
                     <div className="grid c3">
                       <div>
                         <div className="section-head sm"><h3>Bought from</h3><span className="rule" /></div>

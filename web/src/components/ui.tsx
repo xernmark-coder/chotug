@@ -787,12 +787,25 @@ export function DataTable<T>({
     } as Col<T>];
   }, [cols, rows, noAddedColumn]);
 
-  const [sortKey, setSortKey] = React.useState<string | null>(defaultSort ?? null);
+  /* Newest first, unless the page has said otherwise.
+   *
+   * "Latest first" is what anybody opening a list of deliveries, orders or
+   * inspections is actually after — the thing that happened last is the thing
+   * being asked about. A page that named its own defaultSort keeps it: a
+   * shelf-life list belongs in order of what rots first, not what arrived
+   * last. */
+  const [sortKey, setSortKey] = React.useState<string | null>(defaultSort ?? '_added');
   const [dir, setDir] = React.useState<'asc' | 'desc'>(() =>
-    (cols.find((c) => c.key === defaultSort)?.desc ? 'desc' : 'asc'));
+    (defaultSort ? (cols.find((c) => c.key === defaultSort)?.desc ? 'desc' : 'asc') : 'desc'));
+
+  /* The rows can arrive after the first render — an empty list has no time
+     field to detect — so fall back to the page's own order if it turns out
+     there is nothing to sort by. */
+  const effectiveKey = sortKey === '_added' && !cols2.some((c) => c.key === '_added')
+    ? null : sortKey;
 
   const sorted = React.useMemo(() => {
-    const col = cols2.find((c) => c.key === sortKey);
+    const col = cols2.find((c) => c.key === effectiveKey);
     if (!col?.sort) return rows;
     const sign = dir === 'asc' ? 1 : -1;
     return [...rows].sort((a, b) => {
@@ -806,7 +819,7 @@ export function DataTable<T>({
       if (typeof x === 'number' && typeof y === 'number') return (x - y) * sign;
       return String(x).localeCompare(String(y), undefined, { numeric: true }) * sign;
     });
-  }, [rows, cols2, sortKey, dir]);
+  }, [rows, cols2, effectiveKey, dir]);
 
   const click = (c: Col<T>) => {
     if (!c.sort) return;
@@ -822,14 +835,14 @@ export function DataTable<T>({
         <thead>
           <tr>{cols2.map((c) => (
             <th key={c.key}
-              className={`${c.num ? 'num' : ''} ${c.sort ? 'sortable' : ''} ${sortKey === c.key ? 'sorted' : ''}`}
+              className={`${c.num ? 'num' : ''} ${c.sort ? 'sortable' : ''} ${effectiveKey === c.key ? 'sorted' : ''}`}
               style={c.width ? { width: c.width } : undefined}
               onClick={() => click(c)}
               title={c.sort ? `Sort by ${c.head.toLowerCase()}` : undefined}>
               {c.head}
               {c.sort ? (
                 <span className="sort-arrow">
-                  {sortKey === c.key ? (dir === 'asc' ? '▲' : '▼') : '↕'}
+                  {effectiveKey === c.key ? (dir === 'asc' ? '▲' : '▼') : '↕'}
                 </span>
               ) : null}
             </th>

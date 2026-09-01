@@ -418,6 +418,59 @@ mastersRouter.put('/products/:id', requires('master.product.manage'), h(async (r
  * that has to carry its own. Everything else moves as the business moves, which
  * is the only way a floor price stays true for more than a fortnight.
  * ------------------------------------------------------------------------ */
+/* What it costs to get a kilo to each centre.
+ *
+ * Set rather than only measured: history says what the last few trips cost, not
+ * what the next one will, and a centre opened last week has no history at all.
+ * Where nobody has set one the actual trips answer instead — a measured number
+ * beats a zero, and a zero here silently prices delivery at nothing.
+ */
+mastersRouter.get('/delivery-rates', h(async (req) =>
+  query(req.actor,
+    `SELECT * FROM v_centre_delivery_rate
+      WHERE company_id = $1 ORDER BY is_centre DESC, name`, [req.actor.companyId])));
+
+mastersRouter.put('/delivery-rates/:warehouseId',
+  requires('master.delivery_rate.manage'), h(async (req) => {
+    const input = body(z.object({
+      /* Null hands it back to the measured rate, which is different from
+       * setting it to the same number by hand — the first follows the trips. */
+      ratePerKg: z.coerce.number().min(0).max(100000).nullable(),
+      note: z.string().trim().max(200).optional(),
+    }), req.body);
+
+    return withTx(req.actor, async (tx) => {
+      const { rows } = await tx.query(
+        `UPDATE warehouses
+            SET delivery_rate_per_kg = $3,
+                delivery_rate_note   = $4,
+                delivery_rate_set_at = CASE WHEN $3::numeric IS NULL THEN NULL ELSE now() END,
+                delivery_rate_set_by = CASE WHEN $3::numeric IS NULL THEN NULL ELSE $5::uuid END,
+                updated_by = $5
+          WHERE id = $1 AND company_id = $2
+          RETURNING id, name`,
+        [req.params.warehouseId, req.actor.companyId,
+         input.ratePerKg, input.note ?? null, req.actor.userId]);
+      if (!rows[0]) throw ApiError.notFound('No such centre.');
+
+      const [now] = await query(req.actor,
+        `SELECT rate_per_kg, rate_source FROM v_centre_delivery_rate WHERE warehouse_id = $1`,
+        [req.params.warehouseId]);
+
+      await emit(tx, req.actor, 'warehouse', rows[0].id, 'delivery.rate.set',
+        { name: rows[0].name, ratePerKg: input.ratePerKg });
+
+      return {
+        ok: true,
+        rate: now,
+        message: input.ratePerKg == null
+          ? `${rows[0].name} is back on what the trips actually cost.`
+          : `${rows[0].name} is ₹${Number(input.ratePerKg).toFixed(2)} a kilo. `
+            + 'Boxes packed for it from now on carry that.',
+      };
+    });
+  }));
+
 mastersRouter.get('/pricing', h(async (req) =>
   query(req.actor,
     `SELECT pp.*, c.name AS category_name, c.icon AS category_icon,
@@ -771,7 +824,7 @@ function assertBlockReason(input: { status: string; statusReason?: string | null
   }
 }
 
-const vehicleCols = `id, reg_no, vehicle_type, make_model, capacity_kg, is_reefer,
+const vehicleCols = `id, created_at, reg_no, vehicle_type, make_model, capacity_kg, is_reefer,
             reefer_min_temp_c, tare_reference_kg, fitness_expiry, insurance_expiry,
             puc_expiry, permit_expiry, status, status_reason, transporter_name,
             owner_supplier_id, default_seal_no, is_active, retired_at, retired_reason, trips_90d,

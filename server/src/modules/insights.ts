@@ -61,7 +61,7 @@ insightsRouter.get('/product-performance', requires('reports.purchase.view'), h(
   const days = Math.min(Math.max(Number(req.query.days ?? 30), 1), 365);
   const c = req.actor.companyId;
 
-  const [bought, sold, wasted, audited, stock, suppliers, places, daily, categories] =
+  const [bought, sold, wasted, audited, stock, suppliers, places, daily, categories, unitCost] =
     await Promise.all([
       query(req.actor,
         `SELECT gl.product_id, SUM(gl.accepted_qty) AS qty, SUM(gl.line_value) AS value,
@@ -72,22 +72,23 @@ insightsRouter.get('/product-performance', requires('reports.purchase.view'), h(
           GROUP BY gl.product_id`, [c, days]),
       query(req.actor,
         `SELECT sl.product_id, SUM(sl.qty) AS qty, SUM(sl.value) AS revenue,
-                SUM(sl.qty * COALESCE(b.landed_rate, 0)) AS cogs,
+                /* v_batch_unit_cost, never landed_rate: qty is in the base unit. db/49 */
+                SUM(sl.qty * COALESCE(uc.landed_per_held_unit, 0)) AS cogs,
                 count(DISTINCT si.id)::int AS bills,
                 count(DISTINCT si.customer_id)::int AS customers
            FROM stock_issue_lines sl
            JOIN stock_issues si ON si.id = sl.issue_id
-           LEFT JOIN batches b ON b.id = sl.batch_id
+           LEFT JOIN v_batch_unit_cost uc ON uc.batch_id = sl.batch_id
           WHERE si.company_id = $1 AND si.reason = 'SALE'
             AND si.status IN ('POSTED','RECEIVED')
             AND si.issue_date > CURRENT_DATE - $2::int
           GROUP BY sl.product_id`, [c, days]),
       query(req.actor,
         `SELECT sl.product_id, SUM(sl.qty) AS qty,
-                SUM(sl.qty * COALESCE(b.landed_rate, 0)) AS value
+                SUM(sl.qty * COALESCE(uc.landed_per_held_unit, 0)) AS value
            FROM stock_issue_lines sl
            JOIN stock_issues si ON si.id = sl.issue_id
-           LEFT JOIN batches b ON b.id = sl.batch_id
+           LEFT JOIN v_batch_unit_cost uc ON uc.batch_id = sl.batch_id
           WHERE si.company_id = $1 AND si.reason IN ('WASTAGE','ADJUSTMENT')
             AND si.issue_date > CURRENT_DATE - $2::int
           GROUP BY sl.product_id`, [c, days]),
@@ -98,8 +99,9 @@ insightsRouter.get('/product-performance', requires('reports.purchase.view'), h(
           GROUP BY product_id`, [c, days]),
       query(req.actor,
         `SELECT sb.product_id, SUM(sb.qty) AS qty,
-                SUM(sb.qty * COALESCE(b.landed_rate,0)) AS value
-           FROM stock_balances sb LEFT JOIN batches b ON b.id = sb.batch_id
+                SUM(sb.qty * COALESCE(uc.landed_per_held_unit,0)) AS value
+           FROM stock_balances sb
+           LEFT JOIN v_batch_unit_cost uc ON uc.batch_id = sb.batch_id
           WHERE sb.company_id = $1 GROUP BY sb.product_id`, [c]),
       /* Who we buy it from, biggest first — "supplier of that product" is a
        * list, not a field, and the useful part is who dominates. */
@@ -144,12 +146,22 @@ insightsRouter.get('/product-performance', requires('reports.purchase.view'), h(
            FROM products p
            LEFT JOIN product_categories cat ON cat.id = p.category_id
           WHERE p.company_id = $1 AND p.is_active`, [c]),
+      /* What a unit of this ACTUALLY costs us, broken into the four things it
+       * is made of. The margin above is measured against landed_rate — what the
+       * supplier charged plus the charges on that load — which is right for a
+       * per-batch answer but is not what the produce costs by the time it is on
+       * a shelf. Handling and both freight legs are real money and were nowhere
+       * on this page, so a product could read "making money" while losing it. */
+      query(req.actor,
+        `SELECT product_id, cost_to_warehouse, overhead_cost, freight_in,
+                cost_to_centre, total_cost, margin_pct, wastage_pct, min_sell_price
+           FROM v_product_pricing WHERE company_id = $1`, [c]),
     ]);
 
   const idx = (rows: any[], key = 'product_id') =>
     new Map(rows.map((r: any) => [r[key], r]));
   const bBy = idx(bought); const sBy = idx(sold); const wBy = idx(wasted);
-  const aBy = idx(audited); const stBy = idx(stock);
+  const aBy = idx(audited); const stBy = idx(stock); const ucBy = idx(unitCost);
 
   const group = (rows: any[]) => {
     const m = new Map<string, any[]>();
@@ -189,6 +201,21 @@ insightsRouter.get('/product-performance', requires('reports.purchase.view'), h(
       stockQty: Number(st?.qty ?? 0), stockValue: Number(st?.value ?? 0),
       sellThrough: boughtQty > 0 ? round((soldQty / boughtQty) * 100, 1) : null,
       netMargin: round(revenue - cogs - wasteValue, 2),
+      /* The build-up, per unit, so "what does it cost to buy this" has an
+       * answer on the same row as "what did it sell for". */
+      unitCost: (() => {
+        const u = ucBy.get(p.id);
+        if (!u) return null;
+        return {
+          boughtAt: Number(u.cost_to_warehouse), handling: Number(u.overhead_cost),
+          freightIn: Number(u.freight_in), toTheShop: Number(u.cost_to_centre),
+          total: Number(u.total_cost), marginPct: Number(u.margin_pct),
+          wastagePct: Number(u.wastage_pct), floor: Number(u.min_sell_price),
+        };
+      })(),
+      /* What we actually got per unit, against what it cost. The two numbers
+       * side by side are the whole question this page exists to answer. */
+      soldAt: soldQty > 0 ? round(revenue / soldQty, 2) : null,
       suppliers: (supBy.get(p.id) ?? []).map((x: any) => ({
         name: x.supplier_name, qty: Number(x.qty), value: Number(x.value),
       })),

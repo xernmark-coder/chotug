@@ -344,7 +344,9 @@ mapRouter.get('/scan/:qr', h(async (req) => {
                  * computes it — so a shelf, a report and the till cannot
                  * disagree about the same crate. */
                 b.landed_rate, b.landed_rate_per_kg,
-                pr.true_cost, pr.min_sell_price, pr.overhead_per_kg,
+                /* Per unit HELD — a shelf holds kilos, not purchase units. */
+                pr.true_cost_per_held_unit AS true_cost,
+                pr.min_sell_per_held_unit  AS min_sell_price, pr.overhead_per_kg,
                 SUM(pk.price)                             AS asking,
                 /* The cheapest and dearest box in the group, not just the
                  * total. Seventeen boxes averaging ₹293 hid one priced at zero
@@ -352,10 +354,12 @@ mapRouter.get('/scan/:qr', h(async (req) => {
                  * box somebody mis-labelled. */
                 MIN(pk.price)                             AS lowest_price,
                 MAX(pk.price)                             AS highest_price,
-                SUM(pk.qty) * COALESCE(b.landed_rate, 0)  AS cost_here,
+                /* v_batch_unit_cost, never landed_rate: qty is in the base unit. db/49 */
+                SUM(pk.qty) * COALESCE(uc.landed_per_held_unit, 0) AS cost_here,
                 s.trade_name                              AS supplier_name,
                 g.grn_no, g.posting_date                  AS received_on
            FROM packs pk
+           LEFT JOIN v_batch_unit_cost uc ON uc.batch_id = pk.batch_id
            JOIN products p ON p.id = pk.product_id
            JOIN batches  b ON b.id = pk.batch_id
            LEFT JOIN v_batch_pricing pr ON pr.batch_id = b.id
@@ -365,8 +369,8 @@ mapRouter.get('/scan/:qr', h(async (req) => {
           WHERE pk.bin_id = $1 AND pk.status = 'IN_STOCK'
           GROUP BY p.id, p.name, p.sku, p.icon, b.id, b.batch_no, pk.grade, pk.uom,
                    COALESCE(b.predicted_expiry_date, b.expiry_date),
-                   b.landed_rate, b.landed_rate_per_kg,
-                   pr.true_cost, pr.min_sell_price, pr.overhead_per_kg,
+                   b.landed_rate, b.landed_rate_per_kg, uc.landed_per_held_unit,
+                   pr.true_cost_per_held_unit, pr.min_sell_per_held_unit, pr.overhead_per_kg,
                    s.trade_name, g.grn_no, g.posting_date
           ORDER BY p.name, pk.grade`, [loc.id])
       : Promise.resolve([]),

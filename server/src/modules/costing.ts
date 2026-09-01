@@ -647,6 +647,7 @@ costingRouter.post('/invoices/:id/match', requires('finance.invoice.match'), h(a
 costingRouter.get('/invoices', h(async (req) =>
   query(req.actor,
     `SELECT i.id, i.invoice_no, i.invoice_date, i.due_date, i.total, i.status, i.is_rcm,
+            i.created_at,
             i.duplicate_of_id, s.trade_name AS supplier_name, o.po_no,
               m.overall AS match_result, m.findings,
               ps.paid_amount, ps.balance,

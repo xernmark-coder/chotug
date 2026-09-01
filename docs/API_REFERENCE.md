@@ -514,6 +514,69 @@ Both columns are `numeric`, not `money_amt`: that domain is `NOT NULL DEFAULT 0`
 which would make "nobody has priced this yet" indistinguishable from "the trip
 was free" — and Dispatch chases only the first.
 
+#### The label price, end to end
+
+```
+        what we paid for it        landed_rate_per_kg
+      + handling                   v_overhead_per_kg
+      + freight IN                 v_inbound_freight_per_kg
+      ───────────────────────────  = v_batch_pricing.cost_before_delivery
+      + delivery to WHERE IT GOES  v_centre_delivery_rate.rate_per_kg
+      ───────────────────────────  = what one unit costs
+      ÷ (1 − wastage)              what survives has to carry what does not
+      × (1 + margin)               product's own, or the company default
+      ───────────────────────────  = per unit
+      × what is in the box         = the price on the label
+```
+
+The destination is chosen **at the bench**, before the price, because it changes
+the price. Sell it from the warehouse and no delivery is charged at all — which
+matters, because 90% of sales are made there and every box used to carry a
+company-wide average of everybody else's journeys.
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/masters/delivery-rates` | any | `v_centre_delivery_rate` — per shop: the rate an admin set, what the trips actually cost, and which of the two is in force |
+| PUT | `/masters/delivery-rates/:warehouseId` | `master.delivery_rate.manage` | `ratePerKg: null` hands it back to the measured rate — different from setting zero |
+
+`warehouses.delivery_rate_per_kg` is **set**, not only derived: history says what
+the last few trips cost, not what the next one will, and a shop opened last week
+has no history to average. NULL means nobody has said, and the actual trips
+answer instead.
+
+Each box records `destination_warehouse_id` and `outbound_rate_used`, so a price
+can still be explained months later when the rate has moved. The rate written is
+always read from the database inside the transaction, never taken from the
+request — the screen shows it so the packer can see what they are agreeing to.
+
+#### Units: the one arithmetic rule
+
+Two quantities live in this schema and they are **not** the same:
+
+| | in what |
+|---|---|
+| `batches.landed_rate`, `po_lines.rate`, `grn_lines.rate` | the **purchase** unit — a box, a crate |
+| `stock_balances.qty`, `packs.qty`, `stock_issue_lines.qty` | the **base** unit — a kilogram |
+
+Multiplying one by the other overstates money by the weight of a box. Apples
+bought as ten ₹500 boxes are 100 kg of stock; `qty * landed_rate` reads that as
+₹50,000 instead of ₹5,000, and a 5 kg box got a ₹3,994 label instead of ₹399.
+It fails in the direction nobody notices — a price that is too high does not
+bounce, it just does not sell.
+
+**Join `v_batch_unit_cost` and use `landed_per_held_unit`.** It is the landed
+cost of one unit of what we *hold*, so it multiplies correctly against any of
+the base-unit quantities above. Never multiply one of them by `landed_rate`.
+
+`v_batch_pricing` carries the same distinction with overheads and freight
+included: `true_cost` / `min_sell_price` per purchase unit (what Finance
+reconciles against an invoice) and `true_cost_per_held_unit` /
+`min_sell_per_held_unit` per unit held (what a label is worked out from).
+The packing bench, the shelf, the till and every margin read the second.
+
+A check in the verification script fails the build if any query multiplies a
+base-unit quantity by `landed_rate` again. See db/48 and db/49.
+
 #### What was refused, in what, and where it went
 
 | Method | Path | Permission | Notes |

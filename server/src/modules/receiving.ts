@@ -469,7 +469,8 @@ receivingRouter.get('/pipeline', h(async (req) =>
     /* Where the load is standing comes along with the rest of it. The yard
      * screen is where somebody asks "where did we put gate 41" and answering it
      * from a different page is how nobody bothers to record the bay at all. */
-    `SELECT p.*, g.qc_bin_id, g.qc_parked_at, b.code AS qc_bay_code
+    `SELECT p.*, g.qc_bin_id, g.qc_parked_at, b.code AS qc_bay_code,
+            g.created_at
        FROM v_receiving_pipeline p
        JOIN gate_entries g ON g.id = p.gate_entry_id
        LEFT JOIN bins b ON b.id = g.qc_bin_id AND g.qc_released_at IS NULL
@@ -1595,6 +1596,7 @@ receivingRouter.post('/gate-entries/:id/grn', requires('receiving.grn.submit'), 
 receivingRouter.get('/grns', h(async (req) =>
   query(req.actor,
     `SELECT g.id, g.grn_no, g.grn_date, g.posting_date, g.status, g.total_accepted_qty,
+            g.created_at,
             g.total_rejected_qty, g.total_net_weight_kg, g.total_value, g.is_partial,
             s.trade_name AS supplier_name, o.po_no, ge.gate_no, ge.vehicle_reg_captured,
             u.full_name AS posted_by_name,
@@ -1746,7 +1748,7 @@ receivingRouter.get('/pickups', h(async (req) =>
 receivingRouter.get('/pickups/candidates', requires('logistics.pickup.manage'), h(async (req) =>
   query(req.actor,
     `SELECT o.id AS po_id, o.po_no, o.expected_date, o.grand_total, o.branch_id,
-            o.warehouse_id, o.status, o.supplier_response,
+            o.warehouse_id, o.status, o.supplier_response, o.created_at,
             o.transport_requested_at, o.transport_request_note,
             s.id AS supplier_id, s.trade_name AS supplier_name,
             s.phone AS supplier_phone,

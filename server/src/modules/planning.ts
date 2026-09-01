@@ -331,6 +331,7 @@ planningRouter.post('/requirements', requires('purchase.requirement.create'), h(
 planningRouter.get('/requirements', h(async (req) =>
   query(req.actor,
     `SELECT r.id, r.req_no, r.req_date, r.required_date, r.priority, r.source, r.status,
+            r.created_at,
             r.remarks, r.reasoning, b.name AS branch_name,
             cw.name AS raised_for_centre,
             (SELECT count(*) FROM requirement_lines l WHERE l.requirement_id = r.id) AS line_count,
@@ -1166,6 +1167,7 @@ planningRouter.post('/purchase-orders/:id/revise', requires('purchase.po.revise'
 planningRouter.get('/expected-arrivals', h(async (req) =>
   query(req.actor,
     `SELECT e.id, e.expected_date, e.window_start, e.window_end, e.status, e.vehicle_hint,
+            e.created_at,
             o.po_no, o.id AS po_id, o.grand_total, o.source_type,
             e.supplier_invoice_no, e.driver_name, e.driver_phone, e.transporter,
             e.lr_no, e.eway_bill_no, e.supplier_marked_sent_at, e.supplier_note,

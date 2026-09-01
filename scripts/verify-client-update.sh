@@ -327,7 +327,8 @@ grep -q "ShelfModal" web/src/pages/WarehouseMap.tsx \
   && ok "clicking a shelf opens what is on it" || no "shelf detail" "still prints a label"
 grep -q "days_on_the_shelf" server/src/modules/warehousemap.ts \
   && ok "...how long it has been there" || no "age" "missing"
-grep -q "pr.min_sell_price, pr.overhead_per_kg" server/src/modules/warehousemap.ts \
+grep -q "AS min_sell_price" server/src/modules/warehousemap.ts \
+  && grep -q "AS true_cost" server/src/modules/warehousemap.ts \
   && ok "...what it cost and the least it can go for" || no "money" "missing"
 grep -q "LEFT JOIN grn_lines gl ON gl.id = b.grn_line_id" server/src/modules/warehousemap.ts \
   && ok "...and who it came from" || no "provenance" "wrong join"
@@ -667,6 +668,11 @@ BLANK=$(Q "SELECT count(*) FROM payment_requests pr
 # First come / latest come, on every table that has rows with a time.
 grep -q "const TIME_FIELDS" web/src/components/ui.tsx \
   && ok "every table sorts by when the row arrived" || no "time sort" "per-page only"
+grep -q "defaultSort ?? '_added'" web/src/components/ui.tsx \
+  && ok "…newest first, without every page saying so" || no "time sort" "not the default"
+grep -q "defaultSort ? (cols.find" web/src/components/ui.tsx \
+  && ok "…unless the page has a better order of its own" \
+  || no "time sort" "overrides a shelf-life queue"
 grep -q "noAddedColumn" web/src/components/ui.tsx \
   && ok "…with a way out where a row has no age" || no "time sort" "forced everywhere"
 grep -q "String(c.sort(probe) ?? '') === timeOf(probe)" web/src/components/ui.tsx \
@@ -747,6 +753,129 @@ grep -q "back to it" web/src/pages/PackBench.tsx \
   && ok "…with a way back to the catalogue's" || no "bench margin" "no way back"
 grep -q "floorPerUnit = Number(bench.min_sell_price)" web/src/pages/PackBench.tsx \
   && ok "…and the floor still measures against policy" || no "floor" "moves with the typed margin"
+
+echo "── 56 · what it cost to buy, and what it fetched"
+grep -q "v_product_pricing" server/src/modules/insights.ts \
+  && ok "product performance knows the real cost" || no "unit cost" "stops at the supplier's price"
+grep -q "unitCost" web/src/pages/Performance.tsx \
+  && ok "…broken into what it is made of" || no "unit cost" "one opaque number"
+grep -q "soldAt" server/src/modules/insights.ts \
+  && ok "…beside what a unit actually fetched" || no "sold at" "totals only"
+grep -q "under cost" web/src/pages/Performance.tsx \
+  && ok "…and says so when it sold under cost" || no "under cost" "silent"
+
+echo "── 57 · every record list sorts by time"
+# The shared column only appears where a row HAS a time, so the queries behind
+# the record lists have to carry one. Aggregates deliberately do not.
+MISS=""
+for q in "e.created_at" "g.created_at" "i.created_at" "o.created_at" "b.created_at"; do :; done
+grep -q "e.created_at" server/src/modules/planning.ts || MISS="$MISS expected-arrivals"
+grep -q "g.created_at" server/src/modules/receiving.ts || MISS="$MISS yard/grns"
+grep -q "i.created_at" server/src/modules/costing.ts   || MISS="$MISS invoices"
+grep -q "created_at, reg_no" server/src/modules/masters.ts || MISS="$MISS vehicles"
+grep -q "became_due_at AS created_at" server/src/modules/finance.ts || MISS="$MISS dues"
+grep -q "MIN(k.created_at)" server/src/modules/inventory.ts || MISS="$MISS pack-groups"
+[ -z "$MISS" ] && ok "every record list carries the row's own age" \
+  || no "time sort" "no timestamp on:$MISS"
+grep -q "inspected_at" web/src/components/ui.tsx \
+  && ok "…inspections included" || no "time sort" "QC has no time field"
+
+echo "── 58 · a box is priced by what is in it"
+chk "the view says the cost per unit HELD" \
+  "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='v_batch_pricing' AND column_name='true_cost_per_held_unit'")"
+# The bug: a per-PURCHASE-unit cost multiplied by a number of kilograms. For a
+# batch bought by the box, the two differ by the weight of the box.
+BAD=$(Q "SELECT count(*) FROM v_batch_pricing
+          WHERE base_uom='KG' AND landed_rate_per_kg > 0
+            AND abs(true_cost_per_held_unit
+                    - (landed_rate_per_kg + COALESCE(overhead_per_kg,0)
+                       + COALESCE(inbound_per_kg,0) + COALESCE(outbound_per_kg,0))) > 0.01")
+[ "$BAD" = "0" ] && ok "…and it is the per-kilo build-up, exactly" \
+  || no "held cost" "$BAD batches do not add up"
+# Proven on the batches where it actually differs.
+chk "proven on batches bought by the box" \
+  "$(Q "SELECT count(*) FROM v_batch_pricing WHERE landed_rate/NULLIF(landed_rate_per_kg,0) > 1.5")"
+OVER=$(Q "SELECT count(*) FROM v_batch_pricing
+           WHERE landed_rate/NULLIF(landed_rate_per_kg,0) > 1.5
+             AND true_cost_per_held_unit >= true_cost")
+[ "$OVER" = "0" ] && ok "…where the held cost is now below the per-box one" \
+  || no "held cost" "$OVER still priced per box"
+# Every screen that multiplies by a base-unit quantity must read the held cost.
+for f in inventory warehousemap; do
+  grep -q "per_held_unit" server/src/modules/$f.ts \
+    || no "held cost" "$f.ts still reads the per-purchase-unit cost"
+done
+grep -q "per_held_unit" server/src/modules/inventory.ts \
+  && grep -q "per_held_unit" server/src/modules/warehousemap.ts \
+  && ok "the bench, the shelf and the till all use it" || no "held cost" "not everywhere"
+grep -q "landed_rate_per_kg, b.landed_rate, 0)" server/src/modules/inventory.ts \
+  && ok "…and value at risk is per kilo too" || no "value at risk" "per purchase unit"
+
+echo "── 59 · one cost per unit held, everywhere"
+chk "one definition to join"  "$(Q "SELECT count(*) FROM pg_views WHERE viewname='v_batch_unit_cost'")"
+# The bug class: a per-PURCHASE-unit rate multiplied by a BASE-unit quantity.
+# stock_balances.qty, packs.qty and stock_issue_lines.qty are all base-unit, so
+# no query may multiply any of them by batches.landed_rate.
+BAD=$(grep -rn "landed_rate" server/src/modules/*.ts \
+      | grep -E "(sb|sl|sil|pk)\.qty[^)]*\* *COALESCE\(b\.landed_rate|\* *COALESCE\(b\.landed_rate,0?\)" \
+      | grep -v "landed_rate_per_kg" | wc -l)
+[ "$BAD" = "0" ] && ok "no base-unit quantity is priced per purchase unit" \
+  || no "unit mismatch" "$BAD site(s) still multiply qty by landed_rate"
+USES=$(grep -rl "landed_per_held_unit" server/src/modules/*.ts | wc -l)
+[ "$USES" -ge 4 ] && ok "…the money screens all join the one definition ($USES files)" \
+  || no "unit cost" "only $USES files"
+# And it has to scale linearly: twice the kilos, twice the money.
+chk "proven on batches bought by the box" \
+  "$(Q "SELECT count(*) FROM v_batch_unit_cost WHERE kg_per_purchase_unit > 1.5")"
+LIN=$(Q "SELECT count(*) FROM v_batch_unit_cost uc JOIN batches b ON b.id=uc.batch_id
+          WHERE uc.base_uom='KG' AND COALESCE(b.landed_rate_per_kg,0) > 0
+            AND abs(uc.landed_per_held_unit - b.landed_rate_per_kg) > 0.0001")
+[ "$LIN" = "0" ] && ok "…and a kilo costs exactly the per-kilo rate" \
+  || no "unit cost" "$LIN batches disagree with their own per-kg rate"
+
+echo "── 60 · the box is priced for the journey it will make"
+chk "each shop has its own delivery rate" \
+  "$(Q "SELECT count(*) FROM pg_views WHERE viewname='v_centre_delivery_rate'")"
+chk "…settable, not only measured" \
+  "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='warehouses' AND column_name='delivery_rate_per_kg'")"
+# NULL must mean "nobody has said", which falls back to the trips — not zero.
+NN=$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='warehouses'
+        AND column_name='delivery_rate_per_kg' AND is_nullable='NO'")
+[ "$NN" = "0" ] && ok "…and unset falls back to what the trips cost" || no "rate" "NOT NULL"
+grep -q "delivery-rates/:warehouseId" server/src/modules/masters.ts \
+  && ok "…entered from the admin panel" || no "rate" "no endpoint"
+grep -q "DeliveryRatesCard" web/src/pages/Catalogue.tsx \
+  && ok "…on the same screen as the margins" || no "rate" "no screen"
+# The cost before it goes anywhere, so an average is not baked into every box.
+chk "the bench prices from cost BEFORE delivery" \
+  "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='v_batch_pricing' AND column_name='cost_before_delivery'")"
+grep -q "cost_before_delivery" web/src/pages/PackBench.tsx \
+  && ok "…and adds only the chosen shop's leg" || no "bench" "still a company average"
+grep -q "Where will these be sold?" web/src/pages/PackBench.tsx \
+  && ok "…chosen before the price, on both forms" || no "bench" "no destination"
+# What a label was priced on has to survive, or a price cannot be explained.
+chk "a box remembers where it was priced to go" \
+  "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='packs' AND column_name='destination_warehouse_id'")"
+chk "…and the rate that went into it" \
+  "$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='packs' AND column_name='outbound_rate_used'")"
+chk "proven: boxes priced for a shop" \
+  "$(Q "SELECT count(*) FROM packs WHERE destination_warehouse_id IS NOT NULL AND outbound_rate_used > 0")"
+# The rate the server records must be the database's, never the browser's.
+grep -q "async function deliveryRateFor" server/src/modules/inventory.ts \
+  && ok "the rate is read from the database, not believed from the browser" \
+  || no "rate" "taken from the request"
+# And it still scales linearly with what is in the box.
+# Linearity is a property of the SUGGESTION, not of stored prices — an operator
+# may always type over one, and historic boxes were priced by hand. So assert it
+# where it is guaranteed: the suggestion is one per-unit figure multiplied by
+# what is in the box, with no branch on size anywhere in it.
+grep -q "perUnitAt(cost, wastage, margin) \* per" web/src/pages/PackBench.tsx \
+  && ok "…the suggestion is per-unit × what is in the box" \
+  || no "linearity" "the suggestion is not a single multiplication"
+grep -q "return (cost / Math.max(1 - wastagePct / 100, 0.05)) \* (1 + marginPct / 100);" \
+     web/src/pages/PackBench.tsx \
+  && ok "…and the per-unit figure never sees the box size" \
+  || no "linearity" "box size leaks into the per-unit cost"
 
 echo "── 43 · filters with totals"
 # This check used to name three pages and pass when those three had filters —

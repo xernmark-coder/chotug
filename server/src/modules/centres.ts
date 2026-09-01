@@ -46,9 +46,10 @@ centreRouter.get('/', h(async (req) =>
        FROM warehouses w
        LEFT JOIN users u ON u.id = w.manager_user_id
        LEFT JOIN (SELECT sb.warehouse_id, SUM(sb.qty) AS qty,
-                         SUM(sb.qty * COALESCE(b.landed_rate,0)) AS value
+                         /* v_batch_unit_cost, never landed_rate: qty is in the base unit. db/49 */
+                         SUM(sb.qty * COALESCE(uc.landed_per_held_unit,0)) AS value
                     FROM stock_balances sb
-                    LEFT JOIN batches b ON b.id = sb.batch_id
+                    LEFT JOIN v_batch_unit_cost uc ON uc.batch_id = sb.batch_id
                    GROUP BY sb.warehouse_id) s ON s.warehouse_id = w.id
        LEFT JOIN (SELECT dest_warehouse_id, count(*)::int AS in_transit
                     FROM stock_issues WHERE status = 'IN_TRANSIT'
@@ -115,7 +116,8 @@ centreRouter.get('/:id/today', h(async (req) => {
     query(req.actor,
       `SELECT p.id AS product_id, p.name AS product_name, p.sku, p.icon, p.base_uom,
               SUM(sb.qty) AS qty, SUM(sb.qty - sb.reserved_qty) AS available,
-              SUM(sb.qty * COALESCE(b.landed_rate,0)) AS value,
+              /* v_batch_unit_cost, never landed_rate: qty is in the base unit. db/49 */
+              SUM(sb.qty * COALESCE(uc.landed_per_held_unit,0)) AS value,
               MIN(COALESCE(b.predicted_expiry_date, b.expiry_date)) AS soonest_expiry,
               /* How much of it is in labelled boxes. A shop sells boxes, so
                * "30 kg" and "6 boxes of 5 kg" are different facts and the
@@ -126,6 +128,7 @@ centreRouter.get('/:id/today', h(async (req) => {
          FROM stock_balances sb
          JOIN products p ON p.id = sb.product_id
          LEFT JOIN batches b ON b.id = sb.batch_id
+         LEFT JOIN v_batch_unit_cost uc ON uc.batch_id = sb.batch_id
         WHERE sb.warehouse_id = $1 AND sb.qty > 0
         GROUP BY p.id, p.name, p.sku, p.icon, p.base_uom
         ORDER BY p.name`, [w.id]),
@@ -823,9 +826,9 @@ centreRouter.get('/performance', requires('centre.performance.view'), h(async (r
        FROM warehouses w
        LEFT JOIN (SELECT si.warehouse_id, count(*)::int AS bills,
                          SUM(si.total_qty) AS qty, SUM(si.total_value) AS revenue,
-                         SUM((SELECT COALESCE(SUM(sl.qty * COALESCE(b.landed_rate,0)),0)
+                         SUM((SELECT COALESCE(SUM(sl.qty * COALESCE(uc.landed_per_held_unit,0)),0)
                                 FROM stock_issue_lines sl
-                                LEFT JOIN batches b ON b.id = sl.batch_id
+                                LEFT JOIN v_batch_unit_cost uc ON uc.batch_id = sl.batch_id
                                WHERE sl.issue_id = si.id)) AS cogs
                     FROM stock_issues si
                    WHERE si.reason='SALE' AND si.status IN ('POSTED','RECEIVED')

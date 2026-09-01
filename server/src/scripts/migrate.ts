@@ -106,6 +106,10 @@ async function main() {
     await run('45_qc_without_a_template.sql');
     await run('46_inbound_freight.sql');
     await run('47_qc_returns.sql');
+    await run('48_cost_per_unit_held.sql');
+    await run('49_one_unit_cost.sql');
+    await run('50_delivery_rate.sql');
+    await run('51_cost_before_delivery.sql');
     // Last, so the FORCE that 04 and 06 re-apply is lifted again.
     await run('11_rls_managed_host.sql');
     console.log('\nSchema and master data are in place.');

@@ -453,7 +453,10 @@ financeRouter.get('/requests', h(async (req) => {
  * ------------------------------------------------------------------------ */
 financeRouter.get('/dues', requires('finance.due.view'), h(async (req) =>
   query(req.actor,
-    `SELECT d.*, s.phone AS supplier_phone, s.payment_terms_days
+    `SELECT d.*, s.phone AS supplier_phone, s.payment_terms_days,
+            /* When it fell due is this row's own age — the view has no
+               created_at because a due is a state, not a document. */
+            d.became_due_at AS created_at
        FROM v_supplier_dues d
        LEFT JOIN suppliers s ON s.id = d.supplier_id
       WHERE d.company_id = $1

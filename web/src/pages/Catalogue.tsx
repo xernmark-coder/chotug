@@ -128,6 +128,8 @@ function PricingPanel() {
         </div></div>
       </div>
 
+      <DeliveryRatesCard />
+
       <div className="card"><div className="card-body tight">
         <FilterBar f={f} placeholder="Search product, code, category" />
         <FilterTotals f={f} noun="product" />
@@ -1174,6 +1176,115 @@ function QcTemplateModal({ template, onClose, onDone }: {
         <b>Weight</b> is how much the check counts towards the score — a 3 matters three
         times as much as a 1.
       </p>
+    </Modal>
+  );
+}
+
+/* What it costs to get a kilo to each shop.
+ *
+ * This is the number the packing bench adds to a box's price once the packer
+ * says where it is going. It is SET here rather than only measured, because
+ * history says what the last few trips cost and not what the next one will —
+ * and a shop opened last week has no history to average. Clear it and the
+ * actual trips answer instead, which is different from setting it to zero.
+ */
+function DeliveryRatesCard() {
+  const toast = useToast();
+  const { can } = useAuth();
+  const rows = useApi<any[]>('/masters/delivery-rates');
+  const [editing, setEditing] = useState<any>(null);
+  const centres = (rows.data ?? []).filter((r: any) => r.is_centre);
+  const editable = can('master.delivery_rate.manage');
+
+  if (!centres.length) return null;
+  return (
+    <div className="card mb"><div className="card-body">
+      <div className="section-head sm">
+        <h3>Getting it to each shop</h3><span className="rule" />
+      </div>
+      <p className="small muted mb">
+        Added to a box&rsquo;s price at the packing bench, once the packer says where it
+        is going. A box sold from the warehouse carries none of it.
+      </p>
+      <DataTable
+        loading={rows.loading}
+        rows={centres}
+        noAddedColumn
+        cols={[
+          { key: 'n', head: 'Shop', render: (r: any) => <b>{r.name}</b> },
+          { key: 'r', head: 'Per kg', num: true, render: (r: any) => (
+            <b>{inr(r.rate_per_kg, 2)}</b>) },
+          { key: 's', head: 'Where that comes from', render: (r: any) => (
+            <div className="small">
+              {r.rate_source}
+              {r.delivery_rate_note ? <div className="muted">{r.delivery_rate_note}</div> : null}
+            </div>
+          ) },
+          { key: 'a', head: 'What the trips cost', num: true, render: (r: any) =>
+            r.actual_rate != null
+              ? <span className="small">{inr(r.actual_rate, 2)}
+                  <div className="muted">{num(r.trips, 0)} trip(s), {num(r.kg_moved, 0)} kg</div></span>
+              : <span className="muted small">no trips yet</span> },
+          { key: 'e', head: '', width: 90, render: (r: any) => editable ? (
+            <button className="btn sm" onClick={() => setEditing(r)}>Set it</button>
+          ) : null },
+        ]}
+      />
+      {editing ? (
+        <RateModal row={editing} onClose={() => setEditing(null)}
+          onDone={(m: string) => { setEditing(null); rows.reload(); toast(m, 'ok'); }} />
+      ) : null}
+    </div></div>
+  );
+}
+
+function RateModal({ row, onClose, onDone }: {
+  row: any; onClose: () => void; onDone: (m: string) => void;
+}) {
+  const [rate, setRate] = useState(row.set_rate != null ? String(Number(row.set_rate)) : '');
+  const [note, setNote] = useState(row.delivery_rate_note ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<any>(null);
+
+  return (
+    <Modal title={`Delivery to ${row.name}`} onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy} onClick={async () => {
+          setBusy(true); setError(null);
+          try {
+            const r = await api.put<any>(`/masters/delivery-rates/${row.warehouse_id}`, {
+              ratePerKg: rate.trim() === '' ? null : Number(rate),
+              note: note.trim() || undefined,
+            });
+            onDone(r.message);
+          } catch (e: any) { setError(e); } finally { setBusy(false); }
+        }}>Save</button>
+      </>}>
+      <ErrorBanner error={error} />
+      <dl className="kv mb">
+        <dt>What the trips actually cost</dt>
+        <dd>{row.actual_rate != null
+          ? <>{inr(row.actual_rate, 2)} a kg over {num(row.trips, 0)} trip(s)</>
+          : <span className="muted">nothing delivered here yet</span>}</dd>
+        <dt>In force now</dt><dd><b>{inr(row.rate_per_kg, 2)}</b> — {row.rate_source}</dd>
+      </dl>
+      <Field label="What it costs to deliver a kilo here (₹)"
+        hint="Leave it empty and the actual trips answer instead — which is not the same as zero.">
+        <input type="number" step="0.01" min={0} value={rate} autoFocus
+          onChange={(e) => setRate(e.target.value)} placeholder="empty = use the trips" />
+      </Field>
+      <Field label="Why this figure">
+        <input value={note} onChange={(e) => setNote(e.target.value)}
+          placeholder="Contract rate with Pawar Roadlines, revised April" />
+      </Field>
+      <div className="banner info">
+        <span><Icon name="info" size={16} /></span>
+        <div className="small">
+          Boxes packed for {row.name} from now on carry this. Boxes already labelled
+          keep the rate they were priced at.
+        </div>
+      </div>
     </Modal>
   );
 }

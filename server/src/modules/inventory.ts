@@ -54,7 +54,11 @@ inventoryRouter.get('/issuable', h(async (req) =>
             /* What it really cost and the least it can go for. Computed in one
              * place (v_batch_pricing) so the till, the report and the dashboard
              * cannot each arrive at a different floor price. */
-            pr.overhead_per_kg, pr.true_cost, pr.min_sell_price,
+            pr.overhead_per_kg,
+            /* Per unit HELD. Everything beside it — qty, a suggested rate,
+             * a box price — is in the base unit, so the cost must be too. */
+            pr.true_cost_per_held_unit AS true_cost,
+            pr.min_sell_per_held_unit  AS min_sell_price,
             pr.wastage_pct, pr.margin_pct,
             COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date,
             (COALESCE(b.predicted_expiry_date, b.expiry_date) - CURRENT_DATE) AS days_to_expiry,
@@ -460,7 +464,8 @@ inventoryRouter.post('/issues/:id/cancel', requires('inventory.stock.cancel'), h
    never silently zero because the wrong column was read.
    ======================================================================== */
 
-const LINE_COST = `COALESCE(sil.qty * b.landed_rate, sil.weight_kg * sil.landed_rate_per_kg, 0)`;
+/* sil.qty is in the base unit, so the rate must be per base unit — db/49. */
+const LINE_COST = `COALESCE(sil.qty * uc.landed_per_held_unit, sil.weight_kg * sil.landed_rate_per_kg, 0)`;
 
 inventoryRouter.get('/sales-summary', h(async (req) => {
   const days = Math.min(365, Math.max(1, Number(req.query.days ?? 30)));
@@ -477,6 +482,7 @@ inventoryRouter.get('/sales-summary', h(async (req) => {
        FROM stock_issues si
        JOIN stock_issue_lines sil ON sil.issue_id = si.id
        JOIN batches b ON b.id = sil.batch_id
+       LEFT JOIN v_batch_unit_cost uc ON uc.batch_id = sil.batch_id
       WHERE si.company_id = $1 AND si.reason = 'SALE' AND si.status = 'POSTED'
         AND si.issue_date >= CURRENT_DATE - ($3 || ' days')::interval
         AND ($2::uuid IS NULL OR si.warehouse_id = $2)`, p);
@@ -489,6 +495,7 @@ inventoryRouter.get('/sales-summary', h(async (req) => {
        FROM stock_issues si
        JOIN stock_issue_lines sil ON sil.issue_id = si.id
        JOIN batches b ON b.id = sil.batch_id
+       LEFT JOIN v_batch_unit_cost uc ON uc.batch_id = sil.batch_id
       WHERE si.company_id = $1 AND si.status = 'POSTED'
         AND si.reason IN ('WASTAGE', 'ADJUSTMENT')
         AND si.issue_date >= CURRENT_DATE - ($3 || ' days')::interval
@@ -504,15 +511,17 @@ inventoryRouter.get('/sales-summary', h(async (req) => {
          FROM stock_issues si
          JOIN stock_issue_lines sil ON sil.issue_id = si.id
          JOIN batches b ON b.id = sil.batch_id
+         LEFT JOIN v_batch_unit_cost uc ON uc.batch_id = sil.batch_id
         WHERE si.company_id = $1 AND si.reason = 'SALE' AND si.status = 'POSTED'
           AND si.issue_date >= CURRENT_DATE - ($3 || ' days')::interval
           AND ($2::uuid IS NULL OR si.warehouse_id = $2)
         GROUP BY sil.product_id
      ), onhand AS (
        SELECT sb.product_id, SUM(sb.qty) AS qty_left,
-              SUM(sb.qty * COALESCE(b.landed_rate, 0)) AS value_left
+              SUM(sb.qty * COALESCE(uc.landed_per_held_unit, 0)) AS value_left
          FROM stock_balances sb
          JOIN batches b ON b.id = sb.batch_id
+         LEFT JOIN v_batch_unit_cost uc ON uc.batch_id = sb.batch_id
         WHERE sb.company_id = $1 AND sb.qty > 0
           AND ($2::uuid IS NULL OR sb.warehouse_id = $2)
         GROUP BY sb.product_id
@@ -539,6 +548,7 @@ inventoryRouter.get('/sales-summary', h(async (req) => {
        FROM stock_issues si
        JOIN stock_issue_lines sil ON sil.issue_id = si.id
        JOIN batches b ON b.id = sil.batch_id
+       LEFT JOIN v_batch_unit_cost uc ON uc.batch_id = sil.batch_id
       WHERE si.company_id = $1 AND si.reason = 'SALE' AND si.status = 'POSTED'
         AND si.issue_date >= CURRENT_DATE - ($3 || ' days')::interval
         AND ($2::uuid IS NULL OR si.warehouse_id = $2)
@@ -565,7 +575,7 @@ inventoryRouter.get('/sales-summary', h(async (req) => {
  * ------------------------------------------------------------------------ */
 inventoryRouter.get('/sell-suggestions', h(async (req) => {
   const rows = await query(req.actor,
-    `SELECT b.id AS batch_id, b.batch_no, b.grade,
+    `SELECT b.id AS batch_id, b.batch_no, b.grade, b.created_at,
             p.id AS product_id, p.name AS product_name, p.sku, p.base_uom,
             sb.warehouse_id, w.name AS warehouse_name,
             (CASE WHEN p.base_uom = 'KG' AND COALESCE(sb.weight_kg, 0) > 0
@@ -574,8 +584,16 @@ inventoryRouter.get('/sell-suggestions', h(async (req) => {
             COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date,
             (COALESCE(b.predicted_expiry_date, b.expiry_date) - CURRENT_DATE) AS days_left,
             (CURRENT_DATE - b.received_date) AS age_days,
-            (sb.qty - sb.reserved_qty) * COALESCE(b.landed_rate, 0) AS value_at_risk,
-            pr.overhead_per_kg, pr.true_cost, pr.min_sell_price,
+            /* qty is in the base unit, so the rate has to be as well —
+             * landed_rate is per PURCHASE unit and made a 100 kg batch bought
+             * as ten ₹500 boxes look like ₹50,000 at risk instead of ₹5,000. */
+            (sb.qty - sb.reserved_qty) * COALESCE(b.landed_rate_per_kg, b.landed_rate, 0)
+                                                 AS value_at_risk,
+            pr.overhead_per_kg,
+            /* Per unit HELD. Everything beside it — qty, a suggested rate,
+             * a box price — is in the base unit, so the cost must be too. */
+            pr.true_cost_per_held_unit AS true_cost,
+            pr.min_sell_per_held_unit  AS min_sell_price,
             pr.wastage_pct, pr.margin_pct,
             -- What this product has actually been fetching lately, so the
             -- suggested price is evidence rather than a guess.
@@ -712,7 +730,7 @@ inventoryRouter.get('/pack-demand', h(async (req) =>
 inventoryRouter.get('/packable', h(async (req) =>
   query(req.actor,
     `SELECT b.id AS batch_id, b.batch_no, b.grade, p.id AS product_id,
-            p.name AS product_name, p.sku, p.base_uom,
+            p.name AS product_name, p.sku, p.base_uom, b.created_at,
             sb.warehouse_id, w.name AS warehouse_name,
             (CASE WHEN p.base_uom = 'KG' AND COALESCE(sb.weight_kg, 0) > 0
               THEN sb.weight_kg ELSE sb.qty END - sb.reserved_qty) AS available_qty,
@@ -801,7 +819,17 @@ inventoryRouter.get('/pack-bench/:batchId', h(async (req) => {
              * label IS the selling price — this bench is where it is decided.
              * The person setting it needs the floor in front of them, or they
              * are guessing against a cost nobody showed them. */
-            pr.overhead_per_kg, pr.cost_to_centre, pr.true_cost, pr.min_sell_price,
+            pr.overhead_per_kg, pr.cost_to_centre,
+            /* Per unit HELD, not per unit bought. The bench types its box size
+             * in the base unit and stock is counted in it, so the cost has to
+             * be in it too — a per-box cost multiplied by kilograms priced a
+             * 5 kg box of mango at ₹1,979 instead of ₹132. See db/48. */
+            pr.true_cost_per_held_unit    AS true_cost,
+            pr.min_sell_per_held_unit     AS min_sell_price,
+            /* What it cost before it goes anywhere. The bench adds the rate for
+             * the destination the packer picks — an average of everybody's
+             * journeys has no business on a box being sold where it stands. */
+            pr.cost_before_delivery,
             pr.margin_pct, pr.wastage_pct
        FROM stock_balances sb
        JOIN batches b ON b.id = sb.batch_id
@@ -813,7 +841,7 @@ inventoryRouter.get('/pack-bench/:batchId', h(async (req) => {
     [req.params.batchId, req.actor.companyId]);
   if (!b) throw ApiError.notFound('That batch is not in stock anywhere.');
 
-  const [byGrade, recent, bins, wanted] = await Promise.all([
+  const [byGrade, recent, bins, wanted, destinations] = await Promise.all([
     query(req.actor,
       `SELECT grade, count(*)::int AS packs, SUM(qty) AS qty,
               SUM(COALESCE(weight_kg,0)) AS weight_kg,
@@ -845,6 +873,17 @@ inventoryRouter.get('/pack-bench/:batchId', h(async (req) => {
       `SELECT * FROM v_pack_size_demand
         WHERE company_id = $1 AND product_id = $2
         ORDER BY needed_by NULLS LAST`, [req.actor.companyId, b.product_id]),
+    /* Everywhere these boxes could go, and what the trip costs a kilo.
+     *
+     * The packer picks one, and only that centre's rate goes into that box's
+     * price. Selling from the warehouse is a destination too — the one that
+     * costs nothing, and the one 90% of sales actually take. */
+    query(req.actor,
+      `SELECT warehouse_id, name, is_centre, rate_per_kg, rate_source,
+              set_rate, actual_rate, trips
+         FROM v_centre_delivery_rate
+        WHERE company_id = $1
+        ORDER BY is_centre, name`, [req.actor.companyId]),
   ]);
 
   /* Packs can outlive the stock they were made from: issuing a batch to a
@@ -860,9 +899,23 @@ inventoryRouter.get('/pack-bench/:batchId', h(async (req) => {
     ...b,
     unpacked: Math.max(0, raw),
     overPacked: raw < 0 ? Math.abs(raw) : 0,
-    byGrade, recent, bins, wanted,
+    byGrade, recent, bins, wanted, destinations,
   };
 }));
+
+
+/* The delivery rate for a destination, read from the database rather than
+ * believed from the browser. The screen shows it so the packer can see what
+ * they are agreeing to; the number that gets recorded is this one. Selling from
+ * where it stands has no destination and no rate. */
+async function deliveryRateFor(tx: any, actor: any, destId?: string | null) {
+  if (!destId) return null;
+  const { rows } = await tx.query(
+    `SELECT rate_per_kg FROM v_centre_delivery_rate
+      WHERE warehouse_id = $1 AND company_id = $2`, [destId, actor.companyId]);
+  if (!rows[0]) throw ApiError.badRequest('That is not somewhere we deliver to.');
+  return Number(rows[0].rate_per_kg);
+}
 
 /**
  * One box. Weighed, graded and labelled by the person holding it.
@@ -878,6 +931,9 @@ inventoryRouter.post('/pack-bench/:batchId/box',
       weightKg: z.coerce.number().positive().optional(),
       grade: z.string().trim().min(1, 'What grade is this box?').max(12),
       price: z.coerce.number().nonnegative().default(0),
+      /* Where this box was priced to go. Absent means it is being sold
+       * where it stands, and carries no delivery cost. */
+      destinationWarehouseId: z.string().uuid().nullable().optional(),
       label: z.string().trim().max(40).optional(),
       note: z.string().trim().max(200).optional(),
       /* Scanned straight after grading, so the box never sits on the bench
@@ -930,19 +986,24 @@ inventoryRouter.post('/pack-bench/:batchId/box',
       const { rows: seq } = await tx.query(
         `SELECT COALESCE(MAX(pack_no),0) + 1 AS n FROM packs WHERE run_id = $1`, [run.id]);
 
+      const outboundRate = await deliveryRateFor(tx, req.actor, input.destinationWarehouseId);
+
       const { rows } = await tx.query(
         `INSERT INTO packs (company_id, run_id, batch_id, product_id, warehouse_id,
                 code, pack_no, group_label, qty, uom, price, grade, weight_kg,
-                graded_by, graded_at, qc_note, bin_id, stored_at, stored_by, created_by)
+                graded_by, graded_at, qc_note, bin_id, stored_at, stored_by, created_by,
+                destination_warehouse_id, outbound_rate_used)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),$15,$16,
                  CASE WHEN $16::uuid IS NULL THEN NULL ELSE now() END,
-                 CASE WHEN $16::uuid IS NULL THEN NULL ELSE $14::uuid END,$14)
+                 CASE WHEN $16::uuid IS NULL THEN NULL ELSE $14::uuid END,$14,
+                 $17,$18)
          RETURNING *`,
         [req.actor.companyId, run.id, req.params.batchId, sb.product_id, input.warehouseId,
          packCode(), seq[0].n, input.label ?? null, input.qty, sb.base_uom,
          money(input.price), input.grade.toUpperCase(),
          input.weightKg ?? (sb.base_uom === 'KG' ? input.qty : null),
-         req.actor.userId, input.note ?? null, binId]);
+         req.actor.userId, input.note ?? null, binId,
+         input.destinationWarehouseId ?? null, outboundRate]);
       const pack = rows[0];
 
       await tx.query(
@@ -993,6 +1054,9 @@ inventoryRouter.post('/pack-bench/:batchId/run',
         price: z.coerce.number().nonnegative().default(0),
         label: z.string().trim().max(40).optional(),
       })).min(1, 'Nothing to make'),
+      /* Where this run was priced to go — one destination for the run, because
+       * a run is one decision. Absent means sold from here, no delivery cost. */
+      destinationWarehouseId: z.string().uuid().nullable().optional(),
       /* Straight onto the shelf if the trolley is there; leave it out and the
        * boxes wait on the bench for the store step. */
       binCode: z.string().trim().max(40).optional(),
@@ -1027,6 +1091,8 @@ inventoryRouter.post('/pack-bench/:batchId/run',
           { available: free, wanted });
       }
 
+      const outboundRate = await deliveryRateFor(tx, req.actor, input.destinationWarehouseId);
+
       let binId: string | null = null;
       if (input.binCode) {
         const { rows: bin } = await tx.query(
@@ -1052,10 +1118,12 @@ inventoryRouter.post('/pack-bench/:batchId/run',
           const { rows } = await tx.query(
             `INSERT INTO packs (company_id, run_id, batch_id, product_id, warehouse_id,
                     code, pack_no, group_label, qty, uom, price, grade, weight_kg,
-                    graded_by, graded_at, qc_note, bin_id, stored_at, stored_by, created_by)
+                    graded_by, graded_at, qc_note, bin_id, stored_at, stored_by, created_by,
+                    destination_warehouse_id, outbound_rate_used)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),$15,$16,
                      CASE WHEN $16::uuid IS NULL THEN NULL ELSE now() END,
-                     CASE WHEN $16::uuid IS NULL THEN NULL ELSE $14::uuid END,$14)
+                     CASE WHEN $16::uuid IS NULL THEN NULL ELSE $14::uuid END,$14,
+                     $17,$18)
              RETURNING id, code, pack_no, group_label, qty, uom, price, grade,
                        weight_kg, bin_id, status`,
             [req.actor.companyId, run.id, req.params.batchId, sb.product_id,
@@ -1066,7 +1134,8 @@ inventoryRouter.post('/pack-bench/:batchId/run',
               * made every shelf read "0 kg filled" and the put-away suggestion
               * think the warehouse was empty. */
              g.weightKgPerPack ?? (sb.base_uom === 'KG' ? g.qtyPerPack : null),
-             req.actor.userId, input.note ?? null, binId]);
+             req.actor.userId, input.note ?? null, binId,
+             input.destinationWarehouseId ?? null, outboundRate]);
           made.push({ ...rows[0], product_name: sb.product_name });
         }
       }
@@ -1302,6 +1371,9 @@ inventoryRouter.get('/pack-groups', h(async (req) =>
             k.batch_id, b.batch_no, k.grade, k.qty, k.uom, k.price,
             k.warehouse_id, w.name AS warehouse_name,
             count(*)::int                        AS boxes,
+            /* A group is as old as the oldest box in it, which is the answer
+               anybody sorting by time actually wants. */
+            MIN(k.created_at)                    AS created_at,
             SUM(k.qty)                           AS total_qty,
             SUM(k.price)                         AS worth,
             count(*) FILTER (WHERE k.bin_id IS NOT NULL)::int AS on_a_shelf,
@@ -1310,7 +1382,8 @@ inventoryRouter.get('/pack-groups', h(async (req) =>
             string_agg(DISTINCT bn.code, ', ' ORDER BY bn.code) AS shelves,
             COALESCE(b.predicted_expiry_date, b.expiry_date) AS expiry_date,
             (COALESCE(b.predicted_expiry_date, b.expiry_date) - CURRENT_DATE) AS days_to_expiry,
-            pr.true_cost, pr.min_sell_price, pr.margin_pct,
+            pr.true_cost_per_held_unit AS true_cost,
+            pr.min_sell_per_held_unit  AS min_sell_price, pr.margin_pct,
             /* The ids, oldest first. The caller slices off what it asked for,
              * so the oldest boxes go out first without anybody choosing. */
             array_agg(k.id ORDER BY k.created_at, k.pack_no) AS pack_ids
@@ -1326,7 +1399,7 @@ inventoryRouter.get('/pack-groups', h(async (req) =>
       GROUP BY k.product_id, p.name, p.sku, p.icon, p.base_uom, k.batch_id, b.batch_no,
                k.grade, k.qty, k.uom, k.price, k.warehouse_id, w.name,
                b.predicted_expiry_date, b.expiry_date,
-               pr.true_cost, pr.min_sell_price, pr.margin_pct
+               pr.true_cost_per_held_unit, pr.min_sell_per_held_unit, pr.margin_pct
       ORDER BY COALESCE(b.predicted_expiry_date, b.expiry_date) NULLS LAST, p.name, k.qty`,
     [req.actor.companyId, req.query.warehouseId ?? null, req.query.productId ?? null])));
 
