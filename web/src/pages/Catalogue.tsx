@@ -40,9 +40,11 @@ import { Icon } from '../components/icons';
  * reaction to "this has to sell at ₹94" is to see which of the four numbers
  * made it ₹94 — and three of the four are things the business can change.
  *
- * None of them is typed. The purchase price comes off the batches, the overhead
- * off what Finance actually paid, the outbound freight off what the trips to
- * the shops actually cost. The one thing set by hand is the margin.
+ * Cost is the goods plus the journey and NOTHING else — no labour, no packing,
+ * no market fee, no share of the rent. Every part of it is a real amount on a
+ * real document: what the supplier was paid, the freight allocated off the
+ * receipt, and whatever was typed on the transfer that carried it to the shop.
+ * The one thing set by hand is the margin.
  * ======================================================================== */
 function PricingPanel() {
   const toast = useToast();
@@ -52,10 +54,10 @@ function PricingPanel() {
   const [editing, setEditing] = useState<any>(null);
 
   const canPrice = can('master.pricing.manage');
-  const o = basis.data?.overhead ?? {};
-  const ib = basis.data?.inbound ?? {};
-  const ob = basis.data?.outbound ?? {};
+  const fr = basis.data?.freight ?? {};
   const co = basis.data?.company ?? {};
+  const allowed = (basis.data?.chargeTypes ?? []).filter((c: any) => c.affects_landing_cost);
+  const excluded = (basis.data?.chargeTypes ?? []).filter((c: any) => !c.affects_landing_cost);
 
   const f = useFilters<any>(rows.data, {
     search: (r: any) => [r.product_name, r.sku, r.category_name].filter(Boolean).join(' '),
@@ -81,39 +83,40 @@ function PricingPanel() {
     <>
       <ErrorBanner error={rows.error} />
 
-      {/* The derived numbers, said out loud with what they were derived from.
-          A per-kilo overhead nobody can trace is a per-kilo overhead nobody
-          believes. */}
-      <div className="grid c4 mb">
+      {/* The rule, stated once, at the top of the screen that applies it. */}
+      <div className="banner info mb" style={{ display: 'block' }}>
+        <b>A unit costs what we paid for it, plus what it cost to move it.</b>
+        <div className="small mt">
+          (purchase price + freight in + freight out to the shop) ÷ the quantity
+          actually <b>accepted</b> — then the margin on top of that. Nothing else
+          goes in: not loading labour, not packing, not the market fee, and no
+          share of wages, power or rent.
+        </div>
+      </div>
+
+      <div className="grid c3 mb">
         <div className="card"><div className="card-body">
-          <div className="small muted">Running the place, per kg</div>
+          <div className="small muted">Freight in, last 90 days</div>
           <div className="value" style={{ fontSize: 26, fontWeight: 700 }}>
-            {inr(o.overhead_per_kg, 2)}
+            {inr(fr.inbound_spend, 0)}
           </div>
           <div className="small muted">
-            {inr(o.operating_spend, 0)} paid over {num(o.kg_handled, 0)} kg received
-            in {o.window_days ?? 30} days
+            allocated across receipts and already inside each batch&rsquo;s cost
           </div>
         </div></div>
         <div className="card"><div className="card-body">
-          <div className="small muted">Getting it here, per kg</div>
+          <div className="small muted">Freight out, last 90 days</div>
           <div className="value" style={{ fontSize: 26, fontWeight: 700 }}>
-            {inr(ib.inbound_per_kg, 2)}
+            {inr(fr.outbound_spend, 0)}
           </div>
           <div className="small muted">
-            {inr(ib.supplier_carried, 0)} charged by suppliers +{' '}
-            {inr(ib.we_collected, 0)} on our own vehicles, over{' '}
-            {num(ib.kg_received, 0)} kg received
-          </div>
-        </div></div>
-        <div className="card"><div className="card-body">
-          <div className="small muted">Getting it to the shops, per kg</div>
-          <div className="value" style={{ fontSize: 26, fontWeight: 700 }}>
-            {inr(ob.outbound_per_kg, 2)}
-          </div>
-          <div className="small muted">
-            {inr(ob.outbound_spend, 0)} on {num(ob.trips, 0)} trip(s) carrying{' '}
-            {num(ob.kg_moved, 0)} kg
+            {num(fr.costed_trips, 0)} trip(s) with a cost on them
+            {Number(fr.uncosted_trips) > 0 ? (
+              /* Optional by design, so a blank one is not an error — but a
+                 batch sent on an uncosted trip carries no outbound cost, and
+                 whoever is reading a floor price should know that. */
+              <> · <b>{num(fr.uncosted_trips, 0)}</b> sent without one</>
+            ) : null}
           </div>
         </div></div>
         <div className="card"><div className="card-body">
@@ -122,11 +125,25 @@ function PricingPanel() {
             {num(co.default_margin_pct, 0)}%
           </div>
           <div className="small muted">
-            the company default, on the whole cost — what we paid, handling,
-            and both journeys. Change it in Settings, or per product below.
+            the company default, on the unit cost. Change it in Settings, or per
+            product below.
           </div>
         </div></div>
       </div>
+
+      {/* What is allowed into the price and what is not — the whole rule as
+          data rather than as a sentence, because an admin can change it. */}
+      <div className="card mb"><div className="card-body">
+        <div className="small muted mb">Charges that go into the unit cost</div>
+        <div className="chip-row mb">
+          {allowed.map((c: any) => <Chip key={c.code} tone="primary">{c.name}</Chip>)}
+          {!allowed.length ? <span className="small muted">none</span> : null}
+        </div>
+        <div className="small muted mb">Recorded, but kept out of it</div>
+        <div className="chip-row">
+          {excluded.map((c: any) => <Chip key={c.code} tone="neutral">{c.name}</Chip>)}
+        </div>
+      </div></div>
 
       <DeliveryRatesCard />
 
@@ -151,15 +168,6 @@ function PricingPanel() {
               <span>{inr(r.cost_to_warehouse, 2)}
                 <div className="small muted">per {r.base_uom?.toLowerCase() ?? 'kg'}</div></span>
             ) },
-            { key: 'o', head: 'Handling', num: true, desc: true,
-              sort: (r: any) => Number(r.overhead_cost) || 0,
-              render: (r: any) => inr(r.overhead_cost, 2) },
-            /* Both legs, separately. A single "transport" figure would hide
-               which end of the journey is expensive, and they are two
-               different problems with two different people to talk to. */
-            { key: 'fi', head: 'Freight in', num: true, desc: true,
-              sort: (r: any) => Number(r.freight_in) || 0,
-              render: (r: any) => inr(r.freight_in, 2) },
             { key: 'f', head: 'To the shop', num: true, desc: true,
               sort: (r: any) => Number(r.cost_to_centre) || 0,
               render: (r: any) => inr(r.cost_to_centre, 2) },
@@ -174,11 +182,6 @@ function PricingPanel() {
                 <div className="small muted">{r.margin_is_own ? 'its own' : 'company'}</div>
               </span>
             ) },
-            { key: 'w', head: 'Wastage', num: true,
-              sort: (r: any) => Number(r.wastage_pct) || 0, render: (r: any) =>
-              Number(r.wastage_pct) > 0
-                ? <span>{num(r.wastage_pct, 0)}%</span>
-                : <span className="muted">—</span> },
             /* The number the whole table exists to produce. */
             { key: 'x', head: 'Sell at least for', num: true, desc: true,
               sort: (r: any) => Number(r.min_sell_price) || 0, render: (r: any) => (
@@ -235,12 +238,14 @@ function PriceModal({ row, onClose, onDone }: {
   const [error, setError] = useState<any>(null);
 
   const cost = Number(row.total_cost) || 0;
-  const w = Math.min(Math.max(Number(wastage) || 0, 0), 95);
+
   const m = Number(margin) || 0;
-  /* The same arithmetic the database does, so the preview and the saved value
-     cannot disagree. The wastage DIVIDES: if a tenth is thrown away, the nine
-     tenths that sell have to carry the whole crate. */
-  const floor = cost / Math.max(1 - w / 100, 0.05) * (1 + m / 100);
+  /* The same arithmetic the database does, so the preview and the saved figure
+     cannot disagree: margin straight onto the unit cost. There is no wastage
+     term — the unit cost was already worked out by dividing over the quantity
+     ACCEPTED, so whatever was rejected is paid for by what was kept, and
+     charging for it a second time here would price the same loss twice. */
+  const floor = cost * (1 + m / 100);
   const belowFloor = sell !== '' && Number(sell) < floor;
 
   return (
@@ -269,12 +274,10 @@ function PriceModal({ row, onClose, onDone }: {
           <tbody>
             <tr><td>What we paid for it</td>
               <td className="num mono">{inr(row.cost_to_warehouse, 2)}</td></tr>
-            <tr><td>Handling — wages, power, cold store, rent</td>
-              <td className="num mono">{inr(row.overhead_cost, 2)}</td></tr>
             <tr><td>Getting it here — what suppliers charged to bring it,
               and what we paid to fetch it</td>
               <td className="num mono">{inr(row.freight_in, 2)}</td></tr>
-            <tr><td>Carrying it out to the shops</td>
+            <tr><td>Carrying it out to the shop <em className="muted">(optional)</em></td>
               <td className="num mono">{inr(row.cost_to_centre, 2)}</td></tr>
             <tr><td><b>Total cost per {row.base_uom?.toLowerCase() ?? 'kg'}</b></td>
               <td className="num mono"><b>{inr(cost, 2)}</b></td></tr>
@@ -298,8 +301,11 @@ function PriceModal({ row, onClose, onDone }: {
           <input type="number" min={0} max={500} value={margin} disabled={!ownMargin}
             onChange={(e) => setMargin(e.target.value)} />
         </Field>
+        {/* Kept because reports and shelf-life planning read it — but it no
+            longer touches the price. Said plainly, so nobody sets it expecting
+            the floor to move. */}
         <Field label="Wastage we expect"
-          hint="What gets thrown away. The rest has to carry its cost.">
+          hint="Used for planning and reporting. It does not change the price.">
           <input type="number" min={0} max={95} value={wastage}
             onChange={(e) => setWastage(e.target.value)} />
         </Field>
@@ -310,8 +316,7 @@ function PriceModal({ row, onClose, onDone }: {
         <div>
           <b>Sell at {inr(floor, 2)} or more</b>
           <div className="small">
-            to make {num(m, 0)}% on a total cost of {inr(cost, 2)}
-            {w > 0 ? `, with ${num(w, 0)}% thrown away` : ''}.
+            to make {num(m, 0)}% on a unit cost of {inr(cost, 2)}.
           </div>
         </div>
       </div>
@@ -355,6 +360,7 @@ export function CataloguePage() {
   const [tab, setTab] = useState<'tree' | 'codes' | 'price' | 'qc'>('tree');
   const [addCat, setAddCat] = useState<any>(null);      // parent, or {} for top level
   const [addProd, setAddProd] = useState<any>(null);    // the category it goes in
+  const [editProd, setEditProd] = useState<any>(null);  // the product being changed
   const [addLink, setAddLink] = useState(false);
   const [open, setOpen] = useState<Record<string, boolean>>({});
 
@@ -422,12 +428,19 @@ export function CataloguePage() {
                 <span>{p.name}</span>
                 {p.name_hi ? <span className="small muted">{p.name_hi}</span> : null}
                 <span className="mono small muted">{p.sku}</span>
+                {/* The unit, on the row. It governs the reorder point, the order
+                    quantity, the box size and the price per unit, and until now
+                    it was only visible if the product happened to have stock. */}
+                <Chip tone="neutral">{String(p.base_uom ?? '').toLowerCase()}</Chip>
                 <span className="spacer" />
                 <span className="small muted">
                   {Number(p.current_stock) > 0
                     ? `${num(p.current_stock, 0)} ${p.base_uom} in stock`
                     : 'no stock'}
                 </span>
+                {canEdit ? (
+                  <button className="btn sm ghost" onClick={() => setEditProd(p)}>Edit</button>
+                ) : null}
               </div>
             ))}
             {kids.map((k: any) => renderCat(k, depth + 1))}
@@ -532,6 +545,10 @@ export function CataloguePage() {
         <ProductModal category={addProd} onClose={() => setAddProd(null)}
           onDone={() => { setAddProd(null); reloadAll(); toast('Added', 'ok'); }} />
       ) : null}
+      {editProd ? (
+        <ProductModal product={editProd} onClose={() => setEditProd(null)}
+          onDone={() => { setEditProd(null); reloadAll(); toast('Product updated', 'ok'); }} />
+      ) : null}
       {addLink ? (
         <SupplierCodeModal products={prods.data ?? []} onClose={() => setAddLink(false)}
           onDone={() => { setAddLink(false); links.reload(); toast('Supplier code saved', 'ok'); }} />
@@ -631,22 +648,35 @@ function CategoryModal({ parent, onClose, onDone }: {
  * demands context the caller does not have is a modal that cannot be reused,
  * which is how "add new to every dropdown" ends up meaning "on one screen".
  */
-export function ProductModal({ category, onClose, onDone }: {
-  category?: any; onClose: () => void; onDone: (created?: any) => void;
+/**
+ * Add a product, or change one.
+ *
+ * The same dialog does both. A product used to be creatable in full and then
+ * editable in part — the unit, how it is stored and the wastage allowance could
+ * be set on the way in and never touched again, so anything set up wrongly on
+ * day one stayed wrong and the only remedy was to retire it and make a second
+ * one under a slightly different name.
+ */
+export function ProductModal({ category, product, onClose, onDone }: {
+  category?: any; product?: any; onClose: () => void; onDone: (saved?: any) => void;
 }) {
-  const cats = useApi<any>(category ? null : '/masters/categories');
-  const [categoryId, setCategoryId] = useState(category?.id ?? '');
-  const [name, setName] = useState('');
-  const [nameHi, setNameHi] = useState('');
-  const [icon, setIcon] = useState(category?.icon ?? 'produce');
-  const [shelf, setShelf] = useState('');
-  const [reorder, setReorder] = useState('');
-  const [storage, setStorage] = useState('AMBIENT');
+  const editing = !!product;
+  const cats = useApi<any>(category && !editing ? null : '/masters/categories');
+  const [categoryId, setCategoryId] = useState(product?.category_id ?? category?.id ?? '');
+  const [name, setName] = useState(product?.name ?? '');
+  const [nameHi, setNameHi] = useState(product?.name_hi ?? '');
+  const [icon, setIcon] = useState(product?.icon ?? category?.icon ?? 'produce');
+  const [shelf, setShelf] = useState(product?.shelf_life_days != null ? String(product.shelf_life_days) : '');
+  const [reorder, setReorder] = useState(product?.reorder_point != null ? String(product.reorder_point) : '');
+  const [storage, setStorage] = useState(product?.storage_type ?? 'AMBIENT');
+  const [wastage, setWastage] = useState(String(product?.default_wastage_pct ?? 0));
+  /* Ticked only when somebody has read the warning about existing stock. */
+  const [confirmUom, setConfirmUom] = useState(false);
   /* What the product is counted in. Everything downstream reads this — the
      reorder point, the order quantity, the pack size, the price per unit — so
      leaving it to default to kilos silently turned every crate-traded product
      into a kilo-traded one. */
-  const [uom, setUom] = useState('KG');
+  const [uom, setUom] = useState(product?.base_uom ?? 'KG');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<any>(null);
 
@@ -663,30 +693,36 @@ export function ProductModal({ category, onClose, onDone }: {
 
   return (
     <Modal
-      title={category ? `Add to ${category.name}` : 'Add a product'}
+      title={editing ? `Edit ${product.name}`
+        : category ? `Add to ${category.name}` : 'Add a product'}
       onClose={onClose}
       footer={<>
         <button className="btn" onClick={onClose}>Cancel</button>
         <button className="btn primary" disabled={busy || !name.trim() || !categoryId}
           onClick={async () => {
           setBusy(true); setError(null);
+          const payload = {
+            categoryId, name: name.trim(),
+            nameHi: nameHi.trim() || undefined,
+            icon,
+            baseUom: uom, purchaseUom: uom,
+            storageType: storage,
+            defaultWastagePct: Number(wastage) || 0,
+            shelfLifeDays: shelf ? Number(shelf) : undefined,
+            reorderPoint: reorder ? Number(reorder) : undefined,
+          };
           try {
-            const created = await api.post<any>('/masters/products', {
-              categoryId, name: name.trim(),
-              nameHi: nameHi.trim() || undefined,
-              variety: name.trim(), icon,
-              baseUom: uom, purchaseUom: uom,
-              storageType: storage,
-              shelfLifeDays: shelf ? Number(shelf) : undefined,
-              reorderPoint: reorder ? Number(reorder) : undefined,
-            });
-            onDone(created);
+            const saved = editing
+              ? await api.put<any>(`/masters/products/${product.id}`,
+                  { ...payload, confirmUomChange: confirmUom })
+              : await api.post<any>('/masters/products', { ...payload, variety: name.trim() });
+            onDone(saved);
           } catch (e: any) { setError(e); } finally { setBusy(false); }
-        }}>Add</button>
+        }}>{editing ? 'Save changes' : 'Add'}</button>
       </>}
     >
       <ErrorBanner error={error} />
-      {category ? (
+      {category && !editing ? (
         <p className="small muted mb">
           A breed goes in here. <b>{name.trim() || 'Alphonso'}</b> will hold its own
           stock and its own price, and still count towards {category.name}.
@@ -726,6 +762,32 @@ export function ProductModal({ category, onClose, onDone }: {
           </select>
         </Field>
       </div>
+
+      <Field label="Wastage we expect (%)"
+        hint="Used for planning and reporting. It does not change the price.">
+        <input type="number" min={0} max={100} value={wastage}
+          onChange={(e) => setWastage(e.target.value)} />
+      </Field>
+
+      {/* Changing the unit does not convert a single number already recorded.
+          The server refuses it outright while there is stock until this is
+          ticked; saying so here means nobody meets that refusal by surprise. */}
+      {editing && uom !== product.base_uom ? (
+        <div className="banner warn mb" style={{ display: 'block' }}>
+          <b>You are changing the unit from {product.base_uom} to {uom}.</b>
+          <div className="small mt">
+            Nothing already recorded gets converted. Stock on hand, batches, open
+            order lines and the reorder point are all numbers in {product.base_uom}
+            {' '}and will simply start being read as {uom}. Only do this if the
+            product was set up in the wrong unit and has no stock worth keeping.
+          </div>
+          <label className="row mt" style={{ gap: 8, cursor: 'pointer' }}>
+            <input type="checkbox" style={{ width: 17, height: 17 }}
+              checked={confirmUom} onChange={(e) => setConfirmUom(e.target.checked)} />
+            <span className="small">I understand — change it anyway</span>
+          </label>
+        </div>
+      ) : null}
       <Field label="Picture"><IconPicker value={icon} onChange={setIcon} /></Field>
     </Modal>
   );

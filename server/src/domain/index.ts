@@ -339,9 +339,22 @@ export function computeLandingCost(lines: CostLine[], charges: Charge[], discoun
     const baseValue = baseValues[idx];
     const allocTotal = money(Object.values(allocated[idx]).reduce((a, b) => a + b, 0));
     const nonCredTax = money(l.nonCreditableTax ?? 0);
-    const preWastage = money(baseValue - discountShare[idx] + allocTotal + nonCredTax);
-    const wastageAmount = money(preWastage * (l.wastagePct / 100));
-    const landedValue = money(preWastage + wastageAmount);
+    /* THE UNIT COST IS THE GOODS PLUS THE JOURNEY, AND NOTHING ELSE.
+     *
+     * There used to be a wastage provision here — `preWastage × wastage%`
+     * added to every line before dividing. It was wrong twice over. It added a
+     * forecast of produce not yet thrown away to the cost of produce actually
+     * on the shelf; and the divisor below is the ACCEPTED quantity, so
+     * everything rejected at the gate is already being paid for by the units
+     * that were accepted. Charging for the same loss in both places made every
+     * product read dearer than it is.
+     *
+     * The provision is reported as zero rather than removed from the shape:
+     * landing_costs.wastage_provision is a stored column with history in it,
+     * and a column that silently changes meaning is worse than one that
+     * plainly reads nought from here on. */
+    const landedValue = money(baseValue - discountShare[idx] + allocTotal + nonCredTax);
+    const wastageAmount = 0;
     const landedRatePerUom = l.acceptedQty > 0 ? rate(landedValue / l.acceptedQty) : 0;
     const landedRatePerKg = l.acceptedWeightKg > 0 ? rate(landedValue / l.acceptedWeightKg) : landedRatePerUom;
     const prev = l.prevLandedRatePerKg ?? null;

@@ -26,7 +26,10 @@ BEGIN;
 /* Both views read the columns below, so on a re-run they hold them fast and
  * nothing can be altered. Dropped first and rebuilt at the foot of the file;
  * nothing outside this file depends on either. */
-DROP VIEW IF EXISTS v_batch_pricing;
+/* CASCADE: db/54 builds v_product_pricing on top of this one, so once that
+ * exists a bare DROP fails and every migration after this point stops. Both are
+ * recreated further down the chain. */
+DROP VIEW IF EXISTS v_batch_pricing CASCADE;
 DROP VIEW IF EXISTS v_inbound_freight_per_kg;
 
 -- What the supplier is charging to bring it, kept apart from the goods.

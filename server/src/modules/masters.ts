@@ -372,6 +372,15 @@ mastersRouter.put('/products/:id', requires('master.product.manage'), h(async (r
     minStock: z.number().nonnegative().nullable().optional(),
     maxStock: z.number().nonnegative().nullable().optional(),
     shelfLifeDays: z.number().int().positive().nullable().optional(),
+    /* Creatable but not editable until now, so a product set up wrongly on day
+     * one stayed wrong for ever — the only way to correct its unit was to
+     * retire it and make a second one. */
+    baseUom: z.string().trim().min(1).optional(),
+    purchaseUom: z.string().trim().min(1).optional(),
+    storageType: z.enum(['AMBIENT', 'CHILLED', 'COLD', 'FROZEN', 'RIPENING']).optional(),
+    defaultWastagePct: z.number().min(0).max(100).optional(),
+    /** Changing the unit under existing stock has to be said out loud. */
+    confirmUomChange: z.boolean().default(false),
     /* Which checklist the quality screen uses for this product. A product
      * added today inherited its category's default or, if the category had
      * none, nothing at all — and a check that asks nothing reads as a pass. */
@@ -380,6 +389,46 @@ mastersRouter.put('/products/:id', requires('master.product.manage'), h(async (r
   }), req.body);
 
   return withTx(req.actor, async (tx) => {
+    /* CHANGING THE UNIT IS NOT A RENAME.
+     *
+     * Every quantity already recorded against this product — stock balances,
+     * batches, receipt lines, open order lines — is a number in the OLD unit.
+     * Switch KG to BOX and 400 kg of mangoes silently becomes 400 boxes: the
+     * stock figure is wrong, the reorder point is wrong, and the unit cost is
+     * wrong by whatever a box happens to weigh.
+     *
+     * Nothing here converts those numbers, because there is no honest factor to
+     * convert them BY — only the person doing it knows whether a box is 5 kg or
+     * 20. So the change is allowed, and it is refused until somebody has been
+     * shown what it will land on and said yes anyway. */
+    if (input.baseUom) {
+      const { rows: cur } = await tx.query(
+        `SELECT p.base_uom, p.name,
+                COALESCE((SELECT SUM(sb.qty) FROM stock_balances sb
+                           WHERE sb.product_id = p.id), 0)                         AS on_hand,
+                (SELECT count(*) FROM batches b
+                  WHERE b.product_id = p.id AND b.remaining_qty > 0)::int          AS batches,
+                (SELECT count(*) FROM po_lines l
+                   JOIN purchase_orders o ON o.id = l.po_id
+                  WHERE l.product_id = p.id
+                    AND o.status IN ('APPROVED','CONFIRMED','PART_RECEIVED'))::int AS open_lines
+           FROM products p WHERE p.id = $1 AND p.company_id = $2`,
+        [req.params.id, req.actor.companyId]);
+      const c = cur[0];
+      if (!c) throw ApiError.notFound('Product not found');
+
+      if (c.base_uom !== input.baseUom && !input.confirmUomChange
+          && (Number(c.on_hand) > 0 || Number(c.batches) > 0 || Number(c.open_lines) > 0)) {
+        throw ApiError.rule(
+          `${c.name} is counted in ${c.base_uom} today, and there is `
+          + `${Number(c.on_hand).toFixed(0)} ${c.base_uom} on hand`
+          + (Number(c.open_lines) > 0 ? ` plus ${c.open_lines} open order line(s)` : '')
+          + `. Changing the unit to ${input.baseUom} does not convert any of those figures — `
+          + `they will simply start being read as ${input.baseUom}. `
+          + 'Confirm if that is what you mean.');
+      }
+    }
+
     const { rows } = await tx.query(
       `UPDATE products SET
           name = COALESCE($3, name), name_hi = COALESCE($4, name_hi),
@@ -389,13 +438,19 @@ mastersRouter.put('/products/:id', requires('master.product.manage'), h(async (r
           min_stock = COALESCE($9, min_stock), max_stock = COALESCE($10, max_stock),
           shelf_life_days = COALESCE($11, shelf_life_days),
           qc_template_id = COALESCE($14, qc_template_id),
+          base_uom = COALESCE($15, base_uom),
+          purchase_uom = COALESCE($16, purchase_uom),
+          storage_type = COALESCE($17, storage_type),
+          default_wastage_pct = COALESCE($18, default_wastage_pct),
           is_active = COALESCE($12, is_active), updated_by = $13
         WHERE id=$1 AND company_id=$2 RETURNING *`,
       [req.params.id, req.actor.companyId, input.name ?? null, input.nameHi ?? null,
        input.variety ?? null, input.icon ?? null, input.categoryId ?? null,
        input.reorderPoint ?? null, input.minStock ?? null, input.maxStock ?? null,
        input.shelfLifeDays ?? null, input.isActive ?? null, req.actor.userId,
-       input.qcTemplateId ?? null]);
+       input.qcTemplateId ?? null,
+       input.baseUom ?? null, input.purchaseUom ?? null,
+       input.storageType ?? null, input.defaultWastagePct ?? null]);
     if (!rows[0]) throw ApiError.notFound('Product not found');
     return rows[0];
   });
@@ -488,19 +543,49 @@ mastersRouter.get('/pricing', h(async (req) =>
       ORDER BY c.name, pp.product_name`,
     [req.actor.companyId, String(req.query.categoryId ?? '')])));
 
-/** What the derived halves of the price are made of, for the one screen that
- *  has to explain the number rather than just show it. */
+/**
+ * What the price is made of, for the one screen that has to explain the number
+ * rather than just show it.
+ *
+ * Cost is the goods plus the journey and nothing else, so there is no
+ * company-wide overhead figure to report any more — every part of the price is
+ * now a real amount recorded against a real document, and the totals below are
+ * sums of those rather than averages anybody has to take on trust.
+ */
 mastersRouter.get('/pricing/basis', h(async (req) => {
-  const [overhead] = await query(req.actor,
-    `SELECT * FROM v_overhead_per_kg WHERE company_id = $1`, [req.actor.companyId]);
-  const [outbound] = await query(req.actor,
-    `SELECT * FROM v_outbound_cost_per_kg WHERE company_id = $1`, [req.actor.companyId]);
-  const [inbound] = await query(req.actor,
-    `SELECT * FROM v_inbound_freight_per_kg WHERE company_id = $1`, [req.actor.companyId]);
-  const [company] = await query(req.actor,
-    `SELECT default_margin_pct, overhead_window_days FROM companies WHERE id = $1`,
+  const [freight] = await query(req.actor,
+    /* Freight IN comes off the receipts as an allocated charge; freight OUT
+     * off whatever was typed on the transfers that carried the stock. Both are
+     * shown as "what has actually been spent", not as a rate. */
+    `SELECT
+       COALESCE((SELECT SUM(pc.amount) FROM purchase_charges pc
+                   JOIN charge_types ct ON ct.id = pc.charge_type_id
+                  WHERE pc.company_id = $1 AND ct.affects_landing_cost
+                    AND pc.created_at > now() - interval '90 days'), 0)      AS inbound_spend,
+       COALESCE((SELECT SUM(si.transport_cost) FROM stock_issues si
+                  WHERE si.company_id = $1 AND si.dest_warehouse_id IS NOT NULL
+                    AND si.status <> 'CANCELLED'
+                    AND si.issue_date > CURRENT_DATE - 90), 0)               AS outbound_spend,
+       (SELECT count(*) FROM stock_issues si
+         WHERE si.company_id = $1 AND si.dest_warehouse_id IS NOT NULL
+           AND si.status <> 'CANCELLED' AND COALESCE(si.transport_cost,0) > 0
+           AND si.issue_date > CURRENT_DATE - 90)::int                       AS costed_trips,
+       (SELECT count(*) FROM stock_issues si
+         WHERE si.company_id = $1 AND si.dest_warehouse_id IS NOT NULL
+           AND si.status <> 'CANCELLED' AND COALESCE(si.transport_cost,0) = 0
+           AND si.issue_date > CURRENT_DATE - 90)::int                       AS uncosted_trips`,
     [req.actor.companyId]);
-  return { overhead, inbound, outbound, company };
+
+  /* Which charges are allowed into the price. Shown because it is the whole
+   * rule in one line, and because an admin can change it. */
+  const chargeTypes = await query(req.actor,
+    `SELECT code, name, affects_landing_cost FROM charge_types
+      WHERE company_id = $1 ORDER BY affects_landing_cost DESC, name`,
+    [req.actor.companyId]);
+
+  const [company] = await query(req.actor,
+    `SELECT default_margin_pct FROM companies WHERE id = $1`, [req.actor.companyId]);
+  return { freight, chargeTypes, company };
 }));
 
 mastersRouter.put('/products/:id/pricing', requires('master.pricing.manage'), h(async (req) => {

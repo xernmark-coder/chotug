@@ -309,7 +309,10 @@ SELECT w.company_id,
  * list, and Postgres will only replace a view whose columns are unchanged up to
  * the ones being appended. Nothing else in the schema selects from this view —
  * only application queries do — so dropping it takes nothing with it. */
-DROP VIEW IF EXISTS v_batch_pricing;
+/* CASCADE: db/54 builds v_product_pricing on top of this one, so once that
+ * exists a bare DROP fails and every migration after this point stops. Both are
+ * recreated further down the chain. */
+DROP VIEW IF EXISTS v_batch_pricing CASCADE;
 CREATE VIEW v_batch_pricing AS
 WITH factor AS (
     /* Overhead and freight are quoted per kilo. A batch counted in crates

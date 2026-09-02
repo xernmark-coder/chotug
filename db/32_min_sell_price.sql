@@ -94,7 +94,10 @@ SELECT w.company_id,
  * database that has reached 41, re-running this file failed and every
  * migration after it was skipped. Nothing in the schema selects from this view;
  * only application queries do. */
-DROP VIEW IF EXISTS v_batch_pricing;
+/* CASCADE: db/54 builds v_product_pricing on top of this one, so once that
+ * exists a bare DROP fails and every migration after this point stops. Both are
+ * recreated further down the chain. */
+DROP VIEW IF EXISTS v_batch_pricing CASCADE;
 CREATE VIEW v_batch_pricing AS
 SELECT b.id                       AS batch_id,
        b.company_id,

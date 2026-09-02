@@ -706,11 +706,14 @@ costingRouter.get('/invoices', h(async (req) =>
               m.overall AS match_result, m.findings,
               ps.paid_amount, ps.balance,
               receipt.received_lines, receipt.total_lines, receipt.received_qty,
-              CASE WHEN receipt.received_lines = 0 THEN 'NOT_RECEIVED'
-                WHEN receipt.received_lines < receipt.total_lines THEN 'PARTIAL'
+              /* Landed: what the goods cost plus the freight that brought them.
+               * The invoice total is what the supplier billed; this is what the
+               * produce actually cost us, and the two belong side by side. */
+              receipt.landed_value,
+              CASE WHEN COALESCE(receipt.received_lines, 0) = 0 THEN 'NOT_RECEIVED'
                 ELSE 'RECEIVED' END AS receipt_status,
                 CASE WHEN i.due_date < CURRENT_DATE
-                     AND receipt.received_lines < receipt.total_lines
+                     AND COALESCE(receipt.received_lines, 0) = 0
                   THEN true ELSE false END AS receipt_attention,
             CASE WHEN ps.due_date IS NOT NULL AND ps.balance > 0
                  THEN GREATEST(0, CURRENT_DATE - ps.due_date) END AS overdue_days
@@ -719,13 +722,19 @@ costingRouter.get('/invoices', h(async (req) =>
        LEFT JOIN purchase_orders o ON o.id = i.po_id
        LEFT JOIN match_results m ON m.invoice_id = i.id AND m.is_latest
        LEFT JOIN payment_status ps ON ps.invoice_id = i.id
+      /* Read off the receipts against this invoice's order, not off whether
+       * anybody line-matched it. An invoice whose lorry arrived and was booked
+       * in used to read NOT RECEIVED until a person matched it by hand. */
       LEFT JOIN LATERAL (
-        SELECT count(*)::int AS total_lines,
-               count(*) FILTER (WHERE il.matched_grn_line_id IS NOT NULL)::int AS received_lines,
-               COALESCE(SUM(gl.accepted_qty), 0) AS received_qty
-          FROM invoice_lines il
-          LEFT JOIN grn_lines gl ON gl.id = il.matched_grn_line_id
-         WHERE il.invoice_id = i.id
+        SELECT count(*)::int                              AS total_lines,
+               count(*)::int                              AS received_lines,
+               COALESCE(SUM(gl.accepted_qty), 0)          AS received_qty,
+               ROUND(COALESCE(SUM(COALESCE(b.landed_rate, gl.rate) * gl.accepted_qty), 0), 2)
+                                                          AS landed_value
+          FROM grn_lines gl
+          JOIN grns g ON g.id = gl.grn_id AND g.status = 'POSTED'
+          LEFT JOIN batches b ON b.grn_line_id = gl.id
+         WHERE g.po_id = i.po_id AND gl.accepted_qty > 0
       ) receipt ON true
       WHERE i.company_id=$1 AND ($2 = '' OR i.status = $2)
       ORDER BY i.received_at DESC LIMIT 200`,
@@ -736,23 +745,33 @@ costingRouter.get('/invoices/:id', h(async (req) => {
     `SELECT i.*, s.trade_name AS supplier_name, s.legal_name, s.gstin AS supplier_master_gstin,
         o.po_no,
         receipt.received_lines, receipt.total_lines,
-        CASE WHEN receipt.received_lines = 0 THEN 'NOT_RECEIVED'
-          WHEN receipt.received_lines < receipt.total_lines THEN 'PARTIAL'
+        CASE WHEN COALESCE(receipt.received_lines, 0) = 0 THEN 'NOT_RECEIVED'
           ELSE 'RECEIVED' END AS receipt_status,
         CASE WHEN i.due_date < CURRENT_DATE
-             AND receipt.received_lines < receipt.total_lines
+             AND COALESCE(receipt.received_lines, 0) = 0
           THEN true ELSE false END AS receipt_attention
       FROM supplier_invoices i
        JOIN suppliers s ON s.id = i.supplier_id
        LEFT JOIN purchase_orders o ON o.id = i.po_id
+      /* WHAT ACTUALLY ARRIVED, from the receipts — not from whether somebody
+       * line-matched the invoice.
+       *
+       * This used to count invoice_lines with a matched_grn_line_id, which is a
+       * fact about the three-way match rather than about the produce. An
+       * invoice for an order whose lorry came, was weighed and was booked in
+       * read "NOT RECEIVED" until a person sat down and matched it line by
+       * line — so the page said the goods were missing when they were on the
+       * shelf. The lorry is the fact; the match is bookkeeping about it. */
       LEFT JOIN LATERAL (
         SELECT count(*)::int AS total_lines,
-         count(*) FILTER (WHERE il.matched_grn_line_id IS NOT NULL)::int AS received_lines
-       FROM invoice_lines il WHERE il.invoice_id = i.id
+               count(*) FILTER (WHERE gl.id IS NOT NULL)::int AS received_lines
+          FROM grn_lines gl
+          JOIN grns g ON g.id = gl.grn_id AND g.status = 'POSTED'
+         WHERE g.po_id = i.po_id AND gl.accepted_qty > 0
       ) receipt ON true
       WHERE i.id=$1 AND i.company_id=$2`, [req.params.id, req.actor.companyId]);
   if (!inv) throw ApiError.notFound('Invoice not found');
-  const [lines, match, notes, payment] = await Promise.all([
+  const [lines, receipts, match, notes, payment] = await Promise.all([
     query(req.actor,
       `SELECT il.*, p.name AS product_name, gl.accepted_qty AS grn_qty, pl.rate AS po_rate
          FROM invoice_lines il
@@ -760,6 +779,25 @@ costingRouter.get('/invoices/:id', h(async (req) => {
          LEFT JOIN grn_lines gl ON gl.id = il.matched_grn_line_id
          LEFT JOIN po_lines pl ON pl.id = COALESCE(il.matched_po_line_id, gl.po_line_id)
         WHERE il.invoice_id=$1 ORDER BY il.line_no`, [inv.id]),
+    /* THE GOODS. What came off the lorry against this invoice's order, with
+     * what each unit ended up costing — the price the supplier charged plus
+     * the freight that brought it, which is the number every other screen in
+     * the product now shows. */
+    query(req.actor,
+      `SELECT g.grn_no, g.posting_date, gl.product_id, p.name AS product_name, p.sku,
+              gl.received_qty, gl.rejected_qty, gl.accepted_qty, gl.uom, gl.rate,
+              ROUND(gl.accepted_qty * gl.rate, 2)            AS goods_value,
+              b.batch_no,
+              b.landed_rate                                  AS landed_per_unit,
+              ROUND(COALESCE(lcl.allocated_total, 0), 2)     AS freight_in,
+              ROUND(COALESCE(b.landed_rate, gl.rate) * gl.accepted_qty, 2) AS landed_value
+         FROM grn_lines gl
+         JOIN grns g       ON g.id = gl.grn_id AND g.status = 'POSTED'
+         JOIN products p   ON p.id = gl.product_id
+         LEFT JOIN batches b ON b.grn_line_id = gl.id
+         LEFT JOIN landing_cost_lines lcl ON lcl.grn_line_id = gl.id
+        WHERE g.po_id = $1 AND gl.accepted_qty > 0
+        ORDER BY g.posting_date, p.name`, [inv.po_id]),
     query(req.actor,
       `SELECT * FROM match_results WHERE invoice_id=$1 ORDER BY run_at DESC LIMIT 5`, [inv.id]),
     query(req.actor,
@@ -769,7 +807,18 @@ costingRouter.get('/invoices/:id', h(async (req) => {
                           THEN GREATEST(0, CURRENT_DATE - ps.due_date) END AS overdue_days
          FROM payment_status ps WHERE ps.invoice_id=$1`, [inv.id]),
   ]);
-  return { ...inv, lines, matchResults: match, notes, payment: payment[0] ?? null };
+  /* The landed total for the whole receipt: what the goods cost plus what it
+   * cost to bring them. Shown beside the invoice total so the two can be read
+   * against each other. */
+  const landedTotal = receipts.reduce((a: number, r: any) => a + Number(r.landed_value ?? 0), 0);
+  const goodsTotal = receipts.reduce((a: number, r: any) => a + Number(r.goods_value ?? 0), 0);
+  return {
+    ...inv, lines, receipts, matchResults: match, notes,
+    payment: payment[0] ?? null,
+    landedTotal: round(landedTotal, 2),
+    goodsTotal: round(goodsTotal, 2),
+    freightTotal: round(landedTotal - goodsTotal, 2),
+  };
 }));
 
 /** Candidate GRN lines to match an invoice line against. */

@@ -16,7 +16,10 @@
 \set ON_ERROR_STOP on
 BEGIN;
 
-DROP VIEW IF EXISTS v_batch_pricing;
+/* CASCADE: db/54 builds v_product_pricing on top of this one, so once that
+ * exists a bare DROP fails and every migration after this point stops. Both are
+ * recreated further down the chain. */
+DROP VIEW IF EXISTS v_batch_pricing CASCADE;
 CREATE VIEW v_batch_pricing AS
 WITH factor AS (
   SELECT b.id AS batch_id,

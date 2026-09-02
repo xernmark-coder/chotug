@@ -25,9 +25,8 @@ import { LabelSheet, RemovePackModal } from './Packing';
 
 /* What this box has to fetch, and therefore what the label should say.
  *
- *   what it cost us + overheads + freight in + freight to the shop
- *   ───────────────────────────────────────────────────────────────  × (1 + margin)
- *                          1 − wastage
+ *   (what we paid + the freight that brought it + the trip to THIS shop)
+ *     × (1 + margin)
  *
  * The database does that sum per unit in v_batch_pricing (the margin coming
  * from the product, or the company default where the product has none). All
@@ -59,18 +58,22 @@ function suggestPrice(
   if (per <= 0) return '';
 
   const cost = costPerUnit(bench, deliveryRate);
-  const wastage = Number(bench?.wastage_pct) || 0;
   const m = marginPct === '' || marginPct == null ? null : Number(marginPct);
   if (cost <= 0) return '';
   const margin = m == null || Number.isNaN(m) ? Number(bench?.margin_pct) || 0 : m;
 
-  return String(Math.ceil(perUnitAt(cost, wastage, margin) * per));
+  return String(Math.ceil(perUnitAt(cost, margin) * per));
 }
 
-/** The price of one unit at a given margin, wastage carried the same way the
- *  database carries it. Kept next to suggestPrice so the two cannot drift. */
-function perUnitAt(cost: number, wastagePct: number, marginPct: number): number {
-  return (cost / Math.max(1 - wastagePct / 100, 0.05)) * (1 + marginPct / 100);
+/** The price of one unit at a given margin — the same sum the database does in
+ *  v_batch_pricing, kept next to suggestPrice so the two cannot drift.
+ *
+ *  There is no wastage term. The unit cost was arrived at by dividing over the
+ *  quantity ACCEPTED, so the crates turned away at the gate are already paid
+ *  for by the ones that were kept; dividing again by (1 − wastage) charged for
+ *  the same loss a second time. */
+function perUnitAt(cost: number, marginPct: number): number {
+  return cost * (1 + marginPct / 100);
 }
 
 
@@ -804,7 +807,7 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
       {per > 0 && Number(bench.cost_before_delivery) > 0 ? (
         <div className="card mb"><div className="card-body">
           <div className="perf-line">
-            <span>Bought, handled and carried in</span>
+            <span>Bought, and carried in</span>
             <b>{inr(Number(bench.cost_before_delivery), 2)} / {bench.base_uom?.toLowerCase()}</b>
           </div>
           <div className="perf-line">
@@ -817,15 +820,9 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
             <span><b>Costs us</b></span>
             <b>{inr(costPerUnit(bench, rate), 2)} / {bench.base_uom?.toLowerCase()}</b>
           </div>
-          {Number(bench.wastage_pct) > 0 ? (
-            <div className="perf-line">
-              <span>Spread over what survives ({num(bench.wastage_pct, 0)}% wastage)</span>
-              <b>{inr(costPerUnit(bench, rate) / Math.max(1 - Number(bench.wastage_pct) / 100, 0.05), 2)}</b>
-            </div>
-          ) : null}
           <div className="perf-line">
             <span>Plus {num(Number(margin) || 0, 0)}% margin</span>
-            <b>{inr(perUnitAt(costPerUnit(bench, rate), Number(bench.wastage_pct) || 0, Number(margin) || 0), 2)}
+            <b>{inr(perUnitAt(costPerUnit(bench, rate), Number(margin) || 0), 2)}
               {' '}/ {bench.base_uom?.toLowerCase()}</b>
           </div>
           <div className="perf-line">

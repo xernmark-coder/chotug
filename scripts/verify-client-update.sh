@@ -936,6 +936,25 @@ grep -q "row_to_json(x)) FROM landing_cost_lines" server/src/modules/receiving.t
   && no "landed cost lines" "snake_case where the screen reads camelCase" \
   || ok "the landed-cost lines reach the screen in the shape it reads"
 
+echo "── 63 · the schema in one file"
+[ -f db/SCHEMA.sql ] && ok "there is a single file that builds the database" \
+  || no "schema" "db/SCHEMA.sql missing"
+# It has to be a snapshot of where the migrations arrive, not a stale copy.
+for c in delivery_rate_per_kg destination_warehouse_id outbound_rate_used \
+         transport_amount returned_qty cost_before_delivery landed_per_held_unit; do
+  grep -q "$c" db/SCHEMA.sql || no "schema" "db/SCHEMA.sql is behind — no $c"
+done
+grep -q "landed_per_held_unit" db/SCHEMA.sql && ok "…and it is current with the migrations" \
+  || no "schema" "stale"
+# Every migration on disk must actually be run, or the two drift apart.
+UNRUN=""
+for f in db/*.sql; do
+  b2=$(basename "$f"); [ "$b2" = "SCHEMA.sql" ] && continue
+  grep -q "run('$b2')" server/src/scripts/migrate.ts || UNRUN="$UNRUN $b2"
+done
+[ -z "$UNRUN" ] && ok "…every migration on disk is one the runner runs" \
+  || no "migrations" "never run:$UNRUN"
+
 echo "── 43 · filters with totals"
 # This check used to name three pages and pass when those three had filters —
 # which is checking the work that was done, not the requirement that was asked.

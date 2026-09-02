@@ -49,14 +49,28 @@ export function InvoiceListPage() {
             { key: 'd', head: 'Date', render: (i: any) => date(i.invoice_date) },
             { key: 's', head: 'Supplier', render: (i: any) => i.supplier_name },
             { key: 'po', head: 'Order', render: (i: any) => <span className="mono small">{i.po_no ?? '—'}</span> },
-            { key: 'received', head: 'Goods received', render: (i: any) => (
-              i.receipt_status === 'RECEIVED' ? <Chip tone="ok">received</Chip> :
-              i.receipt_status === 'PARTIAL' ? <Chip tone="warn">partial</Chip> :
-              <Chip tone={i.receipt_attention ? 'danger' : 'neutral'}>
-                {i.receipt_attention ? 'overdue — not received' : 'not received'}
-              </Chip>
+            { key: 'received', head: 'Goods received', sort: (i: any) => i.receipt_status,
+              render: (i: any) => (
+              i.receipt_status === 'RECEIVED'
+                ? <div><Chip tone="ok">received</Chip>
+                    {Number(i.received_qty) > 0
+                      ? <div className="small muted">{num(i.received_qty, 0)} accepted</div> : null}
+                  </div>
+                : <Chip tone={i.receipt_attention ? 'danger' : 'neutral'}>
+                    {i.receipt_attention ? 'overdue — not received' : 'not received'}
+                  </Chip>
             ) },
-            { key: 't', head: 'Total', num: true, render: (i: any) => inr(i.total) },
+            { key: 't', head: 'Billed', num: true, sort: (i: any) => Number(i.total) || 0,
+              desc: true, render: (i: any) => inr(i.total) },
+            /* What the produce actually cost — the price paid plus the freight
+               that brought it. Beside what was billed, because those are two
+               different numbers and the difference is the point. */
+            { key: 'lc', head: 'Landed cost', num: true, desc: true,
+              sort: (i: any) => Number(i.landed_value) || 0, render: (i: any) =>
+              Number(i.landed_value) > 0
+                ? <div><b>{inr(i.landed_value)}</b>
+                    <div className="small muted">goods + freight in</div></div>
+                : <span className="muted">—</span> },
             { key: 'm', head: 'Reconciliation', render: (i: any) =>
               i.match_result && i.match_result !== 'MATCH' ? <Chip value={i.match_result} />
                 : <span className="muted small">updated from receipt</span> },
@@ -258,6 +272,51 @@ export function InvoiceDetailPage() {
 
       <div className="grid sidebar-right">
         <div className="stack">
+          {/* WHAT ACTUALLY ARRIVED, off the receipts.
+              This card used to not exist: the only view of the goods was the
+              invoice's own lines, and whether they had been hand-matched. An
+              invoice whose lorry had come, been weighed and been booked in
+              showed nothing at all until somebody sat down and matched it. */}
+          <div className="card">
+            <div className="card-head">
+              <h2>What arrived</h2>
+              {data.landedTotal > 0 ? (
+                <Chip tone="neutral">
+                  {inr(data.goodsTotal, 0)} goods + {inr(data.freightTotal, 0)} freight
+                  {' = '}<b>{inr(data.landedTotal, 0)}</b> landed
+                </Chip>
+              ) : null}
+            </div>
+            <div className="card-body tight">
+              <DataTable
+                rows={data.receipts ?? []}
+                cols={[
+                  { key: 'p', head: 'Product', render: (r: any) => (
+                    <div><b>{r.product_name}</b>
+                      <div className="small muted mono">{r.grn_no}
+                        {r.batch_no ? ` · ${r.batch_no}` : ''}</div></div>) },
+                  { key: 'd', head: 'Booked in', render: (r: any) => date(r.posting_date) },
+                  { key: 'q', head: 'Accepted', num: true, render: (r: any) => (
+                    <div>{num(r.accepted_qty, 2)} <span className="small muted">{r.uom}</span>
+                      {Number(r.rejected_qty) > 0 ? (
+                        <div className="small muted">{num(r.rejected_qty, 2)} turned away</div>
+                      ) : null}</div>) },
+                  { key: 'r', head: 'Bought at', num: true, render: (r: any) => inr(r.rate) },
+                  /* The whole point of the client's rule, on the screen where
+                     the bill is checked: what a unit really cost us once the
+                     lorry is paid for. */
+                  { key: 'l', head: 'Cost per unit', num: true, render: (r: any) => (
+                    <div><b>{inr(r.landed_per_unit ?? r.rate)}</b>
+                      <div className="small muted">incl. freight in</div></div>) },
+                  { key: 'v', head: 'Landed value', num: true,
+                    render: (r: any) => <b>{inr(r.landed_value, 0)}</b> },
+                ]}
+                empty={<Empty icon="🚚" title="Nothing booked in against this order yet"
+                  hint="Receipts appear here the moment a load is posted — no matching needed." />}
+              />
+            </div>
+          </div>
+
           <div className="card">
             <div className="card-head"><h2>Invoice lines vs what we received</h2></div>
             <div className="card-body tight">
