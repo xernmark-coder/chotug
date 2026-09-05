@@ -6,6 +6,7 @@ import {
   FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
+import { InvoiceSheet } from '../components/InvoiceSheet';
 import { DriverModal, VehicleModal } from './Fleet';
 
 /* ================================================= EXPECTED ARRIVALS ===== */
@@ -613,6 +614,8 @@ export function GateEntryPage() {
 
 /* ================================================= GATE DETAIL =========== */
 export function GateDetailPage() {
+  /* The supplier's bill for this load, printable from the gate. */
+  const [printingInvoice, setPrintingInvoice] = useState<string | null>(null);
   const { id } = useParams();
   const nav = useNavigate();
   const toast = useToast();
@@ -653,11 +656,23 @@ export function GateDetailPage() {
       actions={
         <div className="btn-row">
           <Chip value={data.status} />
+          {/* The gate is where the paper physically arrives, so it is where a
+              copy is most often wanted — for the file, or for a driver who
+              turned up without one. */}
+          {data.invoice_id ? (
+            <button className="btn sm" onClick={() => setPrintingInvoice(data.invoice_id)}>
+              <Icon name="inbox" size={14} /> Invoice {data.supplier_invoice_no}
+            </button>
+          ) : null}
           {!data.locked_at && can('receiving.gate.submit') ? (
             <button className="btn primary" disabled={busy} onClick={lock}>Submit &amp; lock</button>
           ) : null}
         </div>
       }>
+      {printingInvoice ? (
+        <InvoiceSheet invoiceId={printingInvoice}
+          onClose={() => setPrintingInvoice(null)} />
+      ) : null}
       <ErrorBanner error={error} />
       <Steps steps={['At gate', 'Weighed', 'Quality check', 'QC done', 'Received']}
         current={stepIdx < 0 ? 4 : stepIdx} />
@@ -1506,8 +1521,19 @@ function GrnTab({ gate, onDone }: { gate: any; onDone: () => void }) {
         <div className="card-body">
           <div className="row wrap">
             <div>
+              {/* Goods plus the journey. The freight on this order is already
+                  on record by now — the supplier's charge or the fare agreed
+                  with a driver — and it is part of what the produce cost, so
+                  showing the goods figure alone understated every load. */}
               <div className="small muted">Total value entering stock</div>
-              <div style={{ fontSize: 24, fontWeight: 700 }}>{inr(totalValue)}</div>
+              <div style={{ fontSize: 24, fontWeight: 700 }}>
+                {inr(totalValue + (Number(gate.freight_on_order) || 0))}
+              </div>
+              {Number(gate.freight_on_order) > 0 ? (
+                <div className="small muted">
+                  {inr(totalValue, 0)} goods + {inr(gate.freight_on_order, 0)} freight
+                </div>
+              ) : null}
             </div>
             <div className="spacer" />
             {can('receiving.grn.submit') ? (

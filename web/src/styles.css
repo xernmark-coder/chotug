@@ -1414,3 +1414,50 @@ table.mini tr.voided { opacity: .5; text-decoration: line-through; }
 .shelf-stats em { font-style: normal; font-size: 10px; text-transform: uppercase;
   letter-spacing: .06em; color: var(--muted); }
 .shelf-stats b { font-size: 17px; font-variant-numeric: tabular-nums; }
+
+/* --- an invoice, on paper ------------------------------------------------
+   Deliberately plain: black on white, ruled lines, no brand colour. It is a
+   document somebody files, staples to a payment and argues from — not a
+   screen. */
+.invoice-sheet { color: #111; background: #fff; padding: 4px 2px; }
+.inv-head { display: flex; justify-content: space-between; gap: 24px;
+  border-bottom: 2px solid #111; padding-bottom: 12px; margin-bottom: 14px; }
+.inv-title { font-size: 19px; font-weight: 800; letter-spacing: .06em; }
+.inv-no { font-family: ui-monospace, monospace; font-size: 15px; margin-top: 2px; }
+.inv-buyer { text-align: right; max-width: 300px; }
+.inv-parties { display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
+  border-bottom: 1px solid #999; padding-bottom: 12px; margin-bottom: 12px; }
+.inv-label { font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+  color: #666; margin-bottom: 3px; }
+.inv-lines { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+.inv-lines th { text-align: left; font-size: 11px; letter-spacing: .06em;
+  text-transform: uppercase; border-bottom: 1px solid #111; padding: 6px 8px; }
+.inv-lines th.num, .inv-lines td.num { text-align: right; }
+.inv-lines td { padding: 7px 8px; border-bottom: 1px solid #e2e2e2;
+  vertical-align: top; }
+.inv-totals { margin-left: auto; width: 300px; }
+.inv-totals > div { display: flex; justify-content: space-between; padding: 4px 8px; }
+.inv-grand { border-top: 1px solid #111; border-bottom: 2px solid #111;
+  font-size: 16px; margin-top: 4px; }
+.inv-due { font-weight: 700; }
+.inv-foot { border-top: 1px solid #ccc; margin-top: 16px; padding-top: 8px; }
+@media print {
+  .invoice-sheet { padding: 0; }
+  .inv-lines { page-break-inside: auto; }
+  .inv-lines tr { page-break-inside: avoid; }
+}
+
+/* --- a movement trail ---------------------------------------------------- */
+.tl { list-style: none; margin: 0; padding: 0; position: relative; }
+.tl::before { content: ''; position: absolute; left: 6px; top: 8px; bottom: 8px;
+  width: 2px; background: var(--line); }
+.tl-item { display: flex; gap: 12px; align-items: flex-start; padding: 7px 0;
+  position: relative; }
+.tl-dot { width: 14px; height: 14px; border-radius: 50%; flex: 0 0 14px;
+  margin-top: 3px; background: var(--bg); border: 2px solid var(--line); z-index: 1; }
+.tl-ok    .tl-dot { border-color: var(--ok); background: var(--ok); }
+.tl-warn  .tl-dot { border-color: var(--warn); background: var(--warn); }
+.tl-danger .tl-dot { border-color: var(--danger); background: var(--danger); }
+.tl-body { flex: 1; min-width: 0; }
+.tl-what { font-weight: 600; }
+.tl-when { white-space: nowrap; }

@@ -125,12 +125,18 @@ export function PackBenchPage() {
   /* Chosen before the price is worked out, because it changes the price.
      Empty means selling from where it stands. */
   const [dest, setDest] = useState('');
+  /* The trip cost for this box, as a lump sum. */
+  const [trip, setTrip] = useState('');
 
   /* The label price, worked out from what this batch cost and the margin set
      on the product. It follows the weight as it is keyed in, because a box
      price without a box size is not a number anybody can check. */
   const dests: any[] = data?.destinations ?? [];
-  const rate = destRate(dests, dest);
+  /* Typed beats the standing rate, and nothing typed with no shop picked means
+     no delivery at all. */
+  const rate = Number(trip) > 0 && Number(qty) > 0
+    ? Number(trip) / Number(qty)
+    : (Number(trip) > 0 ? 0 : destRate(dests, dest));
   const suggested = suggestPrice(data, Number(qty) || 0, margin, rate);
   useEffect(() => {
     const own = priceByGrade[grade];
@@ -155,6 +161,7 @@ export function PackBenchPage() {
         grade,
         price: Number(price) || 0,
         destinationWarehouseId: dest || null,
+        deliveryCost: Number(trip) > 0 ? Number(trip) : undefined,
         note: note.trim() || undefined,
         binCode: binCode.trim() || undefined,
       });
@@ -280,9 +287,25 @@ export function PackBenchPage() {
                 </select>
                 <div className="small muted mt">
                   {dest
-                    ? <>{inr(rate, 2)} a {data.base_uom?.toLowerCase()} to get it there ·{' '}
-                        {dests.find((d: any) => d.warehouse_id === dest)?.rate_source}</>
-                    : <>Nothing added for delivery. Pick a shop and its trip goes into the price.</>}
+                    ? <>Suggested {inr(destRate(dests, dest), 2)} a {data.base_uom?.toLowerCase()}{' '}
+                        · {dests.find((d: any) => d.warehouse_id === dest)?.rate_source}</>
+                    : <>Nothing added for delivery unless you enter a trip cost below.</>}
+                </div>
+              </div>
+              {/* What the trip actually costs, typed. A rate set in an office
+                  cannot know what THIS lorry was agreed at, and the person
+                  packing does. Spread over what is in the box. */}
+              <div className="mt">
+                <label className="lbl">What will it cost to get it there? (₹)</label>
+                <input type="number" step="0.01" min={0} value={trip}
+                  placeholder="optional — leave blank for none"
+                  onChange={(e) => { setTrip(e.target.value); setPricedByHand(false); }} />
+                <div className="small muted mt">
+                  {Number(trip) > 0 && Number(qty) > 0
+                    ? <>{inr(Number(trip), 2)} over {qty} {data.base_uom}{' '}
+                        = <b>{inr(Number(trip) / Number(qty), 2)}</b> a {data.base_uom?.toLowerCase()},
+                        added to what it cost</>
+                    : <>The whole trip, not a rate. It is divided across what is in the box.</>}
                 </div>
               </div>
               <div className="grid c3 mt">
@@ -597,7 +620,9 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
      Defaulted from whichever shop is waiting for this size, if one is. */
   const dests: any[] = bench.destinations ?? [];
   const [dest, setDest] = useState('');
-  const rate = destRate(dests, dest);
+  /* The trip as a lump sum for the whole run — "the lorry to that shop is
+     ₹100" — divided across everything on the run to reach a per-unit figure. */
+  const [trip, setTrip] = useState('');
   const [binCode, setBinCode] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
@@ -614,6 +639,13 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
   /* The whole point of the screen: how many boxes this size fit in what is
      left. Offered rather than imposed — an odd last box is normal. */
   const fits = per > 0 ? Math.floor((free + 0.001) / per) : 0;
+
+  /* Divide the trip by what is on the run. Typed beats the standing rate; a
+     blank box with no shop picked means no delivery at all. */
+  const runUnits = n * per;
+  const rate = Number(trip) > 0
+    ? (runUnits > 0 ? Number(trip) / runUnits : 0)
+    : destRate(dests, dest);
 
   /* The least this box can sell for and still make the margin, given what the
      produce cost, what it costs to handle and what the trip to the shop costs.
@@ -649,6 +681,7 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
                 warehouseId: bench.warehouse_id,
                 binCode: binCode.trim() || undefined,
                 destinationWarehouseId: dest || null,
+                deliveryCost: Number(trip) > 0 ? Number(trip) : undefined,
                 note: note.trim() || undefined,
                 groups: [{
                   count: n, qtyPerPack: per, grade,
@@ -711,10 +744,25 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
           <option value="">Sell from here — no delivery cost</option>
           {dests.filter((d: any) => d.is_centre).map((d: any) => (
             <option key={d.warehouse_id} value={d.warehouse_id}>
-              {d.name} — {inr(d.rate_per_kg, 2)}/{bench.base_uom?.toLowerCase()} to deliver
+              {d.name} — suggested {inr(d.rate_per_kg, 2)}/{bench.base_uom?.toLowerCase()}
             </option>
           ))}
         </select>
+      </div>
+
+      {/* The trip, as one figure for the run. Optional. */}
+      <div className="mb">
+        <label className="lbl">What will it cost to get them there? (₹)</label>
+        <input type="number" step="0.01" min={0} value={trip}
+          placeholder="optional — the whole trip, not a rate"
+          onChange={(e) => { setTrip(e.target.value); setPricedByHand(false); }} />
+        <div className="small muted mt">
+          {Number(trip) > 0 && runUnits > 0
+            ? <>{inr(Number(trip), 2)} over {num(runUnits, 1)} {bench.base_uom}{' '}
+                = <b>{inr(Number(trip) / runUnits, 2)}</b> a {bench.base_uom?.toLowerCase()},
+                added to what each one cost</>
+            : <>Leave it blank and nothing is added for delivery.</>}
+        </div>
       </div>
 
       <div className="grid c2">
@@ -811,9 +859,11 @@ function MakeBoxesModal({ bench, grade: initialGrade, onClose, onDone }: {
             <b>{inr(Number(bench.cost_before_delivery), 2)} / {bench.base_uom?.toLowerCase()}</b>
           </div>
           <div className="perf-line">
-            <span>{dest
-              ? `Delivery to ${dests.find((d: any) => d.warehouse_id === dest)?.name}`
-              : 'Delivery — selling from here'}</span>
+            <span>{Number(trip) > 0
+              ? `Getting them there — ${inr(Number(trip), 0)} over ${num(runUnits, 1)} ${bench.base_uom}`
+              : dest
+                ? `Delivery to ${dests.find((d: any) => d.warehouse_id === dest)?.name}`
+                : 'Delivery — nothing added'}</span>
             <b>{rate > 0 ? `${inr(rate, 2)} / ${bench.base_uom?.toLowerCase()}` : '—'}</b>
           </div>
           <div className="perf-line">

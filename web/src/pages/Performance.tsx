@@ -258,8 +258,6 @@ export function PerformancePage() {
                           <span>Handling — wages, power, cold store, rent</span>
                           <b>{inr(p.unitCost.handling, 2)}</b></div>
                         <div className="perf-line">
-                          <span>Getting it here</span><b>{inr(p.unitCost.freightIn, 2)}</b></div>
-                        <div className="perf-line">
                           <span>Out to the shops</span><b>{inr(p.unitCost.toTheShop, 2)}</b></div>
                         <div className="perf-line">
                           <span><b>Costs us</b></span>

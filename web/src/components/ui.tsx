@@ -548,7 +548,9 @@ export function Layout({ children, title, subtitle, actions, touch }: {
         { to: '/money', label: 'Money In & Out', icon: 'chart',
           perms: ['finance.expense.view'] },
         { to: '/invoices', label: 'Invoices & Match', icon: 'invoice', perms: ['finance.invoice.create', 'finance.invoice.match'] },
-        { to: '/payments', label: 'Payment Status', icon: 'card', perms: ['finance.payment.view'] },
+        /* There was a second entry here for payment status. Its page only ever
+           redirected to this list, so it is one entry now, and the list carries
+           what was paid and what is still owed. */
       ],
     },
     {

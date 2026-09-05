@@ -5,6 +5,8 @@ import {
   FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
+import { InvoiceSheet } from '../components/InvoiceSheet';
+import { Timeline } from '../components/Timeline';
 
 /* ===========================================================================
  * THE SUPPLIER'S OWN SCREEN
@@ -35,6 +37,12 @@ export function SupplierPortalPage() {
   const [billing, setBilling] = useState<any>(null);
   const [pricing, setPricing] = useState<any>(null);
   const [askingVehicle, setAskingVehicle] = useState<any>(null);
+  /* Their own copy of their own bill — the same document the buyer prints. */
+  const [printingInvoice, setPrintingInvoice] = useState<string | null>(null);
+  /* What happened to one of their loads. Until this was here a supplier had no
+     way to see that their goods had arrived, been checked and been paid for —
+     they had to telephone and ask. */
+  const [tracking, setTracking] = useState<any>(null);
   const [addingProduct, setAddingProduct] = useState(false);
 
   const meSup = useApi<any>('/supplier/me');
@@ -230,6 +238,10 @@ export function SupplierPortalPage() {
                   onAsk={() => setAskingFor(o)}
                   onSend={() => setSending(o)} />
               ) },
+              /* Every movement on their own load, in their own words. */
+              { key: 'tl', head: '', width: 80, render: (o: any) => (
+                <button className="btn sm ghost" onClick={() => setTracking(o)}>Track</button>
+              ) },
               /* Whether a lorry is coming, and a way to ask for one. Until
                  this was here the only way to ask was the telephone. */
               { key: 'tr', head: 'Transport', render: (o: any) => (
@@ -395,6 +407,13 @@ export function SupplierPortalPage() {
               { key: 'd', head: 'Due', render: (i: any) => i.due_date ? date(i.due_date) : '—' },
               { key: 'b', head: 'Outstanding', num: true, render: (i: any) =>
                 i.balance == null ? <span className="muted">—</span> : inr(i.balance, 0) },
+              /* A supplier chasing payment needs a copy to send, and it has to
+                 be the same paper the buyer is holding. */
+              { key: 'pr', head: '', width: 80, render: (i: any) => (
+                <button className="btn sm ghost" onClick={() => setPrintingInvoice(i.id)}>
+                  <Icon name="inbox" size={14} /> Print
+                </button>
+              ) },
               { key: 'nt', head: 'Notes', render: (i: any) => (i.notes ?? []).length
                 ? <div className="btn-row">{(i.notes ?? []).map((n: any) => (
                     <Chip key={n.noteNo} tone={n.type === 'DEBIT' ? 'danger' : 'primary'}>
@@ -482,6 +501,20 @@ export function SupplierPortalPage() {
           />
         </div></div>
         </>
+      ) : null}
+
+      {tracking ? (
+        <Modal title={`${tracking.po_no} — what has happened`}
+          onClose={() => setTracking(null)} wide
+          footer={<button className="btn" onClick={() => setTracking(null)}>Close</button>}>
+          <Timeline endpoint={`/supplier/orders/${tracking.id}/timeline`}
+            title="Your load, step by step" />
+        </Modal>
+      ) : null}
+
+      {printingInvoice ? (
+        <InvoiceSheet invoiceId={printingInvoice} endpoint="/supplier/invoices"
+          onClose={() => setPrintingInvoice(null)} />
       ) : null}
 
       {addingProduct ? (

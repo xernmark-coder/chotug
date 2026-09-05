@@ -158,7 +158,8 @@ export default function App() {
       <Route path="/invoices" element={<InvoiceListPage />} />
       <Route path="/invoices/new" element={<InvoiceCreatePage />} />
       <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
-      <Route path="/payments" element={<PaymentsPage />} />
+      {/* Merged into the invoice list, which is where it was redirecting. */}
+      <Route path="/payments" element={<Navigate to="/invoices" replace />} />
       <Route path="/suppliers" element={<Navigate to="/analytics?tab=Suppliers" replace />} />
 
       {/* Farming. /farm is the field worker's whole application. */}

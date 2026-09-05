@@ -5,6 +5,7 @@ import {
   AiBox, Chip, Col, DataTable, Empty, ErrorBanner, Field, Layout, Loading, Modal, Steps, useApi, useToast,  FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
+import { Timeline } from '../components/Timeline';
 import { SupplierModal } from './Finance';
 import { ProductModal } from './Catalogue';
 
@@ -820,6 +821,11 @@ export function PoDetailPage() {
               </div>
             </div>
           ) : null}
+
+          {/* Every step, read back from the events each one already wrote.
+              Nothing read them until now, which is how an order paid for but
+              never accepted looked no different from one done properly. */}
+          <Timeline endpoint={`/planning/purchase-orders/${id}/timeline`} />
         </div>
 
         <div className="stack">

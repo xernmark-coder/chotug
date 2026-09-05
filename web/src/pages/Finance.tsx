@@ -14,21 +14,38 @@ export function InvoiceListPage() {
   const { can } = useAuth();
   const { data, loading, error } = useApi<any[]>('/costing/invoices');
 
+  /* Payment Status was a separate page that only ever redirected here: the
+     same invoices, asked "has it been paid" instead of "does it match". One
+     page, with the money on it, and enough ways to narrow it that the second
+     page has nothing left to answer. */
   const f = useFilters<any>(data, {
     date: (i) => i.invoice_date,
-    search: (i) => [i.invoice_no, i.supplier_name, i.po_no].filter(Boolean).join(' '),
+    search: (i) => [i.invoice_no, i.supplier_name, i.po_no, i.products]
+      .filter(Boolean).join(' '),
     facets: [
       { key: 'status', label: 'status', of: (i) => i.status },
       { key: 'supplier', label: 'supplier', of: (i) => i.supplier_name },
+      { key: 'paid', label: 'payment', all: 'Paid or not', of: (i) =>
+        (Number(i.balance ?? i.total) <= 0.01 ? 'settled'
+          : Number(i.paid_amount) > 0 ? 'part paid' : 'nothing paid yet') },
+      { key: 'age', label: 'age', all: 'Any age', of: (i) =>
+        (Number(i.overdue_days) > 7 ? 'more than a week late'
+          : Number(i.overdue_days) > 0 ? 'late'
+          : 'in time') },
+      { key: 'rcpt', label: 'goods', all: 'Received or not', of: (i) =>
+        (i.receipt_status === 'RECEIVED' ? 'goods received'
+          : i.receipt_status === 'PARTIAL' ? 'part received' : 'nothing received') },
     ],
     totals: [
       { label: 'Billed', of: (i) => Number(i.total), money: true },
+      { label: 'Paid', of: (i) => Number(i.paid_amount ?? 0), money: true },
       { label: 'Still owed', of: (i) => Number(i.balance ?? 0), money: true },
     ],
   });
 
   return (
-    <Layout title="Supplier invoices" subtitle="What arrived, what is owed, and what needs action"
+    <Layout title="Invoices &amp; payment"
+      subtitle="What arrived, what it matched, and what is still owed"
       actions={can('finance.invoice.create')
         ? <button className="btn primary" onClick={() => nav('/invoices/new')}>Capture invoice</button>
         : undefined}>
@@ -74,8 +91,22 @@ export function InvoiceListPage() {
             { key: 'm', head: 'Reconciliation', render: (i: any) =>
               i.match_result && i.match_result !== 'MATCH' ? <Chip value={i.match_result} />
                 : <span className="muted small">updated from receipt</span> },
-            { key: 'b', head: 'Balance', num: true, render: (i: any) =>
-              i.balance != null ? inr(i.balance) : '—' },
+            /* The money, on the same row — this is what the separate Payment
+               Status page existed to say, and it said it about these very
+               invoices. */
+            { key: 'pd', head: 'Paid', num: true, desc: true,
+              sort: (i: any) => Number(i.paid_amount) || 0, render: (i: any) =>
+              Number(i.paid_amount) > 0 ? inr(i.paid_amount) : <span className="muted">—</span> },
+            { key: 'b', head: 'Still owed', num: true, desc: true,
+              sort: (i: any) => Number(i.balance) || 0, render: (i: any) =>
+              i.balance == null ? <span className="muted">—</span>
+                : Number(i.balance) <= 0.01
+                  ? <Chip tone="ok">settled</Chip>
+                  : <div><b className={Number(i.overdue_days) > 0 ? 'text-danger' : ''}>
+                        {inr(i.balance)}</b>
+                      {Number(i.overdue_days) > 0
+                        ? <div className="small muted">{num(i.overdue_days, 0)} days late</div>
+                        : null}</div> },
             { key: 'st', head: 'Status', render: (i: any) => <Chip value={i.status} /> },
           ]}
           empty={<Empty icon="🧾" title="No invoices captured yet" />}

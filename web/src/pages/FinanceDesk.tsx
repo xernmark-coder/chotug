@@ -9,6 +9,7 @@ import {
   FilterBar, FilterTotals, useFilters,
 } from '../components/ui';
 import { Icon } from '../components/icons';
+import { InvoiceSheet } from '../components/InvoiceSheet';
 
 /* ===========================================================================
  * THE FINANCE DESK
@@ -38,8 +39,12 @@ export function FinanceDeskPage() {
 function TheDesk() {
   const toast = useToast();
   const { can } = useAuth();
-  const [tab, setTab] = useState<'verify' | 'pay' | 'dues' | 'in' | 'paid' | 'spent'>('verify');
+  const [tab, setTab] = useState<
+    'verify' | 'pay' | 'dues' | 'in' | 'paid' | 'spent' | 'all'>('verify');
   const [range, setRange] = useState(30);
+  /* The month's movement, folded away. It is worth knowing and it is not what
+     anybody opens this desk for. */
+  const [showFlow, setShowFlow] = useState(false);
 
   const from = useMemo(() => {
     const d = new Date(); d.setDate(d.getDate() - range);
@@ -59,7 +64,14 @@ function TheDesk() {
      the load without waiting for the money. Not a queue of decisions like the
      rest of this desk: these are settled, not judged. */
   const dues = useApi<any[]>(can('finance.due.view') ? '/finance/dues' : null);
+  /* Every claim, in one place. Six queues each answer a different question and
+     none of them answers "where has that payment got to" — which is the one
+     somebody walks over to this desk to ask. */
+  const allRequests = useApi<any[]>('/finance/requests');
   const [opening, setOpening] = useState<any>(null);
+  /* The bill itself, printable. Finance is the desk that gets asked for a copy
+     — by the supplier chasing payment, and by whoever files it. */
+  const [printingInvoice, setPrintingInvoice] = useState<string | null>(null);
 
   const [verifying, setVerifying] = useState<any>(null);
   const [paying, setPaying] = useState<any>(null);
@@ -89,10 +101,12 @@ function TheDesk() {
   });
   const fDues = useFilters<any>(dues.data, {
     date: (d: any) => d.became_due_at,
-    search: (d: any) => [d.payee_name, d.request_no, d.po_no, d.invoice_no, d.due_reason]
-      .filter(Boolean).join(' '),
+    search: (d: any) => [d.payee_name, d.request_no, d.po_no, d.invoice_no, d.due_reason,
+      d.products].filter(Boolean).join(' '),
     facets: [
       { key: 'sup', label: 'supplier', of: (d: any) => d.payee_name },
+      { key: 'prod', label: 'product', of: (d: any) =>
+        (d.products ? d.products.split(', ')[0] : null) },
       { key: 'lt', label: 'timing', all: 'Late or not', of: (d: any) =>
         (d.overdue ? 'past due' : 'not due yet') },
       { key: 'st', label: 'status', of: (d: any) => d.status },
@@ -102,12 +116,20 @@ function TheDesk() {
       { label: 'Past due', of: (d: any) => (d.overdue ? Number(d.balance) || 0 : 0), money: true },
     ],
   });
+  const fAll = useFilters<any>(allRequests.data, {
+    ...requestFilterSpec(),
+    facets: [
+      { key: 'st', label: 'state', all: 'Any state', of: (r: any) =>
+        String(r.status ?? '').toLowerCase().replace('_', ' ') },
+      ...requestFilterSpec().facets,
+    ],
+  });
   const fIn = useFilters<any>(openReceipts, receiptFilterSpec());
   const fSettled = useFilters<any>(settledReceipts, receiptFilterSpec());
 
   const reloadAll = () => {
     overview.reload(); toVerify.reload(); toPay.reload(); partPaid.reload(); receipts.reload();
-    dues.reload();
+    dues.reload(); allRequests.reload();
   };
 
   const netFlow = Number(k.collected ?? 0) - Number(k.paid_out ?? 0);
@@ -134,6 +156,9 @@ function TheDesk() {
     >
       <ErrorBanner error={overview.error} />
 
+      <div className="section-head sm">
+        <h3>Needs somebody today</h3><span className="rule" />
+      </div>
       <div className="grid c4 mb">
         <Kpi label="Waiting to be verified" value={k.to_verify ?? 0}
           tone={(k.to_verify ?? 0) > 0 ? 'warn' : 'good'}
@@ -157,24 +182,29 @@ function TheDesk() {
           onClick={() => setTab('dues')} />
       </div>
 
-      <div className="grid c4 mb">
-        <Kpi label={`Paid out, ${range} days`} value={inr(k.paid_out, 0)}
-          foot={`${inr(k.paid_today, 0)} today`} onClick={() => setTab('spent')} />
-        <Kpi label={`Collected, ${range} days`} value={inr(k.collected, 0)} />
-        <Kpi label="Net movement" value={inr(netFlow, 0)}
-          tone={netFlow < 0 ? 'warn' : 'good'}
-          foot={netFlow < 0 ? 'more went out than came in' : 'more came in than went out'} />
-        <Kpi label="Committed, not yet paid" value={inr(k.committed, 0)}
-          foot={`incl. ${inr(k.supplier_outstanding, 0)} on open invoices`} />
-        <Kpi label="Cash vs online"
-          value={(() => {
-            const m = overview.data?.byMode ?? [];
-            const cash = Number(m.find((x: any) => x.mode === 'CASH')?.amount ?? 0);
-            const all = m.reduce((a: number, x: any) => a + Number(x.amount), 0);
-            return all > 0 ? `${num((cash / all) * 100, 0)}% cash` : '—';
-          })()}
-          foot="of everything paid out" />
+      {/* Nine tiles in two undifferentiated rows made the desk hard to read:
+          the four that are somebody's job today sat beside five that are just
+          how the month is going. Split, and the second half folded away — it is
+          worth knowing and it is not what anybody opens this screen for. */}
+      <div className="section-head sm">
+        <h3>How the {range} days are going</h3>
+        <span className="rule" />
+        <button className="btn sm ghost" onClick={() => setShowFlow((v) => !v)}>
+          {showFlow ? 'hide' : 'show'}
+        </button>
       </div>
+      {showFlow ? (
+        <div className="grid c4 mb">
+          <Kpi label={`Paid out, ${range} days`} value={inr(k.paid_out, 0)}
+            foot={`${inr(k.paid_today, 0)} today`} onClick={() => setTab('spent')} />
+          <Kpi label={`Collected, ${range} days`} value={inr(k.collected, 0)} />
+          <Kpi label="Net movement" value={inr(netFlow, 0)}
+            tone={netFlow < 0 ? 'warn' : 'good'}
+            foot={netFlow < 0 ? 'more went out than came in' : 'more came in than went out'} />
+          <Kpi label="Committed, not yet paid" value={inr(k.committed, 0)}
+            foot={`incl. ${inr(k.supplier_outstanding, 0)} on open invoices`} />
+        </div>
+      ) : null}
 
       <div className="tabs">
         {([['verify', `To verify (${k.to_verify ?? 0})`],
@@ -182,7 +212,8 @@ function TheDesk() {
            ['dues', `Dues (${(dues.data ?? []).length})`],
            ['in', `Coming in (${openReceipts.length})`],
            ['paid', `Paid (${(paid.data ?? []).length})`],
-           ['spent', 'Where it went']] as const).map(([key, label]) => (
+           ['spent', 'Where it went'],
+           ['all', `Every claim (${(allRequests.data ?? []).length})`]] as const).map(([key, label]) => (
           <button key={key} className={`tab ${tab === key ? 'active' : ''}`}
             onClick={() => setTab(key)}>{label}</button>
         ))}
@@ -198,7 +229,7 @@ function TheDesk() {
             rows={fVerify.rows}
             rowTone={(r: any) => (r.overdue ? 'crit' : r.priority === 'URGENT' ? 'warn' : undefined)}
             cols={[
-              ...requestCols(),
+              ...requestCols(setPrintingInvoice),
               { key: 'a', head: '', width: 120, render: (r: any) =>
                 can('finance.request.verify')
                   ? <button className="btn sm primary" onClick={() => setVerifying(r)}>Check it</button>
@@ -222,7 +253,7 @@ function TheDesk() {
             rows={fPay.rows}
             rowTone={(r: any) => (r.overdue ? 'crit' : undefined)}
             cols={[
-              ...requestCols(),
+              ...requestCols(setPrintingInvoice),
               { key: 'b', head: 'Outstanding', num: true, render: (r: any) => (
                 <b>{inr(Number(r.amount) - Number(r.paid_amount), 0)}</b>) },
               { key: 'a', head: '', width: 110, render: (r: any) =>
@@ -267,6 +298,7 @@ function TheDesk() {
                 { key: 'g', head: 'Against', sort: (d: any) => d.po_no, render: (d: any) => (
                   <div className="small">
                     {d.po_no ? <b className="mono">{d.po_no}</b> : <span className="muted">no order</span>}
+                    {d.products ? <div>{d.products}</div> : null}
                     {d.invoice_no ? <div className="muted">invoice {d.invoice_no}</div> : null}
                   </div>
                 ) },
@@ -383,7 +415,7 @@ function TheDesk() {
               rows={fPaid.rows}
               onRowClick={(r: any) => setOpening(r)}
               cols={[
-                ...requestCols(),
+                ...requestCols(setPrintingInvoice),
                 { key: 'pd', head: 'Paid', num: true, render: (r: any) => (
                   <b>{inr(r.paid_amount, 0)}</b>) },
                 { key: 'go', head: '', width: 90,
@@ -396,9 +428,52 @@ function TheDesk() {
         </>
       ) : null}
 
+      {tab === 'all' ? (
+        <>
+          {/* One list of everything, whatever state it is in. The six queues
+              above each answer "what should I do next"; this answers "where has
+              that one got to", which is the question people walk over to ask. */}
+          <FilterBar f={fAll}
+            placeholder="Search an order, a product, a payee, a request number" />
+          <FilterTotals f={fAll} noun="claim" />
+          <div className="card"><div className="card-body tight">
+            <DataTable
+              loading={allRequests.loading}
+              rows={fAll.rows}
+              onRowClick={(r: any) => setOpening(r)}
+              rowTone={(r: any) => (r.status === 'REJECTED' ? 'crit'
+                : r.overdue && r.status !== 'PAID' ? 'warn' : undefined)}
+              cols={[
+                ...requestCols(setPrintingInvoice),
+                { key: 'st', head: 'State', render: (r: any) => (
+                  <Chip tone={r.status === 'PAID' ? 'ok'
+                    : r.status === 'REJECTED' || r.status === 'CANCELLED' ? 'danger'
+                    : r.status === 'PART_PAID' ? 'warn' : 'neutral'}>
+                    {String(r.status).toLowerCase().replace('_', ' ')}
+                  </Chip>
+                ) },
+                { key: 'bal', head: 'Still owed', num: true, render: (r: any) =>
+                  Number(r.balance) > 0.01
+                    ? <b>{inr(r.balance, 0)}</b>
+                    : <span className="muted small">settled</span> },
+                { key: 'go', head: '', width: 90,
+                  render: () => <span className="btn sm ghost">Open</span> },
+              ]}
+              empty={<Empty icon="🔎" title={fAll.active > 0
+                ? 'No claim matches those filters' : 'No claims yet'} />}
+            />
+          </div></div>
+        </>
+      ) : null}
+
+      {printingInvoice ? (
+        <InvoiceSheet invoiceId={printingInvoice}
+          onClose={() => setPrintingInvoice(null)} />
+      ) : null}
+
       {opening ? (
         <PaymentsModal request={opening} onClose={() => setOpening(null)}
-          onDone={(m) => { setOpening(null); paid.reload(); overview.reload(); toast(m, 'ok'); }} />
+          onDone={(m) => { setOpening(null); reloadAll(); toast(m, 'ok'); }} />
       ) : null}
 
       {tab === 'spent' ? (
@@ -496,7 +571,7 @@ function requestFilterSpec() {
   return {
     date: (r: any) => r.requested_at,
     search: (r: any) => [r.payee_name, r.request_no, r.note, r.supplier_name,
-      r.requested_by_name, r.expense_category,
+      r.requested_by_name, r.expense_category, r.po_no, r.invoice_no, r.products,
       ...(r.goods ?? []).map((g: any) => g.productName)].filter(Boolean).join(' '),
     facets: [
       { key: 'payee', label: 'payee', of: (r: any) => r.payee_name },
@@ -506,9 +581,25 @@ function requestFilterSpec() {
       { key: 'pri', label: 'priority', of: (r: any) => r.priority },
       { key: 'by', label: 'asked by', of: (r: any) =>
         (r.is_system_raised ? 'the system' : r.requested_by_name) },
+      /* The three questions actually asked at this desk: what did we buy, on
+         which order, and is it late. */
+      { key: 'prod', label: 'product', of: (r: any) =>
+        (r.goods ?? [])[0]?.productName ?? (r.products ? r.products.split(', ')[0] : null) },
+      { key: 'po', label: 'order', all: 'On an order or not', of: (r: any) =>
+        (r.po_no ? 'against an order' : 'no order behind it') },
+      { key: 'acc', label: 'supplier', all: 'Accepted or not', of: (r: any) =>
+        (r.supplier_response === 'PENDING' ? 'has not accepted yet'
+          : r.supplier_response === 'DECLINED' ? 'declined'
+          : r.supplier_response === 'ACCEPTED' ? 'accepted' : 'no order behind it') },
+      { key: 'late', label: 'timing', all: 'Late or not', of: (r: any) =>
+        (r.overdue ? 'past due' : r.due_date ? 'in time' : 'no date set') },
+      { key: 'frt', label: 'transport', all: 'Any', of: (r: any) =>
+        (r.transport_amount != null ? 'includes transport' : 'goods only') },
     ],
     totals: [
       { label: 'Asked for', of: (r: any) => Number(r.amount), money: true },
+      { label: 'Still owed', of: (r: any) => Number(r.balance) || 0, money: true },
+      { label: 'Of it transport', of: (r: any) => Number(r.transport_amount) || 0, money: true },
     ],
   };
 }
@@ -532,7 +623,7 @@ function receiptFilterSpec() {
   };
 }
 
-function requestCols() {
+function requestCols(onPrint?: (invoiceId: string) => void) {
   return [
     { key: 'w', head: 'Who', render: (r: any) => (
       <div className="row" style={{ gap: 8 }}>
@@ -569,6 +660,11 @@ function requestCols() {
         </div>
       ) : (
         <div className="stack" style={{ gap: 1 }}>
+          {/* No priced lines behind it — an expense, a wage run, a fare. Name
+              the produce if the order knows it, and the note otherwise. */}
+          {r.products
+            ? <span className="small"><b>{r.products}</b></span>
+            : null}
           <span className="muted small">{r.note ?? '—'}</span>
           {r.transport_amount != null ? (
             <span className="small muted">
@@ -578,12 +674,30 @@ function requestCols() {
         </div>
       )
     ) },
-    { key: 'n', head: 'Request', render: (r: any) => (
-      <div><span className="mono small">{r.request_no}</span>
-        {r.note ? <div className="small muted">{r.note}</div> : null}</div>) },
-    { key: 'p', head: '', render: (r: any) =>
-      r.priority === 'URGENT' ? <Chip tone="danger">urgent</Chip>
-      : r.priority === 'HIGH' ? <Chip tone="warn">high</Chip> : null },
+    /* The order, on the row. Finance, the buyer, the gate and the supplier all
+       call one load by its PO number; a claim that only carries its own request
+       number makes everybody look it up somewhere else before approving it. */
+    { key: 'n', head: 'For which order', sort: (r: any) => r.po_no ?? '', render: (r: any) => (
+      <div>
+        {r.po_no
+          ? <b className="mono small">{r.po_no}</b>
+          : <span className="muted small">no order</span>}
+        {r.invoice_no ? <div className="small muted">invoice {r.invoice_no}</div> : null}
+        <div className="small muted mono">{r.request_no}</div>
+      </div>) },
+    { key: 'p', head: '', render: (r: any) => (
+      <div>
+        {/* Nothing is owed on an order the supplier has not agreed to send.
+            Said on the row, so nobody works through a queue of claims that
+            cannot be paid and wonders why. */}
+        {r.supplier_response === 'PENDING' ? (
+          <Chip tone="warn">supplier has not accepted</Chip>
+        ) : r.supplier_response === 'DECLINED' ? (
+          <Chip tone="danger">supplier declined</Chip>
+        ) : null}
+        {r.priority === 'URGENT' ? <Chip tone="danger">urgent</Chip>
+          : r.priority === 'HIGH' ? <Chip tone="warn">high</Chip> : null}
+      </div>) },
     { key: 'd', head: 'Due', render: (r: any) => (
       r.due_date
         ? <span className={r.overdue ? 'chip danger' : 'small'}>{date(r.due_date)}</span>
@@ -591,6 +705,15 @@ function requestCols() {
     { key: 'r', head: 'Asked by', render: (r: any) => (
       <span className="small muted">{r.is_system_raised ? 'the system' : r.requested_by_name}</span>) },
     { key: 'v', head: 'Amount', num: true, render: (r: any) => <b>{inr(r.amount, 0)}</b> },
+    /* Only where there is a bill to print. A wage run or a fare has no
+       invoice, and a button that opens nothing is worse than no button. */
+    { key: 'pr', head: '', width: 60, render: (r: any) =>
+      r.source_type === 'supplier_invoice' && r.source_id ? (
+        <button className="btn sm ghost" title="Print this invoice"
+          onClick={(e: any) => { e.stopPropagation(); onPrint?.(r.source_id); }}>
+          <Icon name="inbox" size={14} />
+        </button>
+      ) : null },
   ];
 }
 
@@ -1218,15 +1341,34 @@ function PaymentsModal({ request, onClose, onDone }: {
 
   return (
     <Modal
-      title={`${request.request_no} · ${request.payee_name}`}
+      title={`${request.po_no ?? request.request_no} · ${request.payee_name}`}
       onClose={onClose}
       footer={<button className="btn" onClick={onClose}>Close</button>}
     >
       <dl className="kv mb">
         <dt>Asked for</dt><dd>{inr(request.amount, 0)}</dd>
         <dt>Paid</dt><dd><b>{inr(request.paid_amount, 0)}</b></dd>
+        {Number(request.balance) > 0.01
+          ? <><dt>Still owed</dt><dd><b>{inr(request.balance, 0)}</b></dd></> : null}
         <dt>What for</dt>
         <dd>{request.expense_category ?? String(request.kind).replace(/_/g, ' ').toLowerCase()}</dd>
+        {/* The order, in the detail as well as the list — this is the panel
+            somebody opens to answer a supplier on the telephone, and "which
+            load?" is their first question. */}
+        {request.po_no ? (
+          <><dt>Order</dt>
+            <dd><b className="mono">{request.po_no}</b>
+              {request.invoice_no ? <> · invoice {request.invoice_no}</> : null}</dd></>
+        ) : null}
+        {(request.goods ?? []).length ? (
+          <><dt>Goods</dt><dd>{(request.goods ?? []).map((g: any) =>
+            `${num(g.qty, 0)} ${g.uom} ${g.productName}`).join(' · ')}</dd></>
+        ) : request.products ? (
+          <><dt>Goods</dt><dd>{request.products}</dd></>
+        ) : null}
+        {request.transport_amount != null ? (
+          <><dt>Of which transport</dt><dd>{inr(request.transport_amount, 0)}</dd></>
+        ) : null}
         {request.note ? <><dt>Note</dt><dd>{request.note}</dd></> : null}
       </dl>
 

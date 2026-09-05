@@ -28,7 +28,7 @@ export function GrnListPage() {
       { label: 'Accepted', of: (g: any) => Number(g.total_accepted_qty) || 0 },
       { label: 'Rejected', of: (g: any) => Number(g.total_rejected_qty) || 0 },
       { label: 'Net kg', of: (g: any) => Number(g.total_net_weight_kg) || 0, decimals: 1 },
-      { label: 'Value', of: (g: any) => Number(g.total_value) || 0, money: true },
+      { label: 'Value', of: (g: any) => Number(g.landed_value ?? g.total_value) || 0, money: true },
     ],
   });
 
@@ -57,7 +57,14 @@ export function GrnListPage() {
               Number(g.total_rejected_qty) > 0
                 ? <b style={{ color: 'var(--danger)' }}>{num(g.total_rejected_qty, 0)}</b> : '—' },
             { key: 'w', head: 'Net kg', num: true, render: (g: any) => num(g.total_net_weight_kg, 1) },
-            { key: 'val', head: 'Value', num: true, render: (g: any) => inr(g.total_value, 0) },
+            /* What was paid for the load, not what the goods alone were
+               billed at — the freight is part of what this produce cost. */
+            { key: 'val', head: 'Value', num: true, render: (g: any) => (
+              <span><b>{inr(g.landed_value ?? g.total_value, 0)}</b>
+                {Number(g.landed_value) > Number(g.total_value) + 0.01 ? (
+                  <div className="small muted">{inr(g.total_value, 0)} goods</div>
+                ) : null}</span>
+            ) },
             { key: 'lc', head: 'Landed cost', render: (g: any) =>
               Number(g.has_landing_cost) > 0 ? <Chip tone="ok">computed</Chip> : <Chip tone="warn">pending</Chip> },
             { key: 'st', head: 'Status', render: (g: any) => <Chip value={g.status} /> },
@@ -107,18 +114,47 @@ export function GrnDetailPage() {
           floor and the batch they belong to has only just come into existence,
           so the next step goes at the top rather than as a button in the last
           column of a wide table. */}
+      {/* Only while something is actually still out. This used to be asserted
+          rather than checked, so a receipt whose produce had been packed and
+          shelved days ago still insisted the crates were on the floor. */}
       {data.status === 'POSTED' && can('inventory.pack.grade')
-        && (data.lines ?? []).some((l: any) => l.batch_id) ? (
+        && (data.lines ?? []).some((l: any) =>
+             l.batch_id && (Number(l.still_loose) > 0.001 || Number(l.boxes_on_the_bench) > 0)) ? (
         <div className="banner info mb">
           <span><Icon name="tag" size={16} /></span>
           <div>
-            <b>Booked in — the crates are still on the floor.</b>{' '}
+            <b>{(() => {
+              const loose = (data.lines ?? []).reduce(
+                (a: number, l: any) => a + Math.max(0, Number(l.still_loose) || 0), 0);
+              const bench = (data.lines ?? []).reduce(
+                (a: number, l: any) => a + (Number(l.boxes_on_the_bench) || 0), 0);
+              if (loose > 0.001 && bench > 0) {
+                return `${num(loose, 1)} still loose and ${bench} box(es) waiting on the bench.`;
+              }
+              if (loose > 0.001) return `${num(loose, 1)} still loose on the floor.`;
+              return `${bench} box(es) packed but not yet on a shelf.`;
+            })()}</b>{' '}
             Grade each box as you pack it, label it, and scan it onto a shelf.
           </div>
           <button className="btn sm primary"
-            onClick={() => nav(`/pack-bench/${(data.lines ?? []).find((l: any) => l.batch_id).batch_id}`)}>
+            onClick={() => nav(`/pack-bench/${(data.lines ?? []).find((l: any) =>
+              l.batch_id && (Number(l.still_loose) > 0.001 || Number(l.boxes_on_the_bench) > 0)).batch_id}`)}>
             Grade &amp; pack &rarr;
           </button>
+        </div>
+      ) : null}
+      {/* The other half of the same fact: when it is all away, say so. A screen
+          that only ever nags and never confirms teaches people to ignore it. */}
+      {data.status === 'POSTED' && (data.lines ?? []).some((l: any) => l.batch_id)
+        && !(data.lines ?? []).some((l: any) =>
+             Number(l.still_loose) > 0.001 || Number(l.boxes_on_the_bench) > 0) ? (
+        <div className="banner ok mb">
+          <span><Icon name="tag" size={16} /></span>
+          <div>
+            <b>All of it is packed and on a shelf.</b>{' '}
+            {(data.lines ?? []).reduce(
+              (a: number, l: any) => a + (Number(l.boxes_on_a_shelf) || 0), 0)} box(es) stored.
+          </div>
         </div>
       ) : null}
       {data.is_backdated ? (
@@ -159,7 +195,14 @@ export function GrnDetailPage() {
                   { key: 'g', head: 'Grade', render: (l: any) => <Chip tone="neutral">{l.grade ?? '—'}</Chip> },
                   { key: 'q', head: 'QC score', num: true, render: (l: any) =>
                     l.quality_score != null ? num(l.quality_score, 0) : '—' },
-                  { key: 'v', head: 'Value', num: true, render: (l: any) => inr(l.line_value) },
+                  { key: 'v', head: 'Value', num: true, render: (l: any) => (
+                    <span><b>{inr(l.landed_value ?? l.line_value)}</b>
+                      {Number(l.charges_here) > 0.01 ? (
+                        <div className="small muted">
+                          {inr(l.line_value, 0)} + {inr(l.charges_here, 0)} freight
+                        </div>
+                      ) : null}</span>
+                  ) },
                   /* Straight from the receipt to the bench. Quality and packing
                      are one job, and the person who does it should not have to
                      go and find the batch on another screen. */
@@ -234,7 +277,13 @@ export function GrnDetailPage() {
               <dt>Accepted</dt><dd>{num(data.total_accepted_qty, 0)}</dd>
               <dt>Rejected</dt><dd>{num(data.total_rejected_qty, 0)}</dd>
               <dt>Net weight</dt><dd>{num(data.total_net_weight_kg, 1)} kg</dd>
-              <dt>Value</dt><dd>{inr(data.total_value)}</dd>
+              <dt>Value</dt>
+              <dd><b>{inr(data.landed_value ?? data.total_value)}</b>
+                {Number(data.freight_and_charges) > 0.01 ? (
+                  <div className="small muted">
+                    {inr(data.total_value, 0)} goods + {inr(data.freight_and_charges, 0)} freight
+                  </div>
+                ) : null}</dd>
               <dt>Posted by</dt><dd>{data.posted_by_name}</dd>
               <dt>Posted at</dt><dd>{dateTime(data.posted_at)}</dd>
             </dl>
